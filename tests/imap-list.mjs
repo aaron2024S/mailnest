@@ -24,46 +24,70 @@ const server = net.createServer((sock) => {
       buf = buf.slice(idx + 2);
       const m = line.match(/^(\S+)\s+(\S+)(?:\s+(.*))?$/);
       if (!m) continue;
-      const [, tag, cmd, rest = ''] = m;
+      const [, tag, cmd0, rest0 = ''] = m;
+      // UID FETCH / UID STORE 等带 UID 前缀的命令：剥掉前缀再按子命令分发
+      const isUid = cmd0.toUpperCase() === 'UID';
+      const tag2 = tag, cmd = isUid ? rest0.split(/\s+/)[0] : cmd0;
+      const rest = isUid ? rest0.slice(rest0.split(/\s+/)[0].length).trim() : rest0;
       const C = cmd.toUpperCase();
       if (C === 'CAPABILITY') {
-        sock.write(`* CAPABILITY IMAP4rev1 ID\r\n${tag} OK done\r\n`);
+        sock.write(`* CAPABILITY IMAP4rev1 ID\r\n${tag2} OK done\r\n`);
       } else if (C === 'ID') {
-        sock.write(`* ID ("name" "mock")\r\n${tag} OK done\r\n`);
+        sock.write(`* ID ("name" "mock")\r\n${tag2} OK done\r\n`);
       } else if (C === 'LOGIN') {
-        sock.write(`${tag} OK [CAPABILITY IMAP4rev1 ID] logged in\r\n`);
+        sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 ID] logged in\r\n`);
       } else if (C === 'SELECT' || C === 'EXAMINE') {
         sock.write('* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n');
         sock.write(`* ${COUNT} EXISTS\r\n* 0 RECENT\r\n`);
         sock.write('* OK [UIDVALIDITY 1] ok\r\n* OK [UIDNEXT 115] ok\r\n');
-        sock.write(`${tag} OK [READ-WRITE] selected\r\n`);
+        sock.write(`${tag2} OK [READ-WRITE] selected\r\n`);
       } else if (C === 'LIST') {
         sock.write('* LIST (\\HasNoChildren) "/" "INBOX"\r\n');
         sock.write('* LIST (\\HasNoChildren \\Trash) "/" "Trash"\r\n');
         sock.write('* LIST (\\HasNoChildren \\Sent) "/" "Sent"\r\n');
-        sock.write(`${tag} OK done\r\n`);
+        sock.write(`${tag2} OK done\r\n`);
       } else if (C === 'STATUS') {
-        sock.write(`* STATUS ${rest.split(/\s+/).slice(0, -1).join(' ')} (UNSEEN 14)\r\n${tag} OK done\r\n`);
+        sock.write(`* STATUS ${rest.split(/\s+/).slice(0, -1).join(' ')} (UNSEEN 14)\r\n${tag2} OK done\r\n`);
       } else if (C === 'FETCH') {
         const range = rest.split(/\s+/)[0];
+        // 正文抓取：UID FETCH n (UID FLAGS BODY[].PEEK[]) —— 返回带 literal 的完整源码
+        if (/BODY(\.PEEK)?\[/i.test(rest)) {
+          const uid = parseInt(range, 10);
+          const seq = uid - 100;
+          const raw = [
+            'From: =?UTF-8?B?5byg5LiJ?= <zhangsan@qq.com>',
+            'To: me <me@qq.com>',
+            `Subject: =?UTF-8?B?${Buffer.from(`测试邮件 ${seq}`, 'utf8').toString('base64')}?=`,
+            'Date: Mon, 2 Nov 2026 09:00:00 +0800',
+            `Message-ID: <msg${seq}@qq.com>`,
+            'Content-Type: text/plain; charset=utf-8',
+            '',
+            '正文内容 hello body',
+            '',
+          ].join('\r\n');
+          const len = Buffer.byteLength(raw, 'utf8');
+          sock.write(`* ${seq} FETCH (UID ${uid} FLAGS (\\Seen) BODY[] {${len}}\r\n${raw})\r\n`);
+          sock.write(`${tag2} OK body done\r\n`);
+          continue;
+        }
         const [a, b] = range.split(':').map((x) => parseInt(x, 10));
         const from = Number.isFinite(a) ? a : 1;
         const to = Number.isFinite(b) ? b : from;
         if (!(to >= 1)) {
-          sock.write(`${tag} OK done\r\n`);
+          sock.write(`${tag2} OK done\r\n`);
           continue;
         }
         for (let i = from; i <= Math.min(to, COUNT); i++) {
           sock.write(`* ${i} FETCH (UID ${100 + i} FLAGS (\\Seen) INTERNALDATE "02-Nov-2026 09:00:00 +0800" RFC822.SIZE 1234 ${envelope(i)} ${SENT_BODY})\r\n`);
         }
-        sock.write(`${tag} OK fetch done\r\n`);
+        sock.write(`${tag2} OK fetch done\r\n`);
       } else if (C === 'LOGOUT') {
-        sock.write(`* BYE bye\r\n${tag} OK done\r\n`);
+        sock.write(`* BYE bye\r\n${tag2} OK done\r\n`);
         sock.end();
       } else if (C === 'NOOP' || C === 'CLOSE' || C === 'UNSELECT') {
-        sock.write(`${tag} OK done\r\n`);
+        sock.write(`${tag2} OK done\r\n`);
       } else {
-        sock.write(`${tag} BAD unsupported ${cmd}\r\n`);
+        sock.write(`${tag2} BAD unsupported ${cmd}\r\n`);
       }
     }
   });
@@ -73,7 +97,7 @@ const server = net.createServer((sock) => {
 await new Promise((r) => server.listen(43143, '127.0.0.1', r));
 
 const { createUser, saveAccounts, ensureDataDirs } = await import('../server/store.js');
-const { listMessages, listFolders, unseenCounts } = await import('../server/mail.js');
+const { listMessages, listFolders, unseenCounts, getMessage } = await import('../server/mail.js');
 
 ensureDataDirs();
 const user = createUser({ username: 'imaptest', password: 'password123', role: 'member' });
@@ -112,6 +136,13 @@ check('附件标记为 false', page1.messages[0].hasAttachment === false);
 // 第二页：应只剩空（pageSize 10）
 const p2 = await listMessages(user.id, 'a_test', 'INBOX', { page: 2, pageSize: 10 });
 check('分页 page2 有 4 条', p2.messages.length === 4, `len=${p2.messages.length}`);
+
+// 读信正文（回归：raw.flags is not iterable —— fetchOne 查询必须显式要 flags）
+const msg = await getMessage(user.id, 'a_test', 'INBOX', 101);
+check('正文主题解析', msg.subject === '测试邮件 1', msg.subject);
+check('正文内容解析', (msg.text || '').includes('正文内容 hello body'), JSON.stringify(msg.text));
+check('正文 flags 可迭代且含 \\Seen', Array.isArray(msg.flags) && msg.flags.includes('\\Seen'), JSON.stringify(msg.flags));
+check('正文发件人地址', msg.from.address === 'zhangsan@qq.com', JSON.stringify(msg.from));
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'HAS FAILURES'}  pass=${pass} fail=${fail}`);
 server.close();

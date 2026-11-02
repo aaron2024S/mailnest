@@ -192,7 +192,8 @@ function cleanHtml(html) {
 export async function getMessage(uid, accountId, folder, messageUid) {
   try {
     return await withMailbox(uid, accountId, folder, async (client) => {
-      const raw = await client.fetchOne(String(messageUid), { uid: true, source: true }, { uid: true });
+      // flags 必须显式请求，否则服务器不返回，[...raw.flags] 会抛 "not iterable"
+      const raw = await client.fetchOne(String(messageUid), { uid: true, source: true, flags: true }, { uid: true });
       if (!raw) throw Object.assign(new Error('邮件不存在'), { status: 404 });
       const parsed = await simpleParser(raw.source);
       const attachments = (parsed.attachments || []).map((a, i) => ({
