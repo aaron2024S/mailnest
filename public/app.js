@@ -414,20 +414,23 @@ const app = createApp({
       this.loadingMessages = true;
       try {
         if (this.activeAccount === 'all' && !this.allFolder) {
-          // 汇总视图：各账号 INBOX 各取一页，按时间归并
+          // 汇总视图：各账号 INBOX 各取当前页，按时间归并；总数 = 各账号真实总数之和
+          // （此前把「本页条数」当总数，outlook 68 封 + QQ 几十封时头上却显示 50）
           const jobs = this.accounts.map(async (a) => {
             try {
-              const d = await this.api(`/api/messages?account=${a.id}&folder=INBOX&page=1&pageSize=${this.pageSize}`);
+              const d = await this.api(`/api/messages?account=${a.id}&folder=INBOX&page=${this.page}&pageSize=${this.pageSize}`);
               // folder 必须显式带上：汇总视图里的星标/删除/归档都靠它定位邮件
-              return d.messages.map((m) => ({ ...m, accountId: a.id, folder: 'INBOX', accountEmail: a.email, _color: a.color }));
+              return { total: d.total || 0,
+                       messages: d.messages.map((m) => ({ ...m, accountId: a.id, folder: 'INBOX', accountEmail: a.email, _color: a.color })) };
             } catch (e) {
               this.toast(`${a.displayName}：${e.message}`, 'error');
-              return [];
+              return { total: 0, messages: [] };
             }
           });
           const parts = await Promise.all(jobs);
-          this.messages = parts.flat().sort((x, y) => new Date(y.date || 0) - new Date(x.date || 0)).slice(0, this.pageSize);
-          this.total = this.messages.length;
+          this.total = parts.reduce((sum, p) => sum + p.total, 0);
+          this.messages = parts.flatMap((p) => p.messages)
+            .sort((x, y) => new Date(y.date || 0) - new Date(x.date || 0)).slice(0, this.pageSize);
         } else {
           let aid, folder;
           if (this.activeAccount === 'all') {
