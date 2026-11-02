@@ -649,6 +649,13 @@
                 <button class="mini-btn" type="button" @click="copyText(agent.created)">复制</button>
               </div>
               <pre class="agent-json">{{ agentConfig }}</pre>
+              <div class="agent-alt">
+                <div class="agent-alt-h">不想改配置文件？有界面的客户端（Cursor、Cherry Studio、ChatGPT 类）只要填「地址」和「请求头」两项，上面地址与令牌都能单独复制。对话式 agent 直接说这句：</div>
+                <div class="copy-line">
+                  <code>{{ agentBrief }}</code>
+                  <button class="mini-btn" type="button" @click="copyText(agentBrief)">复制</button>
+                </div>
+              </div>
               <button class="btn-ghost" style="width:100%;margin-top:10px" @click="agent.created=''">我已保存好</button>
             </div>
 

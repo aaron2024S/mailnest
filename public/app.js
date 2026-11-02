@@ -139,6 +139,10 @@ const app = createApp({
         },
       }, null, 2);
     },
+    // 对话式客户端（Claude Code、WorkBuddy 等）不必手改 JSON，把这句话发过去它自己配
+    agentBrief() {
+      return `添加一个 MCP 服务器：名称 mailnest，类型 HTTP，地址 ${this.mcpUrl}，请求头 Authorization: Bearer ${this.agent.created}`;
+    },
     // 当前列表里能被选中的行（搜索过滤后的可见行）
     visibleRows() {
       return this.messages.filter((m) => !this.searchQ || this.msgMatch(m));

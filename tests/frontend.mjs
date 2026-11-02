@@ -510,6 +510,12 @@ function bulkCtx(messages, opts = {}) {
   const here = { activeAccount: 'all', allFolder: null, pickAccount() { here.jumped = true; }, loadMessages() { here.reloaded = true; } };
   M.pickAllInbox.call(here);
   ok('已在全部收件箱再点 → 刷新而非重置', !here.jumped && here.reloaded === true);
+  // ---- Agent 接入：一句话安装指令（对话式客户端不必手改 JSON）----
+  const briefCtx = { mcpUrl: 'http://10.0.0.5:8006/mcp', agent: { created: 'mn_mcp_ab12cd34_secretpart' } };
+  const brief = captured.computed.agentBrief.call(briefCtx);
+  ok('一句话里带 MCP 地址', brief.includes('http://10.0.0.5:8006/mcp'), brief);
+  ok('一句话里带 Bearer 令牌', brief.includes('Bearer mn_mcp_ab12cd34_secretpart'), brief);
+  ok('一句话点明传输类型 HTTP', /类型 HTTP/.test(brief), brief);
 }
 
 console.log(`\n全部通过：${pass} 项断言`);
