@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  mailnest:
+    image: aaron2024s/mailnest:0.1.0
+    container_name: mailnest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # 走 HTTPS（反向代理）后改成 true，浏览器才会带 Secure cookie
+      MAILNEST_SECURE_COOKIES: "false"
+    volumes:
+      - ./data:/app/data

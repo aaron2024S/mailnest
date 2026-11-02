@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 128" width="560" height="128" role="img" aria-label="MailNest">
+  <title>MailNest — 横版字标</title>
+  <defs>
+    <linearGradient id="mailnestBgW" x1="12%" y1="0%" x2="88%" y2="100%">
+      <stop offset="0" stop-color="#4f8bff"/>
+      <stop offset=".52" stop-color="#2d6cf6"/>
+      <stop offset="1" stop-color="#1a3fbf"/>
+    </linearGradient>
+    <linearGradient id="mailnestSheetW" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e8efff"/>
+    </linearGradient>
+  </defs>
+  <!-- 图形：24..128 -->
+  <g transform="translate(24 24) scale(0.203125)">
+    <rect width="512" height="512" rx="118" fill="url(#mailnestBgW)"/>
+    <rect width="512" height="230" rx="118" fill="#ffffff" opacity=".07"/>
+    <g fill="none" stroke="url(#mailnestSheetW)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="106" y="172" width="300" height="180" rx="40"/>
+      <path d="M256 322 Q186 306 128 198"/>
+      <path d="M256 322 Q326 306 384 198"/>
+    </g>
+  </g>
+  <!-- 字标：需系统字体，生产环境建议改用 HTML 排版 -->
+  <text x="152" y="72" font-family="Inter, 'Segoe UI', system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        font-size="46" font-weight="650" letter-spacing="-1.4" fill="#14181f">MailNest</text>
+  <text x="154" y="100" font-family="Inter, 'Segoe UI', system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        font-size="14" font-weight="500" letter-spacing=".2" fill="#8a94a3">多邮箱统一收件箱</text>
+</svg>

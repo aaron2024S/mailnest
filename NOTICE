@@ -1,0 +1,8 @@
+MailNest — self-hosted multi-account webmail
+Copyright (c) 2026 aaron2024S
+
+Licensed under the MIT License (see LICENSE).
+
+Frontend vendor file public/vendor/vue.global.prod.js is Vue.js 3
+(https://vuejs.org), MIT License, Copyright (c) 2018-present, Yuxi (Evan) You
+and Vue contributors.

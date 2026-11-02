@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-accent="blue">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MailNest</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <linearGradient id="brandG" x1="12%" y1="0%" x2="88%" y2="100%">
+    <stop offset="0" stop-color="#4f8bff"/><stop offset=".52" stop-color="#2d6cf6"/><stop offset="1" stop-color="#1a3fbf"/>
+  </linearGradient>
+  <linearGradient id="brandS" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e8efff"/>
+  </linearGradient>
+  <symbol id="mark" viewBox="0 0 512 512">
+    <rect width="512" height="512" rx="118" fill="url(#brandG)"/>
+    <rect width="512" height="230" rx="118" fill="#ffffff" opacity=".07"/>
+    <g fill="none" stroke="url(#brandS)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="106" y="172" width="300" height="180" rx="40"/>
+      <path d="M256 322 Q186 306 128 198"/>
+      <path d="M256 322 Q326 306 384 198"/>
+    </g>
+  </symbol>
+  <symbol id="i-compose" viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M5.5 16.5 17 5a2.1 2.1 0 0 1 3 3L8.5 19.5 4.5 20.5Z"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3.2 13.4 6 5.6A2 2 0 0 1 7.9 4.3h8.2a2 2 0 0 1 1.9 1.3l2.8 7.8"/><path d="M3.2 13.4h4.3l1.1 2.4h6.8l1.1-2.4h4.3v4.6a2 2 0 0 1-2 2H5.2a2 2 0 0 1-2-2Z"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.6 2.5 5.1 5.6.8-4 4 1 5.6-5.1-2.7-5.1 2.7 1-5.6-4-4 5.6-.8Z"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M20.5 3.5 10 14"/><path d="M20.5 3.5 14 20.5l-4-6.5-6.5-4Z"/></symbol>
+  <symbol id="i-draft" viewBox="0 0 24 24"><path d="M6 3.5h9L19 8v12.5H6Z"/><path d="M14.5 3.5V8H19"/></symbol>
+  <symbol id="i-paper" viewBox="0 0 24 24"><path d="M20 12.5 12.6 20a5 5 0 0 1-7-7l7.7-7.8a3.4 3.4 0 0 1 4.8 4.8l-7.7 7.8a1.8 1.8 0 0 1-2.5-2.5l7-7"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 6.5h15"/><path d="M9.5 6.5v-2h5v2"/><path d="M6.5 6.5 7.4 20h9.2l.9-13.5"/><path d="M10 10.5v6M14 10.5v6"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4.6" rx="1.4"/><path d="M5.2 9.1v9a1.9 1.9 0 0 0 1.9 1.9h9.8a1.9 1.9 0 0 0 1.9-1.9v-9"/><path d="M10 13h4"/></symbol>
+  <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9.5 7 4.5 12l5 5"/><path d="M4.5 12h9a6 6 0 0 1 6 6v1"/></symbol>
+  <symbol id="i-forward" viewBox="0 0 24 24"><path d="m14.5 7 5 5-5 5"/><path d="M19.5 12h-9a6 6 0 0 0-6 6v1"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.4"/><path d="m4.5 7.5 7.5 6 7.5-6"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2Z"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.4"/><path d="M2.8 19.5a6.2 6.2 0 0 1 12.4 0"/><circle cx="17" cy="9.5" r="2.6"/><path d="M16.2 15.7a5.4 5.4 0 0 1 5 3.8"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5Z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5 5l1.8 1.8M17.2 17.2 19 19M19 5l-1.8 1.8M6.8 17.2 5 19"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5.5 8.5 12l6.5 6.5"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="M20 12.5 12.6 20a5 5 0 0 1-7-7l7.7-7.8a3.4 3.4 0 0 1 4.8 4.8l-7.7 7.8a1.8 1.8 0 0 1-2.5-2.5l7-7"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.7 3.8v4.4h-4.4"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 8v4.6"/><path d="M12 15.8h.01"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="9.5" rx="2.6"/><path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.6 0v2.7"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M14 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2H14"/><path d="M17 8.5 20.5 12 17 15.5"/><path d="M10 12h10"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h4.2l2 2.3h6.8a2 2 0 0 1 2 2v8.9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+</defs></svg>
+
+<div id="app" v-cloak>
+
+  <!-- ================= 登录 / 首次启动 ================= -->
+  <div class="auth" v-if="view==='auth'">
+    <aside class="brandpane">
+      <div class="pane-top">
+        <div class="mark"><svg viewBox="0 0 512 512" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="106" y="172" width="300" height="180" rx="40"/>
+          <path d="M256 322 Q186 306 128 198"/><path d="M256 322 Q326 306 384 198"/>
+        </svg></div>
+        <div class="pane-name">MailNest</div>
+      </div>
+      <div class="pane-mid">
+        <h1>所有邮箱，<br>收进同一个窗口</h1>
+        <p>QQ、163、Gmail、Outlook、企业邮，一个页面全部收齐。切换账号不用换标签页，搜索不用先去想「那封信在哪个邮箱」。</p>
+        <ul class="feats">
+          <li><span class="feat-ico"><svg class="i"><use href="#i-inbox"/></svg></span>多账号汇总，未读一次看完</li>
+          <li><span class="feat-ico"><svg class="i"><use href="#i-lock"/></svg></span>凭据加密落盘，只存在你的机器上</li>
+          <li><span class="feat-ico"><svg class="i"><use href="#i-users"/></svg></span>多用户隔离，家人同事各看各的</li>
+        </ul>
+      </div>
+      <div class="pane-foot">© 2026 MailNest · 自托管多邮箱收件箱</div>
+    </aside>
+
+    <main class="formpane">
+      <div class="formbox">
+        <span class="eyebrow" v-if="authMode==='setup'"><span class="dot"></span>首次启动</span>
+        <h2>{{ authMode==='setup' ? '创建管理员账户' : '登录 MailNest' }}</h2>
+        <p class="sub">{{ authMode==='setup' ? '这台 MailNest 还没有任何账户，先创建管理员以继续' : '使用你的账户继续，邮箱凭据保存在本机' }}</p>
+
+        <div class="err" v-if="authError"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-warn"/></svg><span>{{ authError }}</span></div>
+
+        <form @submit.prevent="submitAuth">
+          <div class="field">
+            <label for="au">用户名</label>
+            <div class="wrap">
+              <span class="lead"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-user"/></svg></span>
+              <input id="au" v-model.trim="authForm.username" type="text" placeholder="请输入用户名" autocomplete="username" spellcheck="false">
+            </div>
+          </div>
+          <div class="field">
+            <label for="ap">密码</label>
+            <div class="wrap has-eye">
+              <span class="lead"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-lock"/></svg></span>
+              <input id="ap" v-model="authForm.password" :type="showPw?'text':'password'" placeholder="请输入密码" :autocomplete="authMode==='setup'?'new-password':'current-password'">
+              <button class="eye" type="button" @click="showPw=!showPw" aria-label="显示密码">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use :href="showPw?'#i-x':'#i-lock'"/></svg>
+              </button>
+            </div>
+            <p class="hint" v-if="authMode==='setup'">至少 8 位。这是本机最高权限账户，请不要与其他网站共用密码。</p>
+          </div>
+          <div class="field" v-if="authMode==='setup'">
+            <label for="ap2">确认密码</label>
+            <div class="wrap">
+              <span class="lead"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-lock"/></svg></span>
+              <input id="ap2" v-model="authForm.password2" type="password" placeholder="请再次输入密码" autocomplete="new-password">
+            </div>
+          </div>
+          <button class="btn" type="submit" :disabled="authBusy">
+            <span v-if="!authBusy">{{ authMode==='setup' ? '创建账户' : '登录' }}</span>
+            <span v-else class="spin" style="border-top-color:#fff;border-color:rgba(255,255,255,.4)"></span>
+            <span class="arrow" v-if="!authBusy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-forward"/></svg></span>
+          </button>
+        </form>
+        <p class="switch" v-if="authMode==='setup'">已有账户？<a @click.prevent="authMode='login';authError=''">去登录</a></p>
+        <p class="switch" v-else>还没有账户？<a @click.prevent="authMode='setup';authError=''">返回注册</a></p>
+      </div>
+      <div class="formfoot">MailNest 0.1.0<span class="sep">·</span>本地部署<span class="sep">·</span>支持多用户</div>
+    </main>
+  </div>
+
+  <!-- ================= 主应用 ================= -->
+  <div class="app" v-else>
+    <header class="topbar">
+      <div class="brand">
+        <button class="icon-btn hamburger" @click="railOpen=true"><svg class="i"><use href="#i-menu"/></svg></button>
+        <div class="logo"><svg viewBox="0 0 512 512"><use href="#mark"/></svg></div>
+        <div class="brand-name">MailNest</div>
+        <div class="brand-sep"></div>
+        <button class="acct-chip" @click.stop="acctOpen=!acctOpen" v-if="accounts.length">
+          <span class="swatch" :style="{background: currentSwatch}"></span>
+          <span>{{ currentAccountLabel }}</span>
+          <svg class="i" style="width:13px;height:13px"><use href="#i-chev"/></svg>
+        </button>
+        <div class="dropdown" v-if="acctOpen" @click.stop>
+          <button class="dd-item" @click="pickAccount('all')">
+            <span class="swatch" style="background:linear-gradient(145deg,#7c8cff,#4d5ef0)"></span>
+            <span class="meta"><b>所有收件箱</b><span>{{ accounts.length }} 个账号合并</span></span>
+            <span class="count-badge" v-if="allUnread">{{ allUnread }}</span>
+            <svg class="i" style="width:14px;height:14px;color:var(--accent)" v-if="activeAccount==='all'"><use href="#i-check"/></svg>
+          </button>
+          <div class="dd-sep"></div>
+          <button class="dd-item" v-for="a in accounts" :key="a.id" @click="pickAccount(a.id)">
+            <span class="swatch" :style="{background:a.color}"></span>
+            <span class="meta"><b>{{ a.displayName }}</b><span>{{ a.email }}</span></span>
+            <span class="count-badge" v-if="unreadOf(a.id)">{{ unreadOf(a.id) }}</span>
+            <svg class="i" style="width:14px;height:14px;color:var(--accent)" v-if="activeAccount===a.id"><use href="#i-check"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="search">
+        <svg class="i" style="width:15px;height:15px"><use href="#i-inbox"/></svg>
+        <input v-model.trim="searchQ" placeholder="搜索当前列表的主题、发件人">
+      </div>
+
+      <div class="topbar-right">
+        <button class="icon-btn" @click="refreshAll" :title="syncing?'同步中…':'刷新'">
+          <svg class="i" :class="{spin:syncing}" style="animation:none" v-if="!syncing"><use href="#i-refresh"/></svg>
+          <span class="spin" v-else></span>
+        </button>
+        <button class="icon-btn" @click="toggleTheme" :title="theme==='dark'?'切换浅色':'切换深色'">
+          <svg class="i"><use :href="theme==='dark'?'#i-sun':'#i-moon'"/></svg>
+        </button>
+        <div style="position:relative">
+          <button class="avatar-btn" @click.stop="avatarOpen=!avatarOpen">{{ me.user.displayName.slice(0,1).toUpperCase() }}</button>
+          <div class="avatar-menu" v-if="avatarOpen" @click.stop>
+            <div style="padding:8px 10px 6px">
+              <b style="font-size:13px">{{ me.user.displayName }}</b>
+              <div class="muted" style="font-size:11.5px">{{ me.user.username }} · {{ roleLabel(me.user.role) }}</div>
+            </div>
+            <div class="dd-sep"></div>
+            <button class="dd-item" @click="openSettings"><svg class="i" style="width:15px;height:15px"><use href="#i-settings"/></svg>设置</button>
+            <button class="dd-item" v-if="['owner','admin'].includes(me.user.role)" @click="openUsers">
+              <svg class="i" style="width:15px;height:15px"><use href="#i-users"/></svg>用户管理</button>
+            <div class="dd-sep"></div>
+            <button class="dd-item" @click="logout"><svg class="i" style="width:15px;height:15px"><use href="#i-logout"/></svg>退出登录</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <!-- 左栏 -->
+      <aside class="rail" :class="{open:railOpen}">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" v-if="railOpen">
+          <div class="logo"><svg viewBox="0 0 512 512"><use href="#mark"/></svg></div>
+          <div class="brand-name">MailNest</div>
+          <span style="flex:1"></span>
+          <button class="icon-btn" @click="railOpen=false"><svg class="i"><use href="#i-x"/></svg></button>
+        </div>
+        <button class="btn-primary" @click="openCompose()"><svg class="i"><use href="#i-compose"/></svg><span>新建邮件</span></button>
+        <nav class="nav">
+          <template v-if="activeAccount==='all'">
+            <button class="nav-item" :class="{'is-active':true}" @click="pickFolder('INBOX')">
+              <svg class="i"><use href="#i-inbox"/></svg><span class="lbl">收件箱</span>
+              <span class="count" v-if="allUnread">{{ allUnread }}</span>
+            </button>
+            <template v-for="a in accounts" :key="a.id">
+              <div class="acct-sep"><i :style="{background:a.color}"></i><span>{{ a.displayName }}</span></div>
+              <button class="nav-item" v-for="f in foldersOf(a.id)" :key="f.path"
+                      :class="{'is-active': activeAccount==='all' && allFolder===a.id+'|'+f.path}"
+                      @click="pickAllFolder(a.id, f.path)" style="padding-left:18px">
+                <svg class="i"><use href="#i-folder"/></svg>
+                <span class="lbl">{{ folderLabel(f) }}</span>
+                <span class="count" v-if="unseenOf(a.id,f.path)">{{ unseenOf(a.id,f.path) }}</span>
+              </button>
+            </template>
+          </template>
+          <template v-else>
+            <button class="nav-item" v-for="f in folders" :key="f.path" :class="{'is-active': activeFolder===f.path}"
+                    @click="pickFolder(f.path)">
+              <svg class="i"><use href="#i-inbox"/></svg><span class="lbl">{{ folderLabel(f) }}</span>
+              <span class="count" v-if="unseenOf(activeAccount,f.path)">{{ unseenOf(activeAccount,f.path) }}</span>
+            </button>
+          </template>
+        </nav>
+        <div class="rail-foot">
+          {{ accounts.length }} 个邮箱账号
+          <div class="bar"><i :style="{width: storagePct + '%'}"></i></div>
+        </div>
+      </aside>
+      <div class="rail-backdrop" v-if="railOpen" @click="railOpen=false"></div>
+
+      <!-- 列表 -->
+      <section class="list">
+        <div class="list-head">
+          <h3>{{ listTitle }}</h3>
+          <span class="n" v-if="total">{{ total }} 封</span>
+          <span class="sp"></span>
+          <div class="pager" v-if="total>pageSize">
+            <button class="icon-btn" style="width:26px;height:26px" :disabled="page<=1" @click="gotoPage(page-1)"><svg class="i" style="width:14px;height:14px"><use href="#i-back"/></svg></button>
+            {{ page }} / {{ Math.ceil(total/pageSize) }}
+            <button class="icon-btn" style="width:26px;height:26px" :disabled="page>=Math.ceil(total/pageSize)" @click="gotoPage(page+1)"><svg class="i" style="width:14px;height:14px"><use href="#i-forward"/></svg></button>
+          </div>
+        </div>
+        <div class="rows">
+          <div class="row" v-for="m in filteredMessages" :key="m.uid"
+               :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen')}"
+               @click="openMessage(m)">
+            <div class="avatar" :style="{background: m._color}">{{ initials(m.from.name || m.from.address) }}</div>
+            <div class="mid">
+              <div class="l1">
+                <span class="acct-dot" :style="{background:m._color}" v-if="activeAccount==='all'" title="所属账号"></span>
+                <span class="from">{{ m.from.name || m.from.address || '(未知发件人)' }}</span>
+                <span class="unread-dot" v-if="!m.flags.includes('\\Seen')"></span>
+              </div>
+              <span class="subj">{{ m.subject }}</span>
+              <span class="preview" v-if="m._preview">{{ m._preview }}</span>
+            </div>
+            <div class="right">
+              <span class="date">{{ shortDate(m.date) }}</span>
+              <span class="icons">
+                <svg class="i" :class="{starred:m.flags.includes('\\Flagged')}" style="fill:currentColor" v-if="m.flags.includes('\\Flagged')"><use href="#i-star"/></svg>
+                <svg class="i" v-if="m.hasAttachment"><use href="#i-clip"/></svg>
+              </span>
+            </div>
+          </div>
+          <div class="empty" v-if="!loadingMessages && !filteredMessages.length">
+            <svg class="i"><use href="#i-inbox"/></svg>
+            <div>{{ searchQ ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
+          </div>
+          <div class="empty" v-if="loadingMessages && !filteredMessages.length"><span class="spin"></span> 正在从服务器读取…</div>
+        </div>
+      </section>
+
+      <!-- 阅读区 -->
+      <section class="reader" :class="{open:readerOpen}">
+        <div class="reader-toolbar">
+          <button class="tool-btn m-back" @click="readerOpen=false"><svg class="i"><use href="#i-back"/></svg></button>
+          <template v-if="selected">
+            <button class="tool-btn primary" @click="reply(selected,'reply')"><svg class="i"><use href="#i-reply"/></svg><span>回复</span></button>
+            <button class="tool-btn" @click="reply(selected,'forward')"><svg class="i"><use href="#i-forward"/></svg><span>转发</span></button>
+            <span class="tool-sep"></span>
+            <button class="tool-btn" @click="toggleStar(selected)" :title="selected.flags.includes('\\Flagged')?'取消星标':'星标'">
+              <svg class="i" :style="selected.flags.includes('\\Flagged')?'fill:#d8a72a;color:#d8a72a':''"><use href="#i-star"/></svg>
+            </button>
+            <button class="tool-btn" @click="markRead(selected,true)" v-if="!selected.flags.includes('\\Seen')" title="标记已读">
+              <svg class="i"><use href="#i-mail"/></svg>
+            </button>
+            <button class="tool-btn" @click="markRead(selected,false)" v-else title="标记未读">
+              <svg class="i"><use href="#i-mail"/></svg>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="tool-btn" @click="archive(selected)" title="归档"><svg class="i"><use href="#i-archive"/></svg></button>
+            <button class="tool-btn" @click="remove(selected)" title="删除"><svg class="i"><use href="#i-trash"/></svg></button>
+          </template>
+          <span class="muted" style="margin-left:auto;font-size:12px" v-if="selected">{{ selected.accountEmail }}</span>
+        </div>
+
+        <div class="reader-body" v-if="selected">
+          <div class="inner">
+            <h1 class="r-subject">{{ selected.subject }}</h1>
+            <div class="r-sender">
+              <div class="avatar" :style="{background:selected._color}">{{ initials(selected.from?.text || selected.from?.address || '?') }}</div>
+              <div class="who">
+                <b>{{ selected.from?.text || selected.from?.address }}</b>
+                <span>收件人：{{ selected.to.map(t=>t.address).join('、') || '-' }}<template v-if="selected.cc && selected.cc.length">　抄送：{{ selected.cc.map(t=>t.address).join('、') }}</template></span>
+              </div>
+              <div class="when">{{ fullDate(selected.date) }}</div>
+            </div>
+            <div class="r-attachments" v-if="selected.attachments && selected.attachments.length">
+              <a class="att" v-for="a in selected.attachments" :key="a.id"
+                 :href="`/api/attachment?account=${selected.accountId}&folder=${encodeURIComponent(selected.folder)}&uid=${selected.uid}&idx=${a.id}&t=${token}`"
+                 :download="a.filename">
+                <svg class="i"><use href="#i-clip"/></svg>
+                <span>{{ a.filename }}</span>
+                <span class="sz">{{ fmtSize(a.size) }}</span>
+              </a>
+            </div>
+            <div class="r-html" v-if="selected.html" v-html="selected.html"></div>
+            <div class="r-text" v-else>{{ selected.text }}</div>
+
+            <div class="quick-reply">
+              <textarea v-model="quickReplyText" placeholder="快速回复…（点「发送」直接回复该邮件）"></textarea>
+              <div class="foot">
+                <button class="btn-ghost" style="width:auto;padding:0 14px" @click="reply(selected,'reply')">打开完整写信</button>
+                <button class="send-btn" style="height:32px;padding:0 14px" @click="sendQuickReply" :disabled="!quickReplyText || sendingQuick">
+                  <svg class="i" style="width:14px;height:14px"><use href="#i-send"/></svg>发送
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="reader-body" v-else style="display:grid;place-items:center">
+          <div class="empty" style="padding:0">
+            <svg class="i" style="width:44px;height:44px"><use href="#i-mail"/></svg>
+            <div>选择一封邮件查看</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 写信 -->
+    <div class="compose" v-if="compose.open">
+      <div class="compose-head">
+        <svg class="i" style="width:15px;height:15px;color:var(--accent)"><use href="#i-compose"/></svg>
+        <span>{{ compose.mode==='reply' ? '回复' : compose.mode==='forward' ? '转发' : compose.draftId ? '草稿' : '新邮件' }}</span>
+        <span class="sp"></span>
+        <button class="icon-btn" @click="saveComposeDraft" title="存草稿"><svg class="i" style="width:15px;height:15px"><use href="#i-draft"/></svg></button>
+        <button class="icon-btn" @click="closeCompose"><svg class="i" style="width:15px;height:15px"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="compose-fields">
+        <div class="cfield">
+          <label>发件人</label>
+          <select v-model="compose.accountId" style="padding-right:0">
+            <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.displayName }} &lt;{{ a.email }}&gt;</option>
+          </select>
+          <span></span>
+        </div>
+        <div class="cfield">
+          <label>收件人</label>
+          <input v-model="compose.to" placeholder="多个地址用逗号分隔" spellcheck="false">
+          <button class="cf-btn" @click="compose.showCc=!compose.showCc">抄送</button>
+        </div>
+        <div class="cfield" v-if="compose.showCc">
+          <label>抄送</label>
+          <input v-model="compose.cc" placeholder="多个地址用逗号分隔" spellcheck="false">
+          <span></span>
+        </div>
+        <div class="cfield">
+          <label>主题</label>
+          <input v-model="compose.subject" placeholder="邮件主题">
+          <span></span>
+        </div>
+      </div>
+      <textarea class="body" v-model="compose.text" placeholder="正文…"></textarea>
+      <div class="compose-foot">
+        <button class="icon-btn" @click="pickFiles" title="添加附件"><svg class="i"><use href="#i-clip"/></svg></button>
+        <input type="file" ref="fileInput" multiple style="display:none" @change="onFiles">
+        <span class="muted" style="font-size:11.5px" v-if="compose.attachments.length">{{ compose.attachments.length }} 个附件 · {{ fmtSize(totalAttachSize) }}</span>
+        <span style="flex:1"></span>
+        <span class="muted" style="font-size:11.5px;margin-right:8px" v-if="compose.error">{{ compose.error }}</span>
+        <button class="send-btn" @click="sendCompose" :disabled="compose.sending">
+          <svg class="i" style="width:14px;height:14px"><use href="#i-send"/></svg>{{ compose.sending ? '发送中…' : '发送' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 设置 -->
+    <div class="overlay" v-if="modals.settings" @click.self="modals.settings=false">
+      <div class="modal">
+        <div class="modal-head">
+          <h3>设置</h3>
+          <button class="icon-btn" @click="modals.settings=false"><svg class="i"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal-body">
+          <div style="display:flex;gap:8px;margin-bottom:14px">
+            <button class="btn-ghost" style="width:auto;padding:0 14px" @click="settingsTab='accounts'">邮箱账号</button>
+            <button class="btn-ghost" style="width:auto;padding:0 14px" @click="settingsTab='profile'">外观与安全</button>
+          </div>
+
+          <template v-if="settingsTab==='accounts'">
+            <div class="acct-row" v-for="a in accounts" :key="a.id">
+              <span class="swatch" :style="{background:a.color}">{{ a.displayName.slice(0,1).toUpperCase() }}</span>
+              <span class="meta"><b>{{ a.displayName }}</b><span>{{ a.email }} · {{ a.imap.host }}</span></span>
+              <button class="icon-btn" title="删除账号" @click="removeAccount(a)"><svg class="i" style="width:15px;height:15px"><use href="#i-trash"/></svg></button>
+            </div>
+            <div style="margin-top:14px" v-if="!addForm.open">
+              <button class="btn-ghost" style="width:100%" @click="addForm.open=true"><svg class="i" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-plus"/></svg> 添加邮箱账号</button>
+            </div>
+            <template v-else>
+              <div class="preset-grid" style="margin-top:12px">
+                <button class="preset" v-for="p in presets" :key="p.key" :class="{'is-on':addForm.preset===p.key}" @click="applyPreset(p.key)">{{ p.label }}</button>
+              </div>
+              <div class="form-grid">
+                <div class="form-row"><label>邮箱地址</label><div class="wrap"><input v-model.trim="addForm.email" placeholder="you@qq.com" spellcheck="false"></div></div>
+                <div class="form-row"><label>显示名</label><div class="wrap"><input v-model.trim="addForm.displayName" placeholder="可选"></div></div>
+              </div>
+              <div class="form-row"><label>授权码 / 密码</label>
+                <div class="wrap has-eye"><input v-model="addForm.password" :type="showPw?'text':'password'" placeholder="不是网页登录密码">
+                <button class="eye" type="button" @click="showPw=!showPw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-lock"/></svg></button></div>
+                <p class="hint" v-if="presetHint">{{ presetHint }}</p>
+              </div>
+              <details style="margin-bottom:12px">
+                <summary style="font-size:12.5px;color:var(--text-3);cursor:pointer">服务器参数（自动按邮箱域名填充，可改）</summary>
+                <div class="form-grid" style="margin-top:10px">
+                  <div class="form-row"><label>IMAP 服务器</label><div class="wrap"><input v-model.trim="addForm.imapHost"></div></div>
+                  <div class="form-row"><label>IMAP 端口</label><div class="wrap"><input v-model.number="addForm.imapPort" type="number"></div></div>
+                  <div class="form-row"><label>SMTP 服务器</label><div class="wrap"><input v-model.trim="addForm.smtpHost"></div></div>
+                  <div class="form-row"><label>SMTP 端口</label><div class="wrap"><input v-model.number="addForm.smtpPort" type="number"></div></div>
+                </div>
+              </details>
+              <div class="form-grid">
+                <button class="btn-ghost" @click="testAdd" :disabled="addForm.testing">
+                  <span v-if="!addForm.testing">测试连接</span><span class="spin" v-else></span>
+                </button>
+                <button class="btn" style="margin-top:0;height:38px" @click="addAccount" :disabled="addForm.saving">
+                  <span v-if="!addForm.saving">保存</span><span class="spin" style="border-color:rgba(255,255,255,.4);border-top-color:#fff" v-else></span>
+                </button>
+              </div>
+              <p class="hint" v-if="addForm.message" :style="{color: addForm.ok ? 'var(--ok)' : 'var(--err)'}">{{ addForm.message }}</p>
+            </template>
+          </template>
+
+          <template v-else>
+            <div class="form-row">
+              <label>主题色</label>
+              <div style="display:flex;gap:10px">
+                <button v-for="c in ['blue','indigo','teal','amber']" :key="c" class="icon-btn" style="width:30px;height:30px;border-radius:50%"
+                        :class="{'is-active':accent===c}" @click="setAccent(c)">
+                  <span :style="{width:'16px',height:'16px',borderRadius:'50%',display:'block',background: accentColor(c)}"></span>
+                </button>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>界面语言 / 主题</label>
+              <div class="wrap"><select v-model="theme" @change="applyTheme">
+                <option value="light">浅色</option><option value="dark">深色</option>
+              </select></div>
+            </div>
+            <div class="form-row">
+              <label>修改密码</label>
+              <div class="wrap"><input v-model="pw.current" type="password" placeholder="当前密码" autocomplete="current-password"></div>
+            </div>
+            <div class="form-grid">
+              <div class="form-row"><div class="wrap"><input v-model="pw.next" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password"></div></div>
+              <button class="btn-ghost" style="height:42px" @click="changePw" :disabled="pw.busy"><span v-if="!pw.busy">更新密码</span><span class="spin" v-else></span></button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- 用户管理 -->
+    <div class="overlay" v-if="modals.users" @click.self="modals.users=false">
+      <div class="modal">
+        <div class="modal-head">
+          <h3>用户管理</h3>
+          <button class="icon-btn" @click="modals.users=false"><svg class="i"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal-body">
+          <p class="hint" style="margin:0 0 10px">管理员是运维角色：可以创建 / 停用用户，但<strong>看不到其他用户的邮件</strong>。</p>
+          <div class="user-row" v-for="u in users" :key="u.id">
+            <span class="avatar">{{ u.displayName.slice(0,1).toUpperCase() }}</span>
+            <span class="meta"><b>{{ u.displayName }}</b><span>{{ u.username }} · {{ roleLabel(u.role) }}{{ u.disabled ? ' · 已停用' : '' }}</span></span>
+            <template v-if="u.role!=='owner'">
+              <button class="icon-btn" :title="u.disabled?'启用':'停用'" @click="toggleUser(u)">
+                <svg class="i" style="width:15px;height:15px"><use :href="u.disabled?'#i-check':'#i-x'"/></svg>
+              </button>
+              <button class="icon-btn" title="重置密码" @click="resetUser(u)"><svg class="i" style="width:15px;height:15px"><use href="#i-lock"/></svg></button>
+              <button class="icon-btn" title="删除用户" v-if="me.user.role==='owner'" @click="removeUser(u)"><svg class="i" style="width:15px;height:15px"><use href="#i-trash"/></svg></button>
+            </template>
+          </div>
+          <div style="margin-top:14px" v-if="!userForm.open">
+            <button class="btn-ghost" style="width:100%" @click="userForm.open=true"><svg class="i" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-plus"/></svg> 添加用户</button>
+          </div>
+          <template v-else>
+            <div class="form-grid" style="margin-top:12px">
+              <div class="form-row"><label>用户名</label><div class="wrap"><input v-model.trim="userForm.username" spellcheck="false"></div></div>
+              <div class="form-row"><label>显示名</label><div class="wrap"><input v-model.trim="userForm.displayName" placeholder="可选"></div></div>
+            </div>
+            <div class="form-row"><label>初始密码</label><div class="wrap"><input v-model="userForm.password" placeholder="至少 8 位，请线下交给对方"></div></div>
+            <div style="display:flex;gap:8px">
+              <button class="btn-ghost" style="flex:1" @click="userForm.open=false">取消</button>
+              <button class="btn" style="margin-top:0;height:38px;flex:1" @click="createUser" :disabled="userForm.busy">
+                <span v-if="!userForm.busy">创建</span><span class="spin" style="border-color:rgba(255,255,255,.4);border-top-color:#fff" v-else></span>
+              </button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast"><div class="t" v-for="t in toasts" :key="t.id" :class="t.type">{{ t.text }}</div></div>
+  </div>
+</div>
+
+<script src="/vendor/vue.global.prod.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

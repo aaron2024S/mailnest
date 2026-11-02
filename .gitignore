@@ -1,0 +1,13 @@
+node_modules/
+data/
+*.log
+.smoke*
+.tmp*
+.shot*
+preview-*.png
+.m-frame.html
+.a-frame.html
+Dockerfile.offline
+ui-preview.html
+auth-preview.html
+logo-preview.html

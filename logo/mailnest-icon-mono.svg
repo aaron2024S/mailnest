@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="MailNest">
+  <title>MailNest — 单色</title>
+  <g fill="none" stroke="currentColor" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="106" y="172" width="300" height="180" rx="40"/>
+    <path d="M256 322 Q186 306 128 198"/>
+    <path d="M256 322 Q326 306 384 198"/>
+  </g>
+</svg>
