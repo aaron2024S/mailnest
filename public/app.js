@@ -7,7 +7,7 @@ const PRESETS = {
   126:    { label: '126',      imap: ['imap.126.com', 993],   smtp: ['smtp.126.com', 465],   hint: '同 163：网页端开启服务 + 客户端授权密码。' },
   sina:   { label: '新浪',     imap: ['imap.sina.com', 993],  smtp: ['smtp.sina.com', 465],  hint: '先在网页端开启 IMAP/SMTP 服务。' },
   gmail:  { label: 'Gmail',    imap: ['imap.gmail.com', 993], smtp: ['smtp.gmail.com', 465], hint: '需要开启两步验证并创建「应用专用密码」。' },
-  outlook:{ label: 'Outlook',  imap: ['outlook.office365.com', 993], smtp: ['smtp.office365.com', 587], hint: '微软已停用密码登录，OAuth 授权在路线图中；当前版本暂不可添加。' },
+  outlook:{ label: 'Outlook',  imap: ['outlook.office365.com', 993], smtp: ['smtp.office365.com', 587], oauth: true, hint: '微软已停用密码登录，改走 OAuth 授权：先填一次应用 ID（下面的步骤），再点「连接 Outlook」按提示输验证码。' },
   qiye:   { label: '腾讯企业邮', imap: ['imap.exmail.qq.com', 993], smtp: ['smtp.exmail.qq.com', 465], hint: '腾讯企业邮箱，可用密码或安全登录授权码。' },
   aliyun: { label: '阿里企业邮', imap: ['imap.qiye.aliyun.com', 993], smtp: ['smtp.qiye.aliyun.com', 465], hint: '阿里企业邮箱。' },
 };
@@ -67,6 +67,12 @@ const app = createApp({
       modals: { settings: false, users: false },
       settingsTab: 'accounts',
       addForm: { open: false, email: '', displayName: '', password: '', preset: null, imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
+      // Outlook OAuth：应用 ID 由用户在界面上填一次，存在实例设置里
+      outlook: {
+        configured: false, clientId: '', registerUrl: '', deviceLoginUrl: '',
+        idInput: '', savingId: false, error: '',
+        device: null, polling: false, showSteps: false,
+      },
       pw: { current: '', next: '', busy: false },
       users: [],
       userForm: { open: false, username: '', displayName: '', password: '', busy: false },
@@ -79,6 +85,11 @@ const app = createApp({
   computed: {
     presets() { return Object.entries(PRESETS).map(([key, v]) => ({ key, label: v.label })); },
     presetHint() { return this.addForm.preset ? PRESETS[this.addForm.preset]?.hint || '' : ''; },
+    // 选中 Outlook（或邮箱域名是微软的）时走 OAuth，不再给密码框
+    addIsOauth() {
+      if (PRESETS[this.addForm.preset]?.oauth) return true;
+      return /@(outlook|hotmail|live|msn)\./i.test(this.addForm.email || '');
+    },
     currentAccountLabel() {
       if (this.activeAccount === 'all') return '所有收件箱';
       const a = this.accounts.find((x) => x.id === this.activeAccount);
@@ -485,7 +496,11 @@ const app = createApp({
       this.avatarOpen = false;
       this.settingsTab = 'accounts';
       this.addForm = { open: false, email: '', displayName: '', password: '', preset: null, imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false };
+      this.outlook.device = null;
+      this.outlook.polling = false;
+      this.outlook.error = '';
       this.modals.settings = true;
+      this.loadOutlookConfig();
     },
     applyPreset(key) {
       this.addForm.preset = key;
@@ -525,6 +540,77 @@ const app = createApp({
         this.addForm.message = e.message; this.addForm.ok = false;
       } finally { this.addForm.saving = false; }
     },
+    // ---------- Outlook OAuth（设备码） ----------
+    async loadOutlookConfig() {
+      try {
+        const d = await this.api('/api/oauth/outlook');
+        this.outlook.configured = !!d.configured;
+        this.outlook.clientId = d.clientId || '';
+        this.outlook.registerUrl = d.registerUrl || '';
+        this.outlook.deviceLoginUrl = d.deviceLoginUrl || '';
+        if (d.clientId && !this.outlook.idInput) this.outlook.idInput = d.clientId;
+      } catch { /* 拿不到配置不影响其他功能 */ }
+    },
+    async saveOutlookClientId() {
+      this.outlook.error = ''; this.outlook.savingId = true;
+      try {
+        const d = await this.api('/api/oauth/outlook/client-id', { method: 'POST', body: { clientId: this.outlook.idInput } });
+        this.outlook.configured = true;
+        this.outlook.clientId = d.clientId;
+        this.toast('应用 ID 已保存', 'ok');
+      } catch (e) {
+        this.outlook.error = e.message;
+      } finally { this.outlook.savingId = false; }
+    },
+    async connectOutlook() {
+      this.outlook.error = '';
+      this.outlook.device = null;
+      try {
+        const d = await this.api('/api/oauth/outlook/start', { method: 'POST', body: {} });
+        this.outlook.device = d;
+        this.pollOutlook(d);
+      } catch (e) {
+        this.outlook.error = e.message;
+      }
+    },
+    async pollOutlook(device) {
+      this.outlook.polling = true;
+      const deadline = Date.now() + (Number(device.expiresIn) || 900) * 1000;
+      let wait = Number(device.interval) || 5;
+      while (this.outlook.polling && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, wait * 1000));
+        if (!this.outlook.polling) return;
+        try {
+          const r = await this.api('/api/oauth/outlook/poll', {
+            method: 'POST',
+            body: { deviceCode: device.deviceCode, email: this.addForm.email, displayName: this.addForm.displayName },
+          });
+          if (r.pending) { if (r.slowDown) wait += 5; continue; }
+          this.outlook.polling = false;
+          this.outlook.device = null;
+          this.accounts = r.accounts;
+          this.addForm.open = false;
+          this.toast(`已连接 ${r.email}`, 'ok');
+          this.loadAllFoldersAndUnread().catch(() => {});
+          return;
+        } catch (e) {
+          this.outlook.polling = false;
+          this.outlook.device = null;
+          this.outlook.error = e.message;
+          return;
+        }
+      }
+      if (this.outlook.polling) {
+        this.outlook.polling = false;
+        this.outlook.device = null;
+        this.outlook.error = '验证码已超时，请重新点「连接 Outlook」';
+      }
+    },
+    cancelOutlook() {
+      this.outlook.polling = false;
+      this.outlook.device = null;
+    },
+
     async removeAccount(a) {
       if (!confirm(`删除账号 ${a.email}？仅删除本机凭据，不影响邮箱本身。`)) return;
       try {

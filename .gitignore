@@ -11,3 +11,8 @@ Dockerfile.offline
 ui-preview.html
 auth-preview.html
 logo-preview.html
+.imap-test/
+.oauth-test/
+.edge-profile*
+.render-*.mjs
+.push-retry.sh

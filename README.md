@@ -38,7 +38,11 @@ docker compose up -d
 | 腾讯企业邮 | imap.exmail.qq.com:993 | smtp.exmail.qq.com:465 | 密码或授权码 |
 | 阿里企业邮 | imap.qiye.aliyun.com:993 | smtp.qiye.aliyun.com:465 | 密码 |
 
-> **Outlook / Microsoft 365**：微软已停用密码登录（IMAP/SMTP 仅接受 OAuth2）。OAuth 授权（含适合内网 NAS 的设备码流程）在路线图中，当前版本暂不支持。
+> **Outlook / Microsoft 365**：微软已停用密码登录（IMAP/SMTP 仅接受 OAuth2）。支持 **设备码授权**：
+> 添加账号时选 Outlook → 首次使用需注册一个免费的 Azure 应用（界面里有直达链接与 4 步指引），
+> 把「应用程序(客户端) ID」填进设置保存 → 点「连接 Outlook」→ 在 `microsoft.com/devicelogin`
+> 输入 8 位验证码完成授权。应用 ID 由界面填写、存在实例设置里（它不是密钥，公共客户端流程不使用 secret），
+> 所有用户共用，随时可在「更换应用 ID」里修改。
 
 ## 安全建议
 

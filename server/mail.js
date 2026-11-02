@@ -2,25 +2,66 @@ import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { simpleParser } from 'mailparser';
 import sanitizeHtml from 'sanitize-html';
-import { findAccount } from './store.js';
+import { findAccount, listAccounts, saveAccounts } from './store.js';
+import { refreshAccessToken } from './oauth.js';
 
 // ---------- 连接管理 ----------
 // key: `${uid}:${accountId}` -> { client, ready: Promise<ImapFlow> }
 const pools = new Map();
 
-function clientConfig(acc) {
+function isOAuth(acc) {
+  return acc?.auth?.type === 'oauth2';
+}
+
+function clientConfig(acc, accessToken = null) {
   return {
     host: acc.imap.host,
     port: Number(acc.imap.port) || 993,
     secure: acc.imap.tls !== false,
-    auth: { user: acc.auth.user, pass: acc.auth.pass },
+    auth: isOAuth(acc)
+      ? { user: acc.auth.user, accessToken }
+      : { user: acc.auth.user, pass: acc.auth.pass },
     // 网易系要求客户端在握手时发 IMAP ID，imapflow 检测到服务端 ID 能力后自动发送
-    clientInfo: { name: 'MailNest', version: '0.1.2', vendor: 'MailNest' },
+    clientInfo: { name: 'MailNest', version: '0.1.3', vendor: 'MailNest' },
     logger: false,
     tls: { rejectUnauthorized: acc.imap.allowInsecureTls !== true },
     connectionTimeout: 20000,
     greetingTimeout: 20000,
   };
+}
+
+// ---------- OAuth2 access token（Outlook） ----------
+// 同一账号的并发请求必须共享同一次续期：refresh_token 会轮换，刷新两次会让先拿到的那份失效
+const refreshes = new Map(); // `${uid}:${accountId}` -> Promise<string>
+
+async function accessTokenFor(uid, acc) {
+  const a = acc.auth || {};
+  if (a.accessToken && a.expiresAt && a.expiresAt > Date.now() + 60_000) return a.accessToken;
+
+  const key = poolKey(uid, acc.id);
+  const running = refreshes.get(key);
+  if (running) return running;
+
+  const task = (async () => {
+    const t = await refreshAccessToken(a.refreshToken, a.clientId || undefined);
+    // 写回磁盘：refresh_token 可能已轮换，旧的不能再用
+    const accounts = listAccounts(uid);
+    const target = accounts.find((x) => x.id === acc.id);
+    if (target) {
+      target.auth = {
+        ...target.auth,
+        accessToken: t.accessToken,
+        refreshToken: t.refreshToken,
+        expiresAt: t.expiresAt,
+      };
+      saveAccounts(uid, accounts);
+    }
+    Object.assign(acc.auth, { accessToken: t.accessToken, refreshToken: t.refreshToken, expiresAt: t.expiresAt });
+    return t.accessToken;
+  })().finally(() => refreshes.delete(key));
+
+  refreshes.set(key, task);
+  return task;
 }
 
 function poolKey(uid, accountId) {
@@ -32,7 +73,8 @@ async function getClient(uid, accountId) {
   if (!acc) throw Object.assign(new Error('邮箱账号不存在'), { status: 404 });
 
   const key = poolKey(uid, accountId);
-  const stamp = JSON.stringify(clientConfig(acc));
+  // stamp 刻意不含 access token：已认证的连接不需要 token，token 过期后连接会自己断开再重建
+  const stamp = JSON.stringify(clientConfig(acc, isOAuth(acc) ? 'oauth' : null));
   let entry = pools.get(key);
   if (entry && (entry.accountStamp !== stamp || entry.client.closed)) {
     try { entry.client.close(); } catch { /* ignore */ }
@@ -40,7 +82,8 @@ async function getClient(uid, accountId) {
     entry = null;
   }
   if (!entry) {
-    const client = new ImapFlow(clientConfig(acc));
+    const token = isOAuth(acc) ? await accessTokenFor(uid, acc) : null;
+    const client = new ImapFlow(clientConfig(acc, token));
     entry = { client, acc, accountStamp: stamp };
     // ready 存进 entry：并发请求共享同一个连接建立过程，杜绝「连接未就绪就发命令」的竞态
     entry.ready = client
@@ -49,7 +92,12 @@ async function getClient(uid, accountId) {
       .catch((e) => {
         pools.delete(key);
         try { client.close(); } catch { /* ignore */ }
-        throw e;
+        const friendly = imapError(e);
+        if (isOAuth(acc) && friendly.status === 401) {
+          friendly.message = 'Outlook 授权已失效（可能改过密码或撤销了授权），请删除这个账号后重新添加';
+          friendly.oauth = true;
+        }
+        throw friendly;
       });
     pools.set(key, entry);
   }
@@ -77,6 +125,8 @@ async function withMailbox(uid, accountId, folder, fn) {
 }
 
 function imapError(e) {
+  // 已经是翻译过的、给用户看的中文错误（例如 OAuth 失效），别再套一层
+  if (e?.oauth) return e;
   const msg = String(e?.responseText || e?.message || e || '未知错误');
   if (/AUTHENTICATIONFAILED|AUTHORIZATIONFAILED|Invalid credentials|LOGIN/i.test(msg)) {
     return Object.assign(new Error('登录失败：请检查邮箱地址与授权码（不是网页登录密码）'), { status: 401 });
@@ -288,12 +338,15 @@ export async function deleteMessages(uid, accountId, folder, messageUids) {
 }
 
 // ---------- SMTP 发信 ----------
-function transport(acc) {
+function transport(acc, accessToken = null) {
+  const auth = isOAuth(acc)
+    ? { type: 'OAuth2', user: acc.auth.user, accessToken }
+    : { user: acc.auth.user, pass: acc.auth.pass };
   return nodemailer.createTransport({
     host: acc.smtp.host,
     port: Number(acc.smtp.port) || 465,
     secure: acc.smtp.tls !== false,
-    auth: { user: acc.auth.user, pass: acc.auth.pass },
+    auth,
     tls: { rejectUnauthorized: acc.smtp.allowInsecureTls !== true },
     connectionTimeout: 20000,
   });
@@ -301,7 +354,8 @@ function transport(acc) {
 
 export async function sendMail(uid, account, opts) {
   const { to, cc, bcc, subject, text, html, inReplyTo, references, attachments = [] } = opts;
-  const trans = transport(account);
+  const token = isOAuth(account) ? await accessTokenFor(uid, account) : null;
+  const trans = transport(account, token);
   const mail = {
     from: `"${account.displayName || account.email}" <${account.email}>`,
     to: Array.isArray(to) ? to.join(', ') : to,
@@ -335,7 +389,12 @@ export async function sendMail(uid, account, opts) {
 
 // ---------- 连通性测试（添加账号前调用） ----------
 export async function testAccount(cfg) {
-  const client = new ImapFlow({ ...clientConfig(cfg), connectionTimeout: 12000, greetingTimeout: 12000 });
+  // OAuth 账号此时还没入库、没有可续期的 refresh_token，直接用带过来的 access token 试连
+  const token = isOAuth(cfg) ? cfg.auth.accessToken || null : null;
+  if (isOAuth(cfg) && !token) {
+    throw Object.assign(new Error('Outlook 账号需要先完成授权，点「连接 Outlook」即可'), { status: 400 });
+  }
+  const client = new ImapFlow({ ...clientConfig(cfg, token), connectionTimeout: 12000, greetingTimeout: 12000 });
   try {
     await client.connect();
     await client.logout();

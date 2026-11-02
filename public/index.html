@@ -413,29 +413,82 @@
                 <div class="form-row"><label>邮箱地址</label><div class="wrap"><input v-model.trim="addForm.email" placeholder="you@qq.com" spellcheck="false"></div></div>
                 <div class="form-row"><label>显示名</label><div class="wrap"><input v-model.trim="addForm.displayName" placeholder="可选"></div></div>
               </div>
-              <div class="form-row"><label>授权码 / 密码</label>
-                <div class="wrap has-eye"><input v-model="addForm.password" :type="showPw?'text':'password'" placeholder="不是网页登录密码">
-                <button class="eye" type="button" @click="showPw=!showPw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-lock"/></svg></button></div>
-                <p class="hint" v-if="presetHint">{{ presetHint }}</p>
-              </div>
-              <details style="margin-bottom:12px">
-                <summary style="font-size:12.5px;color:var(--text-3);cursor:pointer">服务器参数（自动按邮箱域名填充，可改）</summary>
-                <div class="form-grid" style="margin-top:10px">
-                  <div class="form-row"><label>IMAP 服务器</label><div class="wrap"><input v-model.trim="addForm.imapHost"></div></div>
-                  <div class="form-row"><label>IMAP 端口</label><div class="wrap"><input v-model.number="addForm.imapPort" type="number"></div></div>
-                  <div class="form-row"><label>SMTP 服务器</label><div class="wrap"><input v-model.trim="addForm.smtpHost"></div></div>
-                  <div class="form-row"><label>SMTP 端口</label><div class="wrap"><input v-model.number="addForm.smtpPort" type="number"></div></div>
+
+              <!-- Outlook：OAuth 设备码授权（微软已停用密码登录） -->
+              <template v-if="addIsOauth">
+                <div class="oauth-box">
+                  <template v-if="!outlook.configured">
+                    <p class="oauth-lead">
+                      Outlook 已不能用密码或授权码登录，需要先注册一个微软应用（免费，只做一次），
+                      把「应用程序(客户端) ID」填进来。这个 ID <b>不是密钥</b>，填错了也只是连不上，可以随时改。
+                    </p>
+                    <a class="oauth-link" :href="outlook.registerUrl" target="_blank" rel="noopener noreferrer">打开微软应用注册页 ↗</a>
+                    <details class="oauth-steps">
+                      <summary>注册步骤（4 步，约 2 分钟）</summary>
+                      <ol>
+                        <li>点上面的链接，选「新注册」，名称随意填（例如 MailNest）。</li>
+                        <li>账户类型选「任何组织目录中的账户和个人 Microsoft 账户」，重定向 URI 留空。</li>
+                        <li>注册后点左侧「身份验证」→ 拉到底，把「允许公共客户端流」设为「是」并保存。</li>
+                        <li>回到「概述」，复制「应用程序(客户端) ID」，粘贴到下面。</li>
+                      </ol>
+                      <p class="hint">不需要客户端密码，也不用手动配 API 权限：设备码流程用的是公共客户端 + 委托权限。</p>
+                    </details>
+                    <div class="form-row" style="margin-top:10px">
+                      <label>应用程序(客户端) ID</label>
+                      <div class="wrap"><input v-model.trim="outlook.idInput" placeholder="12345678-1234-1234-1234-123456789abc" spellcheck="false"></div>
+                    </div>
+                    <button class="btn-ghost" style="width:100%" @click="saveOutlookClientId" :disabled="outlook.savingId">
+                      <span v-if="!outlook.savingId">保存应用 ID</span><span class="spin" v-else></span>
+                    </button>
+                  </template>
+
+                  <template v-else-if="!outlook.device">
+                    <p class="oauth-lead">
+                      应用 ID 已配置 <span class="mono">{{ outlook.clientId.slice(0, 8) }}…</span>。
+                      点下面的按钮生成一次性验证码，再用这个邮箱在微软页面上确认即可。
+                    </p>
+                    <button class="btn" style="width:100%;margin-top:0" @click="connectOutlook">连接 Outlook</button>
+                    <button class="linkbtn" @click="outlook.configured = false; outlook.error = ''">更换应用 ID</button>
+                  </template>
+
+                  <template v-else>
+                    <p class="oauth-step">1 · 打开 <a :href="outlook.deviceLoginUrl" target="_blank" rel="noopener noreferrer">{{ outlook.device.verificationUri }}</a></p>
+                    <p class="oauth-step">2 · 输入下面这串验证码</p>
+                    <div class="usercode">{{ outlook.device.userCode }}</div>
+                    <p class="oauth-step">3 · 登录要添加的 Outlook 账号，同意授权</p>
+                    <div class="oauth-wait" v-if="outlook.polling"><span class="spin"></span> 等待你在微软页面上完成…</div>
+                    <button class="btn-ghost" style="width:100%" @click="cancelOutlook">取消</button>
+                  </template>
+
+                  <p class="hint oauth-err" v-if="outlook.error">{{ outlook.error }}</p>
                 </div>
-              </details>
-              <div class="form-grid">
-                <button class="btn-ghost" @click="testAdd" :disabled="addForm.testing">
-                  <span v-if="!addForm.testing">测试连接</span><span class="spin" v-else></span>
-                </button>
-                <button class="btn" style="margin-top:0;height:38px" @click="addAccount" :disabled="addForm.saving">
-                  <span v-if="!addForm.saving">保存</span><span class="spin" style="border-color:rgba(255,255,255,.4);border-top-color:#fff" v-else></span>
-                </button>
-              </div>
-              <p class="hint" v-if="addForm.message" :style="{color: addForm.ok ? 'var(--ok)' : 'var(--err)'}">{{ addForm.message }}</p>
+              </template>
+
+              <template v-else>
+                <!-- 其他邮箱：授权码 / 密码 -->
+                <div class="form-row"><label>授权码 / 密码</label>                  <div class="wrap has-eye"><input v-model="addForm.password" :type="showPw?'text':'password'" placeholder="不是网页登录密码">
+                  <button class="eye" type="button" @click="showPw=!showPw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-lock"/></svg></button></div>
+                  <p class="hint" v-if="presetHint">{{ presetHint }}</p>
+                </div>
+                <details style="margin-bottom:12px">
+                  <summary style="font-size:12.5px;color:var(--text-3);cursor:pointer">服务器参数（自动按邮箱域名填充，可改）</summary>
+                  <div class="form-grid" style="margin-top:10px">
+                    <div class="form-row"><label>IMAP 服务器</label><div class="wrap"><input v-model.trim="addForm.imapHost"></div></div>
+                    <div class="form-row"><label>IMAP 端口</label><div class="wrap"><input v-model.number="addForm.imapPort" type="number"></div></div>
+                    <div class="form-row"><label>SMTP 服务器</label><div class="wrap"><input v-model.trim="addForm.smtpHost"></div></div>
+                    <div class="form-row"><label>SMTP 端口</label><div class="wrap"><input v-model.number="addForm.smtpPort" type="number"></div></div>
+                  </div>
+                </details>
+                <div class="form-grid">
+                  <button class="btn-ghost" @click="testAdd" :disabled="addForm.testing">
+                    <span v-if="!addForm.testing">测试连接</span><span class="spin" v-else></span>
+                  </button>
+                  <button class="btn" style="margin-top:0;height:38px" @click="addAccount" :disabled="addForm.saving">
+                    <span v-if="!addForm.saving">保存</span><span class="spin" style="border-color:rgba(255,255,255,.4);border-top-color:#fff" v-else></span>
+                  </button>
+                </div>
+                <p class="hint" v-if="addForm.message" :style="{color: addForm.ok ? 'var(--ok)' : 'var(--err)'}">{{ addForm.message }}</p>
+              </template>
             </template>
           </template>
 

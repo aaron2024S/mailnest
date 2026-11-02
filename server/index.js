@@ -13,6 +13,10 @@ import {
   moveMessages, deleteMessages, sendMail, testAccount,
   listDrafts, saveDraft, deleteDraft, dropConnections, unseenCounts,
 } from './mail.js';
+import {
+  getOutlookClientId, setOutlookClientId, startDeviceCode, pollDeviceCode,
+  REGISTER_URL, DEVICE_LOGIN_URL,
+} from './oauth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8006;
@@ -178,7 +182,8 @@ api.post('/me/password', guard, (req, res) => {
 // ---------- 邮箱账号 ----------
 function sanitizeAccount(a) {
   const { auth, ...rest } = a;
-  return rest;
+  // auth 里含密码/refresh_token，绝不外发；只告诉前端这号走的是 OAuth
+  return { ...rest, oauth: auth?.type === 'oauth2' };
 }
 
 api.get('/accounts', guard, (req, res) => {
@@ -191,7 +196,7 @@ const PRESETS = {
   '126': { imap: { host: 'imap.126.com', port: 993, tls: true }, smtp: { host: 'smtp.126.com', port: 465, tls: true }, passwordHint: '使用客户端授权密码' },
   sina: { imap: { host: 'imap.sina.com', port: 993, tls: true }, smtp: { host: 'smtp.sina.com', port: 465, tls: true }, passwordHint: '先在网页端开启 IMAP/SMTP' },
   gmail: { imap: { host: 'imap.gmail.com', port: 993, tls: true }, smtp: { host: 'smtp.gmail.com', port: 465, tls: true }, passwordHint: '需两步验证 + 应用专用密码' },
-  outlook: { imap: { host: 'outlook.office365.com', port: 993, tls: true }, smtp: { host: 'smtp.office365.com', port: 587, tls: true }, passwordHint: 'Outlook 已停用密码登录，OAuth 支持在路线图中' },
+  outlook: { imap: { host: 'outlook.office365.com', port: 993, tls: true }, smtp: { host: 'smtp.office365.com', port: 587, tls: true }, passwordHint: 'Outlook 已停用密码登录，需用下方「连接 Outlook」完成 OAuth 授权' },
   qiye: { imap: { host: 'imap.exmail.qq.com', port: 993, tls: true }, smtp: { host: 'smtp.exmail.qq.com', port: 465, tls: true }, passwordHint: '腾讯企业邮' },
   aliyun: { imap: { host: 'imap.qiye.aliyun.com', port: 993, tls: true }, smtp: { host: 'smtp.qiye.aliyun.com', port: 465, tls: true }, passwordHint: '阿里企业邮' },
 };
@@ -262,7 +267,7 @@ api.patch('/accounts/:id', guard, async (req, res) => {
     if (!acc) return res.status(404).json({ error: '账号不存在' });
     if (typeof req.body?.displayName === 'string') acc.displayName = req.body.displayName.slice(0, 60);
     if (/^#[0-9a-fA-F]{6}$/.test(req.body?.color || '')) acc.color = req.body.color;
-    if (req.body?.auth?.pass) acc.auth.pass = String(req.body.auth.pass);
+    if (req.body?.auth?.pass && acc.auth?.type !== 'oauth2') acc.auth.pass = String(req.body.auth.pass);
     saveAccounts(req.user.id, accounts);
     await dropConnections(req.user.id, acc.id);
     res.json({ accounts: accounts.map(sanitizeAccount) });
@@ -278,6 +283,76 @@ api.delete('/accounts/:id', guard, async (req, res) => {
     await dropConnections(req.user.id, req.params.id);
     audit(req.user.id, 'account-remove', req.params.id, clientIp(req));
     res.json({ accounts: next.map(sanitizeAccount) });
+  } catch (e) { fail(res, e); }
+});
+
+// ---------- Outlook OAuth2（设备码流程） ----------
+// Azure 应用 ID 由用户在界面上填写一次，存实例级设置（全实例共用一个应用）。
+// 它不是密钥：公共客户端（设备码/PKCE）流程不用 client_secret，这个 id 本来就公开。
+// 所以既不加密、也不走环境变量 —— 用户在哪里填就在那里改。
+api.get('/oauth/outlook', guard, (req, res) => {
+  res.json({
+    configured: !!getOutlookClientId(),
+    clientId: getOutlookClientId(),
+    registerUrl: REGISTER_URL,
+    deviceLoginUrl: DEVICE_LOGIN_URL,
+  });
+});
+
+api.post('/oauth/outlook/client-id', guard, (req, res) => {
+  try {
+    const id = setOutlookClientId(req.body?.clientId);
+    audit(req.user.id, 'outlook-client-id', '设置 Azure 应用 ID', clientIp(req));
+    res.json({ configured: true, clientId: id });
+  } catch (e) { fail(res, e); }
+});
+
+api.post('/oauth/outlook/start', guard, async (req, res) => {
+  try {
+    res.json(await startDeviceCode());
+  } catch (e) { fail(res, e); }
+});
+
+api.post('/oauth/outlook/poll', guard, async (req, res) => {
+  try {
+    const deviceCode = String(req.body?.deviceCode || '');
+    if (!deviceCode) return res.status(400).json({ error: '缺少验证码，请重新获取' });
+    const r = await pollDeviceCode(deviceCode);
+    if (r.pending) {
+      return res.json({ pending: true, reason: r.reason || 'pending', slowDown: r.reason === 'slow_down' });
+    }
+
+    const email = String(req.body?.email || r.token.email || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: '没能读到微软账号的邮箱地址，请在上方手动填写邮箱后重新连接' });
+    }
+    const accounts = listAccounts(req.user.id);
+    if (accounts.some((a) => a.email.toLowerCase() === email.toLowerCase())) {
+      return res.status(400).json({ error: '这个邮箱已经添加过了' });
+    }
+    const acc = {
+      id: 'a_' + crypto.randomBytes(5).toString('hex'),
+      email,
+      displayName: String(req.body?.displayName || email.split('@')[0]).slice(0, 60),
+      color: '#2d6cf6',
+      preset: 'outlook',
+      imap: { host: 'outlook.office365.com', port: 993, tls: true },
+      // 微软要求 587 + STARTTLS；465 隐式 TLS 在 Exchange Online 上不开放
+      smtp: { host: 'smtp.office365.com', port: 587, tls: false },
+      auth: {
+        type: 'oauth2',
+        user: email,
+        refreshToken: r.token.refreshToken || '',
+        accessToken: r.token.accessToken,
+        expiresAt: r.token.expiresAt,
+        clientId: r.token.clientId,
+      },
+      createdAt: Date.now(),
+    };
+    accounts.push(acc);
+    saveAccounts(req.user.id, accounts);
+    audit(req.user.id, 'account-add', `outlook:${email}`, clientIp(req));
+    res.json({ done: true, email, accounts: accounts.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
 });
 
@@ -362,7 +437,12 @@ api.post('/send', guard, async (req, res) => {
     res.json(result);
   } catch (e) {
     const msg = String(e?.response || e?.message || e);
-    if (/535|auth/i.test(msg)) return fail(res, Object.assign(new Error('SMTP 认证失败：请检查授权码'), { status: 401 }));
+    if (/535|auth/i.test(msg)) {
+      const hint = acc.auth?.type === 'oauth2'
+        ? 'Outlook 授权已失效，请删除这个账号后重新连接一次'
+        : 'SMTP 认证失败：请检查授权码';
+      return fail(res, Object.assign(new Error(hint), { status: 401 }));
+    }
     if (/554|553|550|spam|reject/i.test(msg)) return fail(res, Object.assign(new Error(`对方服务器拒收：${msg.slice(0, 160)}`), { status: 502 }));
     fail(res, Object.assign(new Error(`发送失败：${msg.slice(0, 160)}`), { status: 502 }));
   }

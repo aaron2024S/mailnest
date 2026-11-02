@@ -12,9 +12,11 @@ function envelope(i) {
   return `ENVELOPE ("Mon, 2 Nov 2026 09:${String(i).padStart(2, '0')}:00 +0800" "测试邮件 ${i}" (("张三" NIL "zhangsan" "qq.com")) (("张三" NIL "zhangsan" "qq.com")) (("张三" NIL "zhangsan" "qq.com")) (("me" NIL "me" "qq.com")) NIL NIL NIL "<msg${i}@qq.com>")`;
 }
 
+let sawXoauth2 = false;
+
 const server = net.createServer((sock) => {
   sock.setEncoding('utf8');
-  sock.write('* OK [CAPABILITY IMAP4rev1 ID] mock ready\r\n');
+  sock.write('* OK [CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR] mock ready\r\n');
   let buf = '';
   sock.on('data', (chunk) => {
     buf += chunk;
@@ -31,11 +33,23 @@ const server = net.createServer((sock) => {
       const rest = isUid ? rest0.slice(rest0.split(/\s+/)[0].length).trim() : rest0;
       const C = cmd.toUpperCase();
       if (C === 'CAPABILITY') {
-        sock.write(`* CAPABILITY IMAP4rev1 ID\r\n${tag2} OK done\r\n`);
+        sock.write(`* CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR\r\n${tag2} OK done\r\n`);
       } else if (C === 'ID') {
         sock.write(`* ID ("name" "mock")\r\n${tag2} OK done\r\n`);
       } else if (C === 'LOGIN') {
-        sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 ID] logged in\r\n`);
+        sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR] logged in\r\n`);
+      } else if (C === 'AUTHENTICATE') {
+        // OAuth2 账号走 AUTHENTICATE XOAUTH2 <base64(user=..\x01auth=Bearer ..\x01\x01)>
+        const parts = rest.split(/\s+/);
+        const mech = (parts[0] || '').toUpperCase();
+        let raw = '';
+        try { raw = Buffer.from(parts[1] || '', 'base64').toString('utf8'); } catch { raw = ''; }
+        if (mech === 'XOAUTH2' && /^user=[^\u0001]+\u0001auth=Bearer [^\u0001]+\u0001\u0001$/.test(raw)) {
+          sawXoauth2 = true;
+          sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR] authenticated\r\n`);
+        } else {
+          sock.write(`${tag2} NO [AUTHENTICATIONFAILED] bad token\r\n`);
+        }
       } else if (C === 'SELECT' || C === 'EXAMINE') {
         sock.write('* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n');
         sock.write(`* ${COUNT} EXISTS\r\n* 0 RECENT\r\n`);
@@ -101,17 +115,38 @@ const { listMessages, listFolders, unseenCounts, getMessage } = await import('..
 
 ensureDataDirs();
 const user = createUser({ username: 'imaptest', password: 'password123', role: 'member' });
-saveAccounts(user.id, [{
-  id: 'a_test',
-  email: 'me@qq.com',
-  displayName: '测试',
-  color: '#2d6cf6',
-  preset: null,
-  imap: { host: '127.0.0.1', port: 43143, tls: false, allowInsecureTls: true },
-  smtp: { host: '127.0.0.1', port: 43143, tls: false, allowInsecureTls: true },
-  auth: { user: 'me@qq.com', pass: 'x'.repeat(10) },
-  createdAt: Date.now(),
-}]);
+saveAccounts(user.id, [
+  {
+    id: 'a_test',
+    email: 'me@qq.com',
+    displayName: '测试',
+    color: '#2d6cf6',
+    preset: null,
+    imap: { host: '127.0.0.1', port: 43143, tls: false, allowInsecureTls: true },
+    smtp: { host: '127.0.0.1', port: 43143, tls: false, allowInsecureTls: true },
+    auth: { user: 'me@qq.com', pass: 'x'.repeat(10) },
+    createdAt: Date.now(),
+  },
+  {
+    // Outlook 这类 OAuth2 账号：没有密码，只有 refresh_token + 当前 access_token
+    id: 'a_oauth',
+    email: 'demo@outlook.com',
+    displayName: 'Outlook',
+    color: '#2d6cf6',
+    preset: 'outlook',
+    imap: { host: '127.0.0.1', port: 43143, tls: false, allowInsecureTls: true },
+    smtp: { host: '127.0.0.1', port: 43143, tls: false, allowInsecureTls: true },
+    auth: {
+      type: 'oauth2',
+      user: 'demo@outlook.com',
+      refreshToken: 'rt-1',
+      accessToken: 'fake-access-token',
+      expiresAt: Date.now() + 3600 * 1000,
+      clientId: '11111111-2222-3333-4444-555555555555',
+    },
+    createdAt: Date.now(),
+  },
+]);
 
 let pass = 0, fail = 0;
 const check = (name, ok, extra = '') => {
@@ -143,6 +178,11 @@ check('正文主题解析', msg.subject === '测试邮件 1', msg.subject);
 check('正文内容解析', (msg.text || '').includes('正文内容 hello body'), JSON.stringify(msg.text));
 check('正文 flags 可迭代且含 \\Seen', Array.isArray(msg.flags) && msg.flags.includes('\\Seen'), JSON.stringify(msg.flags));
 check('正文发件人地址', msg.from.address === 'zhangsan@qq.com', JSON.stringify(msg.from));
+
+// OAuth2 账号（Outlook）：必须走 AUTHENTICATE XOAUTH2，而不是 LOGIN
+const oauthPage = await listMessages(user.id, 'a_oauth', 'INBOX', { page: 1, pageSize: 50 });
+check('OAuth 账号能收信', oauthPage.total === 14 && oauthPage.messages.length === 14, `total=${oauthPage.total} len=${oauthPage.messages.length}`);
+check('OAuth 认证走 XOAUTH2 而非密码', sawXoauth2 === true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'HAS FAILURES'}  pass=${pass} fail=${fail}`);
 server.close();

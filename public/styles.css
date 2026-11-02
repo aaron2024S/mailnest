@@ -355,3 +355,25 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
   .form-grid{grid-template-columns:1fr;}
   .preset-grid{grid-template-columns:repeat(3,1fr);}
 }
+
+/* ============ Outlook OAuth（设备码授权） ============ */
+.oauth-box{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:12px;}
+.oauth-lead{margin:0 0 10px;font-size:12.5px;line-height:1.65;color:var(--text-2);}
+.oauth-link{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;font-weight:600;color:var(--accent);
+  text-decoration:none;padding:7px 12px;border:1px solid var(--accent-soft-2);background:var(--surface);border-radius:999px;transition:background .15s;}
+.oauth-link:hover{background:var(--accent-soft);}
+.oauth-steps{margin-top:10px;font-size:12.5px;color:var(--text-2);}
+.oauth-steps summary{cursor:pointer;color:var(--text-3);}
+.oauth-steps ol{margin:8px 0;padding-left:18px;line-height:1.8;}
+.oauth-steps li{margin-bottom:2px;}
+.oauth-step{margin:0 0 8px;font-size:12.5px;color:var(--text-2);}
+.oauth-step a{color:var(--accent);font-weight:600;text-decoration:none;}
+.usercode{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:25px;font-weight:800;letter-spacing:.14em;
+  text-align:center;padding:13px 10px;margin:6px 0 12px;background:var(--surface);border:1.5px dashed var(--accent-soft-2);
+  border-radius:10px;color:var(--accent);user-select:all;}
+.oauth-wait{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-3);margin-bottom:10px;}
+.oauth-wait .spin{width:13px;height:13px;}
+.oauth-err{color:var(--err)!important;}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;}
+.linkbtn{display:block;margin:9px auto 0;background:none;border:0;color:var(--text-3);font-size:12px;cursor:pointer;text-decoration:underline;padding:2px;}
+.linkbtn:hover{color:var(--text-2);}
