@@ -22,7 +22,7 @@ function clientConfig(acc, accessToken = null) {
       ? { user: acc.auth.user, accessToken }
       : { user: acc.auth.user, pass: acc.auth.pass },
     // 网易系要求客户端在握手时发 IMAP ID，imapflow 检测到服务端 ID 能力后自动发送
-    clientInfo: { name: 'MailNest', version: '0.1.3', vendor: 'MailNest' },
+    clientInfo: { name: 'MailNest', version: '0.1.4', vendor: 'MailNest' },
     logger: false,
     tls: { rejectUnauthorized: acc.imap.allowInsecureTls !== true },
     connectionTimeout: 20000,

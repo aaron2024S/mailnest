@@ -31,6 +31,7 @@ const app = createApp({
     return {
       view: 'auth',
       token: Date.now(),
+      version: '',           // 由 /api/setup-status 下发，来源是 package.json
       // 默认按「已初始化」处理显示登录页；只有 setup-status 确认零用户时才切到注册页，
       // 避免旧标签页/刷新瞬间误显示「创建管理员」入口
       authMode: 'login',
@@ -1074,6 +1075,7 @@ const app = createApp({
     window.addEventListener('resize', () => this.closeCtx());
     try {
       const st = await this.api('/api/setup-status');
+      this.version = st.version || '';
       if (!st.setupDone) { this.authMode = 'setup'; this.view = 'auth'; return; }
       await this.enterApp();
     } catch {

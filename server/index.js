@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +18,13 @@ import {
   getOutlookClientId, setOutlookClientId, startDeviceCode, pollDeviceCode,
   REGISTER_URL, DEVICE_LOGIN_URL,
 } from './oauth.js';
+
+// 版本号唯一来源：package.json（登录页、客户端 ID 等处都从这里取，避免多处手改漏掉）
+const APP_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version || '';
+  } catch { return ''; }
+})();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8006;
@@ -108,7 +116,7 @@ function publicUser(u) {
 }
 
 api.get('/setup-status', (req, res) => {
-  res.json({ setupDone: !!system().settings.setupDone });
+  res.json({ setupDone: !!system().settings.setupDone, version: APP_VERSION });
 });
 
 api.post('/setup', async (req, res) => {

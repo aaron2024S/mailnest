@@ -128,7 +128,7 @@
         <p class="switch" v-if="authMode==='setup'">已有账户？<a @click.prevent="authMode='login';authError=''">去登录</a></p>
         <p class="switch" v-else>还没有账户？<a @click.prevent="authMode='setup';authError=''">返回注册</a></p>
       </div>
-      <div class="formfoot">MailNest 0.1.0<span class="sep">·</span>本地部署<span class="sep">·</span>支持多用户</div>
+      <div class="formfoot">MailNest {{ version }}<span class="sep">·</span>本地部署<span class="sep">·</span>支持多用户</div>
     </main>
   </div>
 
