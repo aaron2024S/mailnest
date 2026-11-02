@@ -22,7 +22,7 @@ curl -O https://raw.githubusercontent.com/aaron2024S/mailnest/main/docker-compos
 docker compose up -d
 ```
 
-浏览器打开 `http://NAS_IP:3000`：
+浏览器打开 `http://NAS_IP:8006`：
 
 1. 首次启动会要求**创建管理员账户**（注册入口只在这个时候开放，之后自动关闭）
 2. 右上角头像 → **设置 → 邮箱账号 → 添加**，选择服务商预设或直接填 IMAP/SMTP 参数
@@ -50,10 +50,12 @@ docker compose up -d
 
 ```bash
 npm ci
-npm start          # 默认 3000 端口，数据在 ./data
+npm start          # 默认 8006 端口，数据在 ./data
 ```
 
-环境变量：`PORT`、`HOST`、`MAILNEST_DATA`（数据目录，默认 `./data`）、`MAILNEST_SECURE_COOKIES`。
+环境变量：`PORT`（默认 8006）、`HOST`、`MAILNEST_DATA`（数据目录，默认 `./data`）、`MAILNEST_SECURE_COOKIES`。
+
+> 换端口：compose 目录下放 `.env` 写 `PORT=9000`，或 `PORT=9000 docker compose up -d`。
 
 ## 构建镜像 / 发版
 

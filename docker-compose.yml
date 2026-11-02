@@ -6,9 +6,11 @@ services:
     container_name: mailnest
     restart: unless-stopped
     ports:
-      # 默认 3000:3000；想换端口时在 .env 里写 MAILNEST_PORT=8080，或启动前 export 该变量
-      - "${MAILNEST_PORT:-3000}:3000"
+      # 默认 8006:8006；想换端口时在 .env 里写 PORT=9000，或启动前 export PORT=9000
+      - "${PORT:-8006}:${PORT:-8006}"
     environment:
+      # 容器内监听端口，跟随上面的 PORT 一起变
+      PORT: "${PORT:-8006}"
       # 走 HTTPS（反向代理）后改成 true，浏览器才会带 Secure cookie
       MAILNEST_SECURE_COOKIES: "false"
     volumes:
