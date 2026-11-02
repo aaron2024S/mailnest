@@ -109,7 +109,7 @@ const app = createApp({
       return /@(outlook|hotmail|live|msn)\./i.test(this.addForm.email || '');
     },
     currentAccountLabel() {
-      if (this.activeAccount === 'all') return '所有邮箱';
+      if (this.activeAccount === 'all') return '全部收件箱';
       const a = this.accounts.find((x) => x.id === this.activeAccount);
       return a ? a.displayName : '';
     },
@@ -140,8 +140,8 @@ const app = createApp({
     },
     listTitle() {
       if (this.activeAccount === 'all') {
-        // 汇总视图：没选具体文件夹时才是「收件箱 · 所有账号」；点了某账号的某文件夹要如实显示
-        if (!this.allFolder) return '收件箱 · 所有账号';
+        // 汇总视图：没选具体文件夹时是跨账号的「全部收件箱」；点了某账号的某文件夹要如实显示
+        if (!this.allFolder) return '全部收件箱';
         const sep = this.allFolder.indexOf('|');
         const aid = this.allFolder.slice(0, sep), path = this.allFolder.slice(sep + 1);
         const f = this.foldersOf(aid).find((x) => x.path === path);
@@ -277,6 +277,11 @@ const app = createApp({
     },
     foldersOf(aid) { return this.foldersByAccount[aid] || []; },
     unseenOf(aid, path) { return this.unreadMap[`${aid}|${path}`] || 0; },
+    // 汇总列表里标注来源账号用的短名（列表宽 384px，长名字靠 CSS ellipsis 截断）
+    acctTag(m) {
+      const a = this.accounts.find((x) => x.id === m.accountId);
+      return (a && a.displayName) || m.accountEmail || '';
+    },
     unreadOf(aid) { return this.unreadMap[`${aid}|INBOX`] || 0; },
     folderLabel(f) {
       if (f.path === 'INBOX') return '收件箱';
@@ -400,6 +405,11 @@ const app = createApp({
       this.page = 1; this.searchQ = '';
       this.clearSel();
       this.loadMessages();
+    },
+    // 左栏「全部收件箱」：回到 activeAccount==='all' 且 allFolder===null 的跨账号归并视图
+    pickAllInbox() {
+      if (this.activeAccount === 'all' && !this.allFolder) { this.loadMessages(); return; }
+      this.pickAccount('all');
     },
     pickAllFolder(aid, path) {
       this.allFolder = `${aid}|${path}`;

@@ -531,3 +531,17 @@ body.col-resizing .col-resizer::after{background:var(--accent);}
 .close-ask-btn.ghost:hover{background:var(--hover);color:var(--text);}
 .close-ask-btn.primary{background:var(--accent);color:#fff;font-weight:600;}
 .close-ask-btn.primary:hover{background:var(--accent-hi);}
+
+/* ============ 左栏「全部收件箱」+ 列表账号标签 ============ */
+/* 汇总入口与账号区分开：一条分割线，避免「全部收件箱」被读成第三个账号 */
+.nav-sep{height:1px;background:var(--border);margin:8px 10px 7px;flex:none;}
+.nav-all .count{font-weight:600;}
+
+/* 汇总视图里每行标注来源账号。色点只做识别，文字靠 CSS 截断（列表栏可拖到 300px） */
+.acct-tag{display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;max-width:96px;
+  font-size:11px;line-height:16px;padding:0 6px 0 5px;border-radius:4px;
+  background:var(--surface-3);color:var(--text-2);font-weight:500;}
+.acct-tag i{width:5px;height:5px;border-radius:2px;flex:none;}
+.acct-tag > span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* 发件人才是可收缩的那个，否则长发件人会把这个标签挤出列表 */
+.row .from{flex:0 1 auto;min-width:0;}

@@ -423,7 +423,7 @@ function bulkCtx(messages, opts = {}) {
   const t = C.listTitle.call(ctx);
   ok('标题：汇总视图选中已发送 → 显示「已发送 · QQ邮箱」', t === '已发送 · QQ邮箱', t);
   ctx.allFolder = null;
-  ok('标题：汇总视图默认 → 收件箱 · 所有账号', C.listTitle.call(ctx) === '收件箱 · 所有账号');
+  ok('标题：汇总视图默认 → 全部收件箱', C.listTitle.call(ctx) === '全部收件箱');
   ctx.activeAccount = 'a1'; ctx.folders = [{ path: 'Sent Messages', special: '\\Sent' }]; ctx.activeFolder = 'Sent Messages';
   ok('标题：单账号选中已发送 → 已发送', C.listTitle.call(ctx) === '已发送');
 }
@@ -482,6 +482,34 @@ function bulkCtx(messages, opts = {}) {
   await M.remove.call(ctx, rows[0]);
   ok('单封删除后总数减 1', ctx.total === 1, String(ctx.total));
   ok('单封删除后列表剩 1 封', ctx.messages.length === 1);
+}
+
+// 17) 左栏「全部收件箱」：跨账号未读求和、从任意位置都能回到汇总、列表标注来源账号
+{
+  const ctx = {
+    unreadMap: { 'a1|INBOX': 5, 'a2|INBOX': 3, 'a1|Sent Messages': 100, 'a2|Trash': 2 },
+    accounts: [{ id: 'a1', displayName: 'Outlook 工作' }, { id: 'a2', displayName: 'QQ 邮箱' }],
+  };
+  ok('全部收件箱：只累加各账号 INBOX 未读', C.allUnread.call(ctx) === 8, String(C.allUnread.call(ctx)));
+
+  ok('来源账号标签：取账号显示名称', M.acctTag.call(ctx, { accountId: 'a2', accountEmail: 'x@qq.com' }) === 'QQ 邮箱');
+  ok('来源账号标签：无显示名称时退回邮箱', M.acctTag.call({ accounts: [] }, { accountId: 'zz', accountEmail: 'x@qq.com' }) === 'x@qq.com');
+  ok('来源账号标签：都没有时给空串', M.acctTag.call({ accounts: [] }, { accountId: 'zz' }) === '');
+
+  // 单账号模式下点汇总入口（回归：以前汇总视图没有常驻入口，点进某个账号就回不去）
+  const one = { activeAccount: 'a1', allFolder: null, pickAccount(id) { one.jumped = id; }, loadMessages() { one.reloaded = true; } };
+  M.pickAllInbox.call(one);
+  ok('单账号 → 全部收件箱：切到 all', one.jumped === 'all');
+
+  // 已经在某账号的某个文件夹里（activeAccount 还是 all，但 allFolder 有值）
+  const pinned = { activeAccount: 'all', allFolder: 'a1|Sent Messages', pickAccount() { pinned.jumped = true; }, loadMessages() { pinned.reloaded = true; } };
+  M.pickAllInbox.call(pinned);
+  ok('从某账号文件夹 → 回汇总：清空 allFolder', pinned.jumped === true);
+
+  // 已经停在汇总视图，再点一次应该是刷新，而不是把状态重置一遍
+  const here = { activeAccount: 'all', allFolder: null, pickAccount() { here.jumped = true; }, loadMessages() { here.reloaded = true; } };
+  M.pickAllInbox.call(here);
+  ok('已在全部收件箱再点 → 刷新而非重置', !here.jumped && here.reloaded === true);
 }
 
 console.log(`\n全部通过：${pass} 项断言`);

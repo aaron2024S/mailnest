@@ -59,6 +59,7 @@
   <symbol id="i-logout" viewBox="0 0 24 24"><path d="M14 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2H14"/><path d="M17 8.5 20.5 12 17 15.5"/><path d="M10 12h10"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.8a2 2 0 0 1 2-2h4.2l2 2.3h6.8a2 2 0 0 1 2 2v8.9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 4.2 3.8 8.3 12 12.4l8.2-4.1Z"/><path d="m3.8 12.7 8.2 4.1 8.2-4.1"/><path d="m3.8 17.2 8.2 4.1 8.2-4.1"/></symbol>
 </defs></svg>
 
 <div id="app" v-cloak>
@@ -148,7 +149,7 @@
         <div class="dropdown" v-if="acctOpen" @click.stop>
           <button class="dd-item" @click="pickAccount('all')">
             <span class="swatch" style="background:linear-gradient(145deg,#7c8cff,#4d5ef0)"></span>
-            <span class="meta"><b>所有邮箱</b><span>{{ accounts.length }} 个账号合并</span></span>
+            <span class="meta"><b>全部收件箱</b><span>{{ accounts.length }} 个账号合并</span></span>
             <span class="count-badge" v-if="allUnread">{{ allUnread }}</span>
             <svg class="i" style="width:14px;height:14px;color:var(--accent)" v-if="activeAccount==='all'"><use href="#i-check"/></svg>
           </button>
@@ -204,6 +205,17 @@
         </div>
         <button class="btn-primary" @click="openCompose()"><svg class="i"><use href="#i-compose"/></svg><span>新建邮件</span></button>
         <nav class="nav">
+          <!-- 全部收件箱：跨账号汇总的常驻入口。此前只有「账号菜单 → 所有账号」那一下能看到汇总，
+               点进任何账号的文件夹后就再也回不来（allFolder 一旦赋值没有清空路径）。 -->
+          <button class="nav-item nav-all" v-if="accounts.length>1"
+                  :class="{'is-active': activeAccount==='all' && !allFolder}"
+                  :title="allUnread ? `所有账号的收件箱，共 ${allUnread} 封未读` : '所有账号的收件箱'"
+                  @click="pickAllInbox">
+            <svg class="i"><use href="#i-layers"/></svg>
+            <span class="lbl">全部收件箱</span>
+            <span class="count" v-if="allUnread">{{ allUnread }}</span>
+          </button>
+          <div class="nav-sep" v-if="accounts.length>1"></div>
           <template v-if="activeAccount==='all'">
             <template v-for="a in accounts" :key="a.id">
               <div class="acct-sep"><i :style="{background:a.color}"></i><span>{{ a.displayName }}</span></div>
@@ -300,8 +312,9 @@
             </div>
             <div class="mid">
               <div class="l1">
-                <span class="acct-dot" :style="{background:m._color}" v-if="activeAccount==='all'" title="所属账号"></span>
                 <span class="from">{{ m.from.name || m.from.address || '(未知发件人)' }}</span>
+                <!-- 汇总视图里只靠 6px 色点分不清邮件来自哪个账号，改成带账号名的胶囊 -->
+                <span class="acct-tag" v-if="activeAccount==='all'" :title="m.accountEmail || ''"><i :style="{background:m._color}"></i><span>{{ acctTag(m) }}</span></span>
               </div>
               <span class="subj">{{ m.subject }}</span>
               <span class="preview" v-if="m._preview">{{ m._preview }}</span>
