@@ -398,12 +398,17 @@
 
           <template v-if="settingsTab==='accounts'">
             <div class="acct-row" v-for="a in accounts" :key="a.id">
-              <span class="swatch" :style="{background:a.color}">{{ a.displayName.slice(0,1).toUpperCase() }}</span>
+              <button class="swatch-btn swatch" :style="{background:a.color}" :title="'点击更换颜色'"
+                      @click="toggleColorPick(a)">{{ a.displayName.slice(0,1).toUpperCase() }}</button>
               <span class="meta"><b>{{ a.displayName }}</b><span>{{ a.email }} · {{ a.imap.host }}</span></span>
               <button class="icon-btn" title="删除账号" @click="removeAccount(a)"><svg class="i" style="width:15px;height:15px"><use href="#i-trash"/></svg></button>
+              <div class="palette palette-inline" v-if="colorPickFor===a.id">
+                <button type="button" class="swatch-btn" v-for="c in palette" :key="c"
+                        :style="{background:c}" :class="{'is-on':a.color===c}" @click="setAccountColor(a, c)"></button>
+              </div>
             </div>
             <div style="margin-top:14px" v-if="!addForm.open">
-              <button class="btn-ghost" style="width:100%" @click="addForm.open=true"><svg class="i" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-plus"/></svg> 添加邮箱账号</button>
+              <button class="btn-ghost" style="width:100%" @click="openAddForm"><svg class="i" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-plus"/></svg> 添加邮箱账号</button>
             </div>
             <template v-else>
               <div class="preset-grid" style="margin-top:12px">
@@ -412,6 +417,13 @@
               <div class="form-grid">
                 <div class="form-row"><label>邮箱地址</label><div class="wrap"><input v-model.trim="addForm.email" placeholder="you@qq.com" spellcheck="false"></div></div>
                 <div class="form-row"><label>显示名</label><div class="wrap"><input v-model.trim="addForm.displayName" placeholder="可选"></div></div>
+              </div>
+              <div class="form-row"><label>标识颜色</label>
+                <div class="palette">
+                  <button type="button" class="swatch-btn" v-for="c in palette" :key="c"
+                          :style="{background:c}" :class="{'is-on':addForm.color===c}"
+                          :title="c" @click="addForm.color=c"></button>
+                </div>
               </div>
 
               <!-- Outlook：OAuth 设备码授权（微软已停用密码登录） -->

@@ -66,7 +66,9 @@ const app = createApp({
       readerOpen: false,
       modals: { settings: false, users: false },
       settingsTab: 'accounts',
-      addForm: { open: false, email: '', displayName: '', password: '', preset: null, imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
+      addForm: { open: false, email: '', displayName: '', password: '', preset: null, color: PALETTE[0], imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
+      palette: PALETTE,
+      colorPickFor: null,
       // Outlook OAuth：应用 ID 由用户在界面上填一次，存在实例设置里
       outlook: {
         configured: false, clientId: '', registerUrl: '', deviceLoginUrl: '',
@@ -495,7 +497,8 @@ const app = createApp({
     openSettings() {
       this.avatarOpen = false;
       this.settingsTab = 'accounts';
-      this.addForm = { open: false, email: '', displayName: '', password: '', preset: null, imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false };
+      this.addForm = { open: false, email: '', displayName: '', password: '', preset: null, color: this.nextFreeColor(), imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false };
+      this.colorPickFor = null;
       this.outlook.device = null;
       this.outlook.polling = false;
       this.outlook.error = '';
@@ -507,11 +510,22 @@ const app = createApp({
       const p = PRESETS[key];
       if (p) { this.addForm.imapHost = p.imap[0]; this.addForm.imapPort = p.imap[1]; this.addForm.smtpHost = p.smtp[0]; this.addForm.smtpPort = p.smtp[1]; }
     },
+    openAddForm() {
+      this.addForm.open = true;
+      this.addForm.color = this.nextFreeColor();
+      this.addForm.message = '';
+    },
+    // 第一个未被现有账号占用的色板颜色；全占用则按账号数轮转
+    nextFreeColor() {
+      const used = new Set(this.accounts.map((a) => a.color));
+      return PALETTE.find((c) => !used.has(c)) || PALETTE[this.accounts.length % PALETTE.length];
+    },
     accountBody() {
       return {
         email: this.addForm.email,
         displayName: this.addForm.displayName || undefined,
         preset: this.addForm.preset || undefined,
+        color: this.addForm.color,
         password: this.addForm.password,
         imap: { host: this.addForm.imapHost, port: this.addForm.imapPort, tls: this.addForm.imapPort === 993 },
         smtp: { host: this.addForm.smtpHost, port: this.addForm.smtpPort, tls: this.addForm.smtpPort !== 587 },
@@ -618,6 +632,17 @@ const app = createApp({
         this.accounts = data.accounts;
         if (this.activeAccount === a.id) this.pickAccount(this.accounts.length ? 'all' : 'all');
         this.toast('已删除', 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    toggleColorPick(a) {
+      this.colorPickFor = this.colorPickFor === a.id ? null : a.id;
+    },
+    async setAccountColor(a, c) {
+      this.colorPickFor = null;
+      if (a.color === c) return;
+      try {
+        const data = await this.api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { color: c } });
+        this.accounts = data.accounts;
       } catch (e) { this.toast(e.message, 'error'); }
     },
     async changePw() {
