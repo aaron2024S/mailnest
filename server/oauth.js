@@ -2,7 +2,7 @@
 //
 // 为什么用设备码：本应用通常部署在 NAS/内网，没有公网 HTTPS 域名，微软不接受
 // http 或内网地址作为回调 URL。设备码流程不需要任何回调 —— 用户在自己电脑/手机上
-// 打开 microsoft.com/devicelogin 输入 8 位码，服务端轮询换取 token，全程无需公网入口。
+// 打开 microsoft.com/devicelogin 输入界面显示的验证码，服务端轮询换取 token，全程无需公网入口。
 //
 // scope 必须是 outlook.office.com 系列（IMAP/SMTP 的老式 Exchange Online scope），
 // 不能混 graph 的 scope —— 混了拿到的 token 没有 IMAP 权限，连上去会认证失败。
