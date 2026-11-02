@@ -529,8 +529,7 @@ const app = createApp({
         } else {
           await this.api('/api/delete', { method: 'POST', body: { account: m.accountId, folder: m.folder, uids: [m.uid] } });
         }
-        this.messages = this.messages.filter((x) => x.uid !== m.uid || x.accountId !== m.accountId);
-        this.selected = null; this.readerOpen = false;
+        this.dropRows([m]);
         this.loadAllFoldersAndUnread();
         this.toast(acc ? `已删除（${acc.displayName}）` : '已删除', 'ok');
       } catch (e) { this.toast(e.message, 'error'); }
@@ -598,10 +597,16 @@ const app = createApp({
     },
     dropRows(msgs) {
       const keys = new Set(msgs.map((m) => this.msgKey(m)));
+      const before = this.messages.length;
       this.messages = this.messages.filter((m) => !keys.has(this.msgKey(m)));
+      const removed = before - this.messages.length;
+      // 列表头上的「xx 封」是服务端总数，删/移走几封就得同步减，否则数字不动
+      if (removed > 0) this.total = Math.max(0, this.total - removed);
       this.selection = this.selection.filter((k) => !keys.has(k));
       if (this.selected && keys.has(this.msgKey(this.selected))) { this.selected = null; this.readerOpen = false; }
       if (this.selection.length) this.selAnchor = -1;
+      // 当前页被删空了：退回上一页补数据，别留一个空白页
+      if (removed > 0 && !this.messages.length && this.page > 1) this.gotoPage(this.page - 1);
     },
     // 批量已读 / 未读（乐观更新，失败整体回滚）
     async batchRead(read) {

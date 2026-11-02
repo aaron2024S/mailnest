@@ -428,4 +428,60 @@ function bulkCtx(messages, opts = {}) {
   ok('标题：单账号选中已发送 → 已发送', C.listTitle.call(ctx) === '已发送');
 }
 
+// 14) 删除后列表头顶的「xx 封」要跟着减少（回归：删了邮件数字不动）
+{
+  const rows = [msg({ uid: 1 }), msg({ uid: 2 }), msg({ uid: 3 })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|1', 'a1|INBOX|2'] });
+  ctx.total = 3; ctx.page = 1;
+  M.dropRows.call(ctx, rows.slice(0, 2));
+  ok('删除后总数减 2', ctx.total === 1, String(ctx.total));
+  ok('删除后列表只剩 1 封', ctx.messages.length === 1);
+  M.dropRows.call(ctx, ctx.messages);
+  ok('全删光后总数为 0 且不出现负数', ctx.total === 0, String(ctx.total));
+}
+{
+  const rows = [msg({ uid: 1 })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|1'] });
+  ctx.total = 1; ctx.page = 1;
+  M.dropRows.call(ctx, rows);
+  ok('只剩 1 封时删掉 → 总数归零', ctx.total === 0);
+}
+
+// 15) 当前页被删空时退回上一页（否则停在空白页）
+{
+  const rows = [msg({ uid: 5, folder: 'INBOX' })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|5'] });
+  ctx.total = 21; ctx.page = 2;
+  let wentTo = null;
+  ctx.gotoPage = (p) => { wentTo = p; };
+  M.dropRows.call(ctx, rows);
+  ok('删空当前页 → 退回上一页', wentTo === 1, String(wentTo));
+  ok('删空当前页 → 总数也减了', ctx.total === 20, String(ctx.total));
+}
+{
+  const rows = [msg({ uid: 5 })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|5'] });
+  ctx.total = 3; ctx.page = 1;
+  let called = false;
+  ctx.gotoPage = () => { called = true; };
+  M.dropRows.call(ctx, rows);
+  ok('第一页删空不往回跳（没上一页）', called === false);
+}
+
+// 16) 单封删除走同一条路径：总数也要减
+{
+  const rows = [msg({ uid: 9 }), msg({ uid: 10 })];
+  const ctx = bulkCtx(rows, { selection: [] });
+  Object.assign(ctx, {
+    total: 2, page: 1, accounts: [{ id: 'a1', displayName: 'QQ' }],
+    foldersByAccount: { a1: [{ path: 'Trash', special: '\\Trash' }] },
+    loadAllFoldersAndUnread() {}, readerOpen: true,
+  });
+  ctx.dropRows = M.dropRows;
+  globalThis.confirm = () => true;
+  await M.remove.call(ctx, rows[0]);
+  ok('单封删除后总数减 1', ctx.total === 1, String(ctx.total));
+  ok('单封删除后列表剩 1 封', ctx.messages.length === 1);
+}
+
 console.log(`\n全部通过：${pass} 项断言`);
