@@ -265,7 +265,11 @@ api.patch('/accounts/:id', guard, async (req, res) => {
     const accounts = listAccounts(req.user.id);
     const acc = accounts.find((a) => a.id === req.params.id);
     if (!acc) return res.status(404).json({ error: '账号不存在' });
-    if (typeof req.body?.displayName === 'string') acc.displayName = req.body.displayName.slice(0, 60);
+    if (typeof req.body?.displayName === 'string') {
+      const name = req.body.displayName.trim().slice(0, 60);
+      if (!name) return res.status(400).json({ error: '显示名称不能为空' });
+      acc.displayName = name;
+    }
     if (/^#[0-9a-fA-F]{6}$/.test(req.body?.color || '')) acc.color = req.body.color;
     if (req.body?.auth?.pass && acc.auth?.type !== 'oauth2') acc.auth.pass = String(req.body.auth.pass);
     saveAccounts(req.user.id, accounts);

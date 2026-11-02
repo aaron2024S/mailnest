@@ -30,6 +30,7 @@
   <symbol id="i-send" viewBox="0 0 24 24"><path d="M20.5 3.5 10 14"/><path d="M20.5 3.5 14 20.5l-4-6.5-6.5-4Z"/></symbol>
   <symbol id="i-draft" viewBox="0 0 24 24"><path d="M6 3.5h9L19 8v12.5H6Z"/><path d="M14.5 3.5V8H19"/></symbol>
   <symbol id="i-paper" viewBox="0 0 24 24"><path d="M20 12.5 12.6 20a5 5 0 0 1-7-7l7.7-7.8a3.4 3.4 0 0 1 4.8 4.8l-7.7 7.8a1.8 1.8 0 0 1-2.5-2.5l7-7"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4.5 19.5h4l10-10-4-4-10 10v4Z"/><path d="m14 6 4 4"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 6.5h15"/><path d="M9.5 6.5v-2h5v2"/><path d="M6.5 6.5 7.4 20h9.2l.9-13.5"/><path d="M10 10.5v6M14 10.5v6"/></symbol>
   <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4.6" rx="1.4"/><path d="M5.2 9.1v9a1.9 1.9 0 0 0 1.9 1.9h9.8a1.9 1.9 0 0 0 1.9-1.9v-9"/><path d="M10 13h4"/></symbol>
   <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9.5 7 4.5 12l5 5"/><path d="M4.5 12h9a6 6 0 0 1 6 6v1"/></symbol>
@@ -396,8 +397,24 @@
             <div class="acct-row" v-for="a in accounts" :key="a.id">
               <button class="swatch-btn swatch" :style="{background:a.color}" :title="'点击更换颜色'"
                       @click="toggleColorPick(a)">{{ a.displayName.slice(0,1).toUpperCase() }}</button>
-              <span class="meta"><b>{{ a.displayName }}</b><span>{{ a.email }} · {{ a.imap.host }}</span></span>
-              <button class="icon-btn" title="删除账号" @click="removeAccount(a)"><svg class="i" style="width:15px;height:15px"><use href="#i-trash"/></svg></button>
+              <span class="meta" v-if="editingId!==a.id"><b>{{ a.displayName }}</b><span>{{ a.email }} · {{ a.imap.host }}</span></span>
+              <span class="meta" v-else>
+                <input class="acct-name-input" v-model.trim="editName" maxlength="40" placeholder="显示名称，例如 工作邮箱"
+                       @keyup.enter="saveAccountName(a)" @keyup.esc="cancelEditAccount">
+                <span>{{ a.email }} · {{ a.imap.host }}</span>
+              </span>
+              <template v-if="editingId===a.id">
+                <button class="icon-btn acct-ok" title="保存" @click="saveAccountName(a)" :disabled="editSaving">
+                  <svg class="i" style="width:15px;height:15px"><use href="#i-check"/></svg>
+                </button>
+                <button class="icon-btn" title="取消" @click="cancelEditAccount">
+                  <svg class="i" style="width:15px;height:15px"><use href="#i-x"/></svg>
+                </button>
+              </template>
+              <template v-else>
+                <button class="icon-btn" title="修改显示名称" @click="startEditAccount(a)"><svg class="i" style="width:15px;height:15px"><use href="#i-edit"/></svg></button>
+                <button class="icon-btn" title="删除账号" @click="removeAccount(a)"><svg class="i" style="width:15px;height:15px"><use href="#i-trash"/></svg></button>
+              </template>
               <div class="palette palette-inline" v-if="colorPickFor===a.id">
                 <button type="button" class="swatch-btn" v-for="c in palette" :key="c"
                         :style="{background:c}" :class="{'is-on':a.color===c}" @click="setAccountColor(a, c)"></button>

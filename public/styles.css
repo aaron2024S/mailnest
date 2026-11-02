@@ -302,6 +302,12 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .acct-row .meta{flex:1;min-width:0;}
 .acct-row .meta b{font-size:13px;display:block;}
 .acct-row .meta span{font-size:11.5px;color:var(--text-3);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* 行内改名：输入框高度与原来的 <b> 对齐，避免整行跳动 */
+.acct-name-input{width:100%;box-sizing:border-box;border:1px solid var(--accent);border-radius:7px;padding:3px 8px;
+  font-size:13px;font-weight:600;font-family:inherit;color:var(--text);background:var(--surface);outline:0;}
+.acct-row .icon-btn{width:28px;height:28px;}
+.acct-row .icon-btn:disabled{opacity:.45;cursor:default;}
+.acct-row .acct-ok{color:var(--ok);}
 .toast{position:fixed;right:20px;bottom:20px;z-index:100;display:flex;flex-direction:column;gap:8px;}
 .toast .t{background:var(--text);color:var(--bg);padding:10px 14px;border-radius:10px;font-size:12.5px;box-shadow:var(--shadow-md);max-width:380px;}
 .toast .t.error{background:var(--err);color:#fff;}

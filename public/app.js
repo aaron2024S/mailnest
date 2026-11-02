@@ -69,6 +69,9 @@ const app = createApp({
       addForm: { open: false, email: '', displayName: '', password: '', preset: null, color: PALETTE[0], imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
       palette: PALETTE,
       colorPickFor: null,
+      editingId: null,      // 正在改显示名称的账号 id
+      editName: '',
+      editSaving: false,
       // Outlook OAuth：应用 ID 由用户在界面上填一次，存在实例设置里
       outlook: {
         configured: false, clientId: '', registerUrl: '', deviceLoginUrl: '',
@@ -664,6 +667,32 @@ const app = createApp({
     },
     toggleColorPick(a) {
       this.colorPickFor = this.colorPickFor === a.id ? null : a.id;
+    },
+    startEditAccount(a) {
+      this.colorPickFor = null;
+      this.editingId = a.id;
+      this.editName = a.displayName || '';
+      this.$nextTick(() => {
+        const el = document.querySelector('.acct-name-input');
+        if (el) { el.focus(); el.select(); }
+      });
+    },
+    cancelEditAccount() {
+      this.editingId = null; this.editName = ''; this.editSaving = false;
+    },
+    async saveAccountName(a) {
+      const name = this.editName.trim();
+      if (!name) return this.toast('显示名称不能为空', 'error');
+      if (name === a.displayName) return this.cancelEditAccount();
+      this.editSaving = true;
+      try {
+        const data = await this.api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { displayName: name } });
+        this.accounts = data.accounts;
+        this.editingId = null; this.editName = '';
+        this.toast('已更新显示名称', 'ok');
+      } catch (e) {
+        this.toast(e.message, 'error');
+      } finally { this.editSaving = false; }
     },
     async setAccountColor(a, c) {
       this.colorPickFor = null;
