@@ -135,7 +135,16 @@ const app = createApp({
       return this.messages.filter((m) => this.msgMatch(m));
     },
     listTitle() {
-      if (this.activeAccount === 'all') return '收件箱 · 所有账号';
+      if (this.activeAccount === 'all') {
+        // 汇总视图：没选具体文件夹时才是「收件箱 · 所有账号」；点了某账号的某文件夹要如实显示
+        if (!this.allFolder) return '收件箱 · 所有账号';
+        const sep = this.allFolder.indexOf('|');
+        const aid = this.allFolder.slice(0, sep), path = this.allFolder.slice(sep + 1);
+        const f = this.foldersOf(aid).find((x) => x.path === path);
+        const acc = this.accounts.find((a) => a.id === aid);
+        const name = f ? this.folderLabel(f) : path;
+        return acc ? `${name} · ${acc.displayName}` : name;
+      }
       const f = this.folders.find((x) => x.path === this.activeFolder);
       return f ? this.folderLabel(f) : this.activeFolder;
     },

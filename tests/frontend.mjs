@@ -412,4 +412,20 @@ function bulkCtx(messages, opts = {}) {
     M.msgKey.call(ctx, { uid: 3, accountId: 'a1', folder: 'Trash' }) !== M.msgKey.call(ctx, { uid: 3, accountId: 'a1', folder: 'INBOX' }));
 }
 
+// 13) 列表标题跟随实际选中的文件夹（回归：汇总视图里切到「已发送」还显示「收件箱 · 所有账号」）
+{
+  const ctx = {
+    activeAccount: 'all', allFolder: 'a1|Sent Messages',
+    accounts: [{ id: 'a1', displayName: 'QQ邮箱' }],
+    foldersOf: (aid) => [{ path: 'INBOX' }, { path: 'Sent Messages', special: '\\Sent' }],
+  };
+  ctx.folderLabel = M.folderLabel;
+  const t = C.listTitle.call(ctx);
+  ok('标题：汇总视图选中已发送 → 显示「已发送 · QQ邮箱」', t === '已发送 · QQ邮箱', t);
+  ctx.allFolder = null;
+  ok('标题：汇总视图默认 → 收件箱 · 所有账号', C.listTitle.call(ctx) === '收件箱 · 所有账号');
+  ctx.activeAccount = 'a1'; ctx.folders = [{ path: 'Sent Messages', special: '\\Sent' }]; ctx.activeFolder = 'Sent Messages';
+  ok('标题：单账号选中已发送 → 已发送', C.listTitle.call(ctx) === '已发送');
+}
+
 console.log(`\n全部通过：${pass} 项断言`);
