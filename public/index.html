@@ -453,6 +453,18 @@
       </div>
     </div>
 
+    <!-- 关闭写信前的三选确认：存草稿 / 放弃 / 继续编辑 -->
+    <div class="compose-backdrop" v-if="composeAskClose" style="z-index:70" @click.self="composeAskClose=false"></div>
+    <div class="close-ask" v-if="composeAskClose">
+      <div class="close-ask-title">还没发送，要先把内容存成草稿吗？</div>
+      <div class="close-ask-hint">存草稿后可以随时从写信里继续编辑</div>
+      <div class="close-ask-btns">
+        <button class="close-ask-btn ghost" @click="composeAskClose=false">继续编辑</button>
+        <button class="close-ask-btn ghost" @click="discardCompose">不保存</button>
+        <button class="close-ask-btn primary" @click="saveAndCloseCompose">存草稿并关闭</button>
+      </div>
+    </div>
+
     <!-- 设置 -->
     <div class="overlay" v-if="modals.settings" @click.self="modals.settings=false">
       <div class="modal">

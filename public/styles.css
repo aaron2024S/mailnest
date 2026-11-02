@@ -518,3 +518,16 @@ body.col-resizing .col-resizer::after{background:var(--accent);}
   .bulk-btn{padding:0 7px;}
   .bulk-text span{display:none;}
 }
+
+/* ============ 关闭写信三选确认 ============ */
+.close-ask{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:75;width:min(420px,92vw);
+  background:var(--surface);border:1px solid var(--border-strong);border-radius:14px;box-shadow:var(--shadow-lg);
+  padding:20px 22px 18px;}
+.close-ask-title{font-size:14px;font-weight:650;color:var(--text);}
+.close-ask-hint{font-size:12px;color:var(--text-3);margin-top:6px;}
+.close-ask-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
+.close-ask-btn{height:32px;padding:0 14px;border-radius:8px;border:0;cursor:pointer;font-size:12.5px;}
+.close-ask-btn.ghost{background:transparent;color:var(--text-2);}
+.close-ask-btn.ghost:hover{background:var(--hover);color:var(--text);}
+.close-ask-btn.primary{background:var(--accent);color:#fff;font-weight:600;}
+.close-ask-btn.primary:hover{background:var(--accent-hi);}

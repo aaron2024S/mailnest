@@ -76,6 +76,7 @@ const app = createApp({
       editSaving: false,
       dragMsg: null,        // 正在拖动的邮件
       dropTarget: '',       // 高亮的投放目标 `账号id|文件夹路径`
+      composeAskClose: false, // 关闭写信前的三选确认
       listWidth: Math.min(640, Math.max(300, Number(localStorage.getItem('mn.listWidth')) || 384)),
       resizing: false,      // 正在拖拽调节列表宽度
       // 多选：存 key（`账号id|文件夹|uid`），跨刷新也能对上
@@ -849,7 +850,18 @@ const app = createApp({
       } catch (e) { this.toast(e.message, 'error'); }
     },
     closeCompose() {
-      if (this.compose.text && !confirm('关闭后未保存的内容会丢失，先存草稿吗？（确定=直接关闭）')) return;
+      // 有任何实质内容（正文/收件人/主题）就弹三选确认，而不是浏览器 confirm
+      const c = this.compose;
+      if (c.text || c.to || c.cc || c.subject) { this.composeAskClose = true; return; }
+      this.compose.open = false;
+    },
+    async saveAndCloseCompose() {
+      await this.saveComposeDraft();
+      this.composeAskClose = false;
+      this.compose.open = false;
+    },
+    discardCompose() {
+      this.composeAskClose = false;
       this.compose.open = false;
     },
 
