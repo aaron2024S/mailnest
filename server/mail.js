@@ -114,14 +114,31 @@ export async function dropConnections(uid, accountId = null) {
   }
 }
 
-async function withMailbox(uid, accountId, folder, fn) {
-  const { client } = await getClient(uid, accountId);
-  const lock = await client.getMailboxLock(folder);
+// 陈旧连接特征：服务器已单方面断开，但 client.closed 标志尚未置位，命令直接撞死。
+// 命中就弃掉池中连接重建、自动重试一次（切换账号后回到汇总视图的典型场景）。
+function isStaleConn(e) {
+  return /Connection not available|NoConnection|ECONNRESET|socket hang up/i.test(String(e?.message || e));
+}
+
+async function withClient(uid, accountId, fn) {
   try {
-    return await fn(client, lock);
-  } finally {
-    lock.release();
+    return await fn(await getClient(uid, accountId));
+  } catch (e) {
+    if (!isStaleConn(e)) throw e;
+    await dropConnections(uid, accountId);
+    return await fn(await getClient(uid, accountId));
   }
+}
+
+async function withMailbox(uid, accountId, folder, fn) {
+  return withClient(uid, accountId, async ({ client }) => {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      return await fn(client, lock);
+    } finally {
+      lock.release();
+    }
+  });
 }
 
 function imapError(e) {
@@ -133,6 +150,9 @@ function imapError(e) {
   }
   if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|timeout/i.test(msg)) {
     return Object.assign(new Error('无法连接邮件服务器：请检查服务器地址、端口与网络'), { status: 502 });
+  }
+  if (/Connection not available|NoConnection/i.test(msg)) {
+    return Object.assign(new Error('与邮箱服务器的连接已断开，请重试'), { status: 502 });
   }
   if (/Unsafe Login|SAFEAUTH/i.test(msg)) {
     return Object.assign(new Error('服务器拒绝了这次登录（Unsafe Login）：确认已在邮箱网页端开启 IMAP 服务'), { status: 403 });
@@ -156,9 +176,10 @@ function folderNode(f) {
 
 export async function listFolders(uid, accountId) {
   try {
-    const { client } = await getClient(uid, accountId);
-    const list = await client.list();
-    return list.filter((f) => !f.flags.has('\\Noselect')).map(folderNode);
+    return await withClient(uid, accountId, async ({ client }) => {
+      const list = await client.list();
+      return list.filter((f) => !f.flags.has('\\Noselect')).map(folderNode);
+    });
   } catch (e) {
     throw imapError(e);
   }
@@ -409,17 +430,18 @@ export async function testAccount(cfg) {
 // ---------- 未读计数 ----------
 export async function unseenCounts(uid, accountId) {
   try {
-    const { client } = await getClient(uid, accountId);
-    const list = await client.list();
-    const out = {};
-    for (const f of list) {
-      if (f.flags.has('\\Noselect') || f.flags.has('\\Trash')) continue;
-      try {
-        const st = await client.status(f.path, { unseen: true });
-        if (st && typeof st.unseen === 'number') out[f.path] = st.unseen;
-      } catch { /* 单个文件夹失败不影响整体 */ }
-    }
-    return out;
+    return await withClient(uid, accountId, async ({ client }) => {
+      const list = await client.list();
+      const out = {};
+      for (const f of list) {
+        if (f.flags.has('\\Noselect') || f.flags.has('\\Trash')) continue;
+        try {
+          const st = await client.status(f.path, { unseen: true });
+          if (st && typeof st.unseen === 'number') out[f.path] = st.unseen;
+        } catch { /* 单个文件夹失败不影响整体 */ }
+      }
+      return out;
+    });
   } catch (e) {
     throw imapError(e);
   }

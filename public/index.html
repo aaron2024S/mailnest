@@ -142,7 +142,7 @@
         <div class="dropdown" v-if="acctOpen" @click.stop>
           <button class="dd-item" @click="pickAccount('all')">
             <span class="swatch" style="background:linear-gradient(145deg,#7c8cff,#4d5ef0)"></span>
-            <span class="meta"><b>所有收件箱</b><span>{{ accounts.length }} 个账号合并</span></span>
+            <span class="meta"><b>所有邮箱</b><span>{{ accounts.length }} 个账号合并</span></span>
             <span class="count-badge" v-if="allUnread">{{ allUnread }}</span>
             <svg class="i" style="width:14px;height:14px;color:var(--accent)" v-if="activeAccount==='all'"><use href="#i-check"/></svg>
           </button>
@@ -199,10 +199,6 @@
         <button class="btn-primary" @click="openCompose()"><svg class="i"><use href="#i-compose"/></svg><span>新建邮件</span></button>
         <nav class="nav">
           <template v-if="activeAccount==='all'">
-            <button class="nav-item" :class="{'is-active':true}" @click="pickFolder('INBOX')">
-              <svg class="i"><use href="#i-inbox"/></svg><span class="lbl">收件箱</span>
-              <span class="count" v-if="allUnread">{{ allUnread }}</span>
-            </button>
             <template v-for="a in accounts" :key="a.id">
               <div class="acct-sep"><i :style="{background:a.color}"></i><span>{{ a.displayName }}</span></div>
               <button class="nav-item" v-for="f in foldersOf(a.id)" :key="f.path"

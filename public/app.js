@@ -93,7 +93,7 @@ const app = createApp({
       return /@(outlook|hotmail|live|msn)\./i.test(this.addForm.email || '');
     },
     currentAccountLabel() {
-      if (this.activeAccount === 'all') return '所有收件箱';
+      if (this.activeAccount === 'all') return '所有邮箱';
       const a = this.accounts.find((x) => x.id === this.activeAccount);
       return a ? a.displayName : '';
     },
