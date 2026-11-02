@@ -6,7 +6,8 @@
   "description": "MailNest — self-hosted multi-account webmail",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "test:imap": "node tests/imap-list.mjs"
   },
   "engines": {
     "node": ">=20"

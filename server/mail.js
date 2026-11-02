@@ -130,8 +130,10 @@ export async function listMessages(uid, accountId, folder, { page = 1, pageSize 
   pageSize = Math.min(Math.max(1, pageSize | 0), PAGE_MAX);
   page = Math.max(1, page | 0);
   try {
-    return await withMailbox(uid, accountId, folder, async (client, lock) => {
-      const total = lock.count || 0;
+    return await withMailbox(uid, accountId, folder, async (client) => {
+      // 注意：getMailboxLock 返回的锁对象只有 { path, release }，没有 count；
+      // 邮件总数要从 client.mailbox.exists 取（选中的邮箱对象）
+      const total = client.mailbox?.exists || 0;
       const start = Math.max(1, total - (page - 1) * pageSize - pageSize + 1);
       const end = total - (page - 1) * pageSize;
       const out = [];
