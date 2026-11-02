@@ -1,9 +1,18 @@
+import fs from 'node:fs';
 import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { simpleParser } from 'mailparser';
 import sanitizeHtml from 'sanitize-html';
 import { findAccount, listAccounts, saveAccounts } from './store.js';
 import { refreshAccessToken } from './oauth.js';
+
+// 版本号唯一来源：package.json。IMAP 握手要把版本报给服务端（网易系会校验客户端 ID），
+// 以前这里硬编码，bump 版本时必漏一处 —— 改成读文件。
+const APP_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version || '0.0.0';
+  } catch { return '0.0.0'; }
+})();
 
 // ---------- 连接管理 ----------
 // key: `${uid}:${accountId}` -> { client, ready: Promise<ImapFlow> }
@@ -22,7 +31,7 @@ function clientConfig(acc, accessToken = null) {
       ? { user: acc.auth.user, accessToken }
       : { user: acc.auth.user, pass: acc.auth.pass },
     // 网易系要求客户端在握手时发 IMAP ID，imapflow 检测到服务端 ID 能力后自动发送
-    clientInfo: { name: 'MailNest', version: '0.1.4', vendor: 'MailNest' },
+    clientInfo: { name: 'MailNest', version: APP_VERSION, vendor: 'MailNest' },
     logger: false,
     tls: { rejectUnauthorized: acc.imap.allowInsecureTls !== true },
     connectionTimeout: 20000,
@@ -468,7 +477,6 @@ export async function unseenCounts(uid, accountId) {
 
 // ---------- 草稿 ----------
 // 草稿只存本地（不 APPEND 到服务器，避免网易等对并发写限流），每用户 drafts/ 目录
-import fs from 'node:fs';
 import path from 'node:path';
 import { userDir } from './store.js';
 
