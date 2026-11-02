@@ -440,6 +440,13 @@
                         <li>回到「概述」，复制「应用程序(客户端) ID」，粘贴到下面。</li>
                       </ol>
                       <p class="hint">不需要客户端密码，也不用手动配 API 权限：设备码流程用的是公共客户端 + 委托权限。</p>
+                      <p class="hint">
+                        报错「在目录外部创建应用程序的功能已被停用」？说明你登录的是个人 Microsoft 账户、还没有自己的目录（2024 年 6 月起微软要求应用必须注册在目录里）。
+                        两个办法拿到目录：<b>①</b> 到 azure.microsoft.com/free 注册免费 Azure（可能要验证手机号，不扣费；完成后右上角头像 → 切换目录 → 选 Default Directory 再注册应用）；
+                        <b>②</b> 加入 M365 开发人员计划（developer.microsoft.com/microsoft-365/dev-program，部分账号可能提示不符合资格）。
+                        如果是公司/学校邮箱报这个错，是管理员关闭了「用户可注册应用程序」，需找管理员开通或改用个人账户。
+                      </p>
+                      <p class="hint">已有自己的目录？也可以直接打开 <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade" target="_blank" rel="noopener noreferrer">Entra 新建应用页 ↗</a>（记得先在右上角切换到你的目录）。</p>
                     </details>
                     <div class="form-row" style="margin-top:10px">
                       <label>应用程序(客户端) ID</label>
