@@ -31,7 +31,9 @@ const app = createApp({
     return {
       view: 'auth',
       token: Date.now(),
-      authMode: 'setup',
+      // 默认按「已初始化」处理显示登录页；只有 setup-status 确认零用户时才切到注册页，
+      // 避免旧标签页/刷新瞬间误显示「创建管理员」入口
+      authMode: 'login',
       authForm: { username: '', password: '', password2: '' },
       authError: '',
       authBusy: false,
@@ -180,6 +182,11 @@ const app = createApp({
         await this.enterApp();
       } catch (e) {
         this.authError = e.message;
+        // 旧标签页还停在注册表单时，后端会以 403「已初始化」拒绝——自动切到登录页
+        if (e.status === 403 && this.authMode === 'setup') {
+          this.authMode = 'login';
+          this.authForm.password = ''; this.authForm.password2 = '';
+        }
       } finally {
         this.authBusy = false;
       }
