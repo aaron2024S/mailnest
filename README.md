@@ -47,6 +47,46 @@ docker compose up -d
 > 若注册时报「在目录外部创建应用程序的功能已被停用」：个人 Microsoft 账户 2024-06 起必须先有自己的目录
 > （免费 Azure 或 M365 开发人员计划均可获得），详见界面里的提示。
 
+## Agent 接入（MCP）
+
+MailNest 内置 MCP 服务器（Streamable HTTP，无状态），AI 客户端可以通过它读写你的邮件。
+
+**开启步骤：**
+
+1. 网页端「设置 → Agent 接入」→ 生成令牌（勾选权限：读取 / 整理 / 发信）
+2. 把令牌和地址填进客户端。通用配置：
+
+```json
+{
+  "mcpServers": {
+    "mailnest": {
+      "type": "http",
+      "url": "http://<你的地址>:8006/mcp",
+      "headers": { "Authorization": "Bearer mn_mcp_你的令牌" }
+    }
+  }
+}
+```
+
+Claude Code 也可以用命令行：
+
+```bash
+claude mcp add --transport http mailnest http://<地址>:8006/mcp --header "Authorization: Bearer mn_mcp_..."
+```
+
+**提供的工具（11 个）：** `list_accounts`、`list_folders`、`list_messages`、`read_message`、
+`set_flags`、`move_messages`、`delete_messages`（只进垃圾箱，不做永久删除）、`create_folder`、
+`send_message`、`reply_message`、`save_draft`。
+
+**要点：**
+
+- 令牌**必须携带**，服务端不提供无鉴权模式；令牌等同创建者的账号权限，只能看到该用户自己的邮箱
+- 令牌只存哈希，明文只在生成时显示一次；可随时撤销、可设有效期，撤销立即生效
+- 每次工具调用都会记入审计日志；每令牌限速 60 次/分钟
+- 没有公开的「改账号配置 / 改密码」类工具，即使令牌被签出全量权限也动不了账号本身
+- 局域网直接用 `http://内网地址:8006/mcp`；要让云端 AI（Claude.ai / ChatGPT）访问需要公网 + 反代 + HTTPS，
+  并在反代里放行 `/mcp` 路径。云端 connector 若强制 OAuth，暂不支持
+
 ## 安全建议
 
 - 请通过**反向代理 + HTTPS** 暴露到公网，并在 compose 里把 `MAILNEST_SECURE_COOKIES` 改为 `true`；只在内网用可以保持 `false`

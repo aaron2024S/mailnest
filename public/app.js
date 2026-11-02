@@ -69,6 +69,9 @@ const app = createApp({
       modals: { settings: false, users: false },
       settingsTab: 'accounts',
       addForm: { open: false, email: '', displayName: '', password: '', preset: null, color: PALETTE[0], imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
+      // Agent 接入：只存令牌元信息，明文只在创建那一次响应里出现
+      agent: { tokens: [], name: '', scopes: ['read'], days: 90, busy: false, created: '' },
+      scopeOptions: [{ key: 'read', label: '读取' }, { key: 'write', label: '整理' }, { key: 'send', label: '发信' }],
       palette: PALETTE,
       colorPickFor: null,
       editingId: null,      // 正在改显示名称的账号 id
@@ -121,6 +124,20 @@ const app = createApp({
       let n = 0;
       for (const [k, v] of Object.entries(this.unreadMap)) if (k.endsWith('|INBOX')) n += v;
       return n;
+    },
+    // MCP 接入地址：跟着当前访问域名走，用户从 NAS 内网打开就是内网地址
+    mcpUrl() { return location.origin + '/mcp'; },
+    // 刚生成令牌时给的客户端配置片段，直接复制粘贴就能用
+    agentConfig() {
+      return JSON.stringify({
+        mcpServers: {
+          mailnest: {
+            type: 'http',
+            url: this.mcpUrl,
+            headers: { Authorization: `Bearer ${this.agent.created}` },
+          },
+        },
+      }, null, 2);
     },
     // 当前列表里能被选中的行（搜索过滤后的可见行）
     visibleRows() {
@@ -889,6 +906,71 @@ const app = createApp({
       this.outlook.error = '';
       this.modals.settings = true;
       this.loadOutlookConfig();
+    },
+    // ---------- Agent 接入（MCP） ----------
+    async openAgentTab() {
+      this.settingsTab = 'agent';
+      this.agent.created = '';
+      await this.loadAgentTokens();
+    },
+    async loadAgentTokens() {
+      try {
+        const d = await this.api('/api/agent/tokens');
+        this.agent.tokens = d.tokens || [];
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    async createAgentToken() {
+      if (this.agent.busy) return;
+      if (!this.agent.scopes.length) return this.toast('至少要选一个权限', 'error');
+      this.agent.busy = true;
+      try {
+        const d = await this.api('/api/agent/tokens', {
+          method: 'POST',
+          body: { name: this.agent.name, scopes: this.agent.scopes, expiresInDays: this.agent.days },
+        });
+        this.agent.created = d.token;     // 明文只有这一次
+        this.agent.tokens = [d.record, ...this.agent.tokens];
+        this.agent.name = '';
+      } catch (e) {
+        this.toast(e.message, 'error');
+      } finally {
+        this.agent.busy = false;
+      }
+    },
+    async revokeAgentToken(t) {
+      if (!confirm(`撤销「${t.name}」？正在用它的客户端会立刻连不上。`)) return;
+      try {
+        await this.api(`/api/agent/tokens/${t.id}`, { method: 'DELETE' });
+        this.agent.tokens = this.agent.tokens.filter((x) => x.id !== t.id);
+        this.toast('已撤销', 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    scopeLabel(s) {
+      return ({ read: '读取', write: '整理', send: '发信' })[s] || s;
+    },
+    fmtTs(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      const now = new Date();
+      const sameYear = d.getFullYear() === now.getFullYear();
+      const p = (n) => String(n).padStart(2, '0');
+      return `${sameYear ? '' : d.getFullYear() + '-'}${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    },
+    copyText(s) {
+      const done = () => this.toast('已复制', 'ok');
+      const fallback = () => {
+        // 内网 http 不是安全上下文，navigator.clipboard 可能不存在，退回选中复制
+        const ta = document.createElement('textarea');
+        ta.value = s;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); done(); } catch { this.toast('复制失败，请手动选中', 'error'); }
+        document.body.removeChild(ta);
+      };
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(s).then(done).catch(fallback);
+      else fallback();
     },
     applyPreset(key) {
       this.addForm.preset = key;

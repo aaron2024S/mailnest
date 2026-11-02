@@ -16,3 +16,5 @@ logo-preview.html
 .edge-profile*
 .render-*.mjs
 .push-retry.sh
+.mcp-test/
+.mcp-test-unit/

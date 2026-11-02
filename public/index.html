@@ -487,8 +487,9 @@
         </div>
         <div class="modal-body">
           <div style="display:flex;gap:8px;margin-bottom:14px">
-            <button class="btn-ghost" style="width:auto;padding:0 14px" @click="settingsTab='accounts'">邮箱账号</button>
-            <button class="btn-ghost" style="width:auto;padding:0 14px" @click="settingsTab='profile'">外观与安全</button>
+            <button class="btn-ghost tab-btn" :class="{'is-on':settingsTab==='accounts'}" @click="settingsTab='accounts'">邮箱账号</button>
+            <button class="btn-ghost tab-btn" :class="{'is-on':settingsTab==='profile'}" @click="settingsTab='profile'">外观与安全</button>
+            <button class="btn-ghost tab-btn" :class="{'is-on':settingsTab==='agent'}" @click="openAgentTab">Agent 接入</button>
           </div>
 
           <template v-if="settingsTab==='accounts'">
@@ -621,6 +622,82 @@
                 <p class="hint" v-if="addForm.message" :style="{color: addForm.ok ? 'var(--ok)' : 'var(--err)'}">{{ addForm.message }}</p>
               </template>
             </template>
+          </template>
+
+          <template v-else-if="settingsTab==='agent'">
+            <p class="hint" style="margin:0 0 14px">
+              生成一个令牌填进 AI 客户端（Claude Code、Cursor、Claude Desktop 等），它就能通过 MCP 读写这里的邮件。
+              令牌等同于你的账号权限，只发给你自己的客户端，泄露了立刻回来撤销。
+            </p>
+
+            <div class="form-row">
+              <label>接入地址</label>
+              <div class="copy-line">
+                <code>{{ mcpUrl }}</code>
+                <button class="mini-btn" type="button" @click="copyText(mcpUrl)">复制</button>
+              </div>
+              <p class="hint">局域网里直接用这个地址；云端 AI 要访问，得先做公网映射或内网穿透。</p>
+            </div>
+
+            <div class="agent-created" v-if="agent.created">
+              <div class="agent-warn">
+                <svg class="i" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-warn"/></svg>
+                令牌只显示这一次，关掉就找不回来了
+              </div>
+              <div class="copy-line">
+                <code>{{ agent.created }}</code>
+                <button class="mini-btn" type="button" @click="copyText(agent.created)">复制</button>
+              </div>
+              <pre class="agent-json">{{ agentConfig }}</pre>
+              <button class="btn-ghost" style="width:100%;margin-top:10px" @click="agent.created=''">我已保存好</button>
+            </div>
+
+            <template v-else>
+              <div class="form-grid">
+                <div class="form-row"><label>客户端名称</label>
+                  <div class="wrap"><input v-model.trim="agent.name" maxlength="40" placeholder="例如 Claude Code"></div>
+                </div>
+                <div class="form-row"><label>有效期</label>
+                  <div class="wrap"><select v-model.number="agent.days">
+                    <option :value="30">30 天</option>
+                    <option :value="90">90 天</option>
+                    <option :value="365">1 年</option>
+                    <option :value="0">永不过期</option>
+                  </select></div>
+                </div>
+              </div>
+              <div class="form-row">
+                <label>权限</label>
+                <div class="scope-row">
+                  <label class="scope-chip" v-for="s in scopeOptions" :key="s.key" :class="{on: agent.scopes.includes(s.key)}">
+                    <input type="checkbox" :value="s.key" v-model="agent.scopes"><span>{{ s.label }}</span>
+                  </label>
+                </div>
+                <p class="hint">只读足够让 AI 查邮件；「整理」可以标记已读、移动、删除到垃圾箱；「发信」建议需要时再单独开。</p>
+              </div>
+              <button class="btn" style="margin-top:2px" @click="createAgentToken" :disabled="agent.busy">
+                <span v-if="!agent.busy">生成令牌</span>
+                <span class="spin" style="border-color:rgba(255,255,255,.4);border-top-color:#fff" v-else></span>
+              </button>
+            </template>
+
+            <div class="agent-list" v-if="agent.tokens.length">
+              <div class="agent-item" v-for="t in agent.tokens" :key="t.id" :class="{expired: t.expired}">
+                <div class="agent-item-main">
+                  <div class="agent-item-top">
+                    <b>{{ t.name }}</b>
+                    <i v-for="s in t.scopes" :key="s" :class="'sc-'+s">{{ scopeLabel(s) }}</i>
+                  </div>
+                  <span class="agent-meta">
+                    {{ t.calls ? `用过 ${t.calls} 次` : '从未使用' }}
+                    <template v-if="t.lastUsedAt"> · 最近 {{ fmtTs(t.lastUsedAt) }}</template>
+                    · {{ t.expired ? '已过期' : (t.expiresAt ? fmtTs(t.expiresAt) + ' 到期' : '永不过期') }}
+                  </span>
+                </div>
+                <button class="icon-btn" title="撤销令牌" @click="revokeAgentToken(t)"><svg class="i" style="width:15px;height:15px"><use href="#i-trash"/></svg></button>
+              </div>
+            </div>
+            <p class="hint" v-else-if="!agent.created" style="margin-top:14px">还没有生成过令牌。</p>
           </template>
 
           <template v-else>

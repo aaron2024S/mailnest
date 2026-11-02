@@ -7,15 +7,17 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node tests/imap-list.mjs && node tests/oauth-device.mjs && node tests/frontend.mjs",
+    "test": "node tests/imap-list.mjs && node tests/oauth-device.mjs && node tests/frontend.mjs && node tests/mcp.mjs",
     "test:imap": "node tests/imap-list.mjs",
     "test:oauth": "node tests/oauth-device.mjs",
-    "test:ui": "node tests/frontend.mjs"
+    "test:ui": "node tests/frontend.mjs",
+    "test:mcp": "node tests/mcp.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "express": "^4.19.2",
     "imapflow": "^1.0.164",
     "mailparser": "^3.7.1",

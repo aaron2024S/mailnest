@@ -18,6 +18,8 @@ import {
   getOutlookClientId, setOutlookClientId, startDeviceCode, pollDeviceCode,
   REGISTER_URL, DEVICE_LOGIN_URL,
 } from './oauth.js';
+import { createToken, listTokens, revokeToken } from './tokens.js';
+import { mountMcp } from './mcp.js';
 
 // 版本号唯一来源：package.json（登录页、客户端 ID 等处都从这里取，避免多处手改漏掉）
 const APP_VERSION = (() => {
@@ -561,6 +563,32 @@ api.get('/audit', guard, (req, res) => {
   if (req.user.role !== 'owner') return res.status(403).json({ error: '需要所有者权限' });
   res.json({ audit: system().audit.slice(-500).reverse() });
 });
+
+// ---------- Agent 接入令牌 ----------
+// 令牌只属于创建它的用户：MCP 那边拿到的 uid 就是这里 req.user.id，看不到别人的邮箱。
+api.get('/agent/tokens', guard, (req, res) => {
+  res.json({ tokens: listTokens(req.user.id) });
+});
+
+api.post('/agent/tokens', guard, (req, res) => {
+  try {
+    const out = createToken(req.user.id, req.body || {});
+    audit(req.user.id, 'token-create', out.record.name, clientIp(req));
+    // 明文只在这里返回一次，之后任何接口都拿不到
+    res.json(out);
+  } catch (e) { fail(res, e); }
+});
+
+api.delete('/agent/tokens/:id', guard, (req, res) => {
+  try {
+    revokeToken(req.user.id, req.params.id);
+    audit(req.user.id, 'token-revoke', req.params.id, clientIp(req));
+    res.json({ ok: true });
+  } catch (e) { fail(res, e); }
+});
+
+// ---------- MCP 端点（必须在静态资源之前挂，否则 GET /mcp 会被 index.html 兜底） ----------
+mountMcp(app);
 
 // ---------- 静态资源 ----------
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
