@@ -249,7 +249,6 @@
               <div class="l1">
                 <span class="acct-dot" :style="{background:m._color}" v-if="activeAccount==='all'" title="所属账号"></span>
                 <span class="from">{{ m.from.name || m.from.address || '(未知发件人)' }}</span>
-                <span class="unread-dot" v-if="!m.flags.includes('\\Seen')"></span>
               </div>
               <span class="subj">{{ m.subject }}</span>
               <span class="preview" v-if="m._preview">{{ m._preview }}</span>

@@ -198,7 +198,6 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .row .icons svg{width:13px;height:13px;}
 .row .icons .starred{color:#d8a72a;fill:#d8a72a;}
 .row.is-unread::before{content:"";position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:20px;border-radius:2px;background:var(--accent);}
-.unread-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none;}
 .acct-dot{width:6px;height:6px;border-radius:3px;flex:none;}
 .empty{padding:60px 20px;text-align:center;color:var(--text-3);font-size:13px;line-height:2;}
 .empty svg{width:40px;height:40px;stroke:var(--border-strong);margin-bottom:10px;}
