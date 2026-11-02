@@ -262,10 +262,12 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .quick-reply .foot{display:flex;align-items:center;gap:8px;justify-content:flex-end;}
 
 /* ---- 写信面板 ---- */
-.compose{position:fixed;right:24px;bottom:24px;width:600px;max-width:calc(100vw - 48px);height:calc(100vh - 88px);max-height:640px;z-index:40;
-  background:var(--surface);border:1px solid var(--border-strong);border-radius:14px;box-shadow:var(--shadow-lg);
-  display:flex;flex-direction:column;overflow:hidden;}
-.compose.mobile{right:8px;left:8px;bottom:8px;width:auto;max-width:none;height:calc(100vh - 16px);max-height:none;}
+/* 写信：QQ 邮箱式全页大窗（居中面板 + 遮罩），不再是右下角小窗 */
+.compose-backdrop{position:fixed;inset:0;background:rgba(10,14,20,.45);z-index:55;}
+.compose{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(960px,94vw);height:min(880px,90vh);
+  max-width:none;z-index:60;background:var(--surface);border:1px solid var(--border-strong);border-radius:16px;
+  box-shadow:var(--shadow-lg);display:flex;flex-direction:column;overflow:hidden;}
+.compose.mobile{left:8px;right:8px;top:8px;bottom:8px;transform:none;width:auto;height:auto;max-width:none;border-radius:14px;}
 .compose-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-weight:600;font-size:13.5px;}
 .compose-head .sp{flex:1;}
 .compose-fields{padding:8px 14px 0;}
@@ -494,3 +496,10 @@ button.swatch-btn.swatch{width:30px;height:30px;border-radius:9px;padding:0;}
   .cb-wrap{opacity:1;}
   .avatar-slot .avatar{opacity:0;}
 }
+
+/* 写信大窗的内部间距（需覆盖上面的基础规则，故放在其后） */
+.compose-head{padding:14px 18px;}
+.compose-head .icon-btn{width:30px;height:30px;}
+.compose-fields{padding:8px 22px 0;}
+.compose textarea.body{padding:18px 22px;font-size:14px;}
+.compose-foot{padding:12px 22px;}
