@@ -185,6 +185,22 @@ export async function listFolders(uid, accountId) {
   }
 }
 
+// 新建文件夹：path 由前端拼好（父目录 + 该账号的分隔符 + 名称），服务器按 IMAP CREATE 处理
+export async function createFolder(uid, accountId, path) {
+  try {
+    return await withClient(uid, accountId, async ({ client }) => {
+      await client.mailboxCreate(path);
+      return { ok: true, path };
+    });
+  } catch (e) {
+    const msg = String(e?.message || '');
+    if (/ALREADYEXISTS|already exists/i.test(msg)) {
+      throw Object.assign(new Error('同名文件夹已存在'), { status: 400 });
+    }
+    throw imapError(e);
+  }
+}
+
 // ---------- 邮件列表 ----------
 const PAGE_MAX = 100;
 

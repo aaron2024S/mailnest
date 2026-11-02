@@ -9,7 +9,7 @@ import {
   findAccount, userDir, saveProfile, readProfile, audit,
 } from './store.js';
 import {
-  listFolders, listMessages, getMessage, getAttachment, setFlags,
+  listFolders, createFolder, listMessages, getMessage, getAttachment, setFlags,
   moveMessages, deleteMessages, sendMail, testAccount,
   listDrafts, saveDraft, deleteDraft, dropConnections, unseenCounts,
 } from './mail.js';
@@ -364,6 +364,19 @@ api.post('/oauth/outlook/poll', guard, async (req, res) => {
 api.get('/folders', guard, async (req, res) => {
   try {
     res.json({ folders: await listFolders(req.user.id, String(req.query.account || '')) });
+  } catch (e) { fail(res, e); }
+});
+
+api.post('/folders', guard, async (req, res) => {
+  try {
+    const account = String(req.body?.account || '');
+    const raw = String(req.body?.path || '').trim();
+    if (!raw) return res.status(400).json({ error: '文件夹名称不能为空' });
+    if (raw.length > 100) return res.status(400).json({ error: '文件夹名称太长（最多 100 个字符）' });
+    if (/[\u0000-\u001f]/.test(raw)) return res.status(400).json({ error: '文件夹名称含非法字符' });
+    if (/^\/|\/$/.test(raw) || raw.includes('//')) return res.status(400).json({ error: '文件夹名称不能以分隔符开头或结尾' });
+    const created = await createFolder(req.user.id, account, raw);
+    res.json({ ...created, folders: await listFolders(req.user.id, account) });
   } catch (e) { fail(res, e); }
 });
 

@@ -72,6 +72,9 @@ const app = createApp({
       editingId: null,      // 正在改显示名称的账号 id
       editName: '',
       editSaving: false,
+      dragMsg: null,        // 正在拖动的邮件
+      dropTarget: '',       // 高亮的投放目标 `账号id|文件夹路径`
+      newFolder: { accountId: null, name: '', busy: false },
       // Outlook OAuth：应用 ID 由用户在界面上填一次，存在实例设置里
       outlook: {
         configured: false, clientId: '', registerUrl: '', deviceLoginUrl: '',
@@ -240,6 +243,8 @@ const app = createApp({
         }
       });
       await Promise.allSettled(jobs);
+      // 单账号视图的 this.folders 持有的是旧数组引用，刷新后要重新指向（否则新建的文件夹不出现）
+      if (this.activeAccount !== 'all') this.folders = this.foldersOf(this.activeAccount);
     },
     foldersOf(aid) { return this.foldersByAccount[aid] || []; },
     unseenOf(aid, path) { return this.unreadMap[`${aid}|${path}`] || 0; },
@@ -249,6 +254,77 @@ const app = createApp({
       const map = { '\\Sent': '已发送', '\\Drafts': '草稿', '\\Trash': '已删除', '\\Junk': '垃圾邮件', '\\Archive': '归档', '\\Flagged': '星标' };
       if (f.special && map[f.special]) return map[f.special];
       return f.name;
+    },
+
+    // ---------- 新建文件夹 ----------
+    startNewFolder(accountId) {
+      this.newFolder = { accountId, name: '', busy: false };
+      this.$nextTick(() => {
+        const el = document.querySelector(`.new-folder-input[data-acc="${accountId}"]`);
+        if (el) el.focus();
+      });
+    },
+    cancelNewFolder() { this.newFolder = { accountId: null, name: '', busy: false }; },
+    async createFolder(accountId) {
+      const name = this.newFolder.name.trim();
+      const delim = (this.foldersOf(accountId).find((f) => f.delim) || {}).delim || '/';
+      if (!name) return this.toast('文件夹名称不能为空', 'error');
+      if (name.includes(delim) || name.includes('/')) return this.toast(`名称里不要带分隔符「${delim}」`, 'error');
+      if (this.foldersOf(accountId).some((f) => f.path === name)) return this.toast('同名文件夹已存在', 'error');
+      this.newFolder.busy = true;
+      try {
+        const data = await this.api('/api/folders', { method: 'POST', body: { account: accountId, path: name } });
+        this.foldersByAccount[accountId] = data.folders;
+        if (this.activeAccount === accountId) this.folders = this.foldersOf(accountId);
+        this.cancelNewFolder();
+        this.toast(`已创建「${name}」`, 'ok');
+      } catch (e) {
+        this.newFolder.busy = false;   // 失败时保留输入，方便改名重试
+        this.toast(e.message, 'error');
+      }
+    },
+
+    // ---------- 拖放整理（列表行 → 左栏文件夹）----------
+    onDragStart(e, m) {
+      this.dragMsg = m;
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', `${m.accountId}:${m.uid}`); } catch { /* 个别浏览器不允许 */ }
+      }
+    },
+    onDragEnd() { this.dragMsg = null; this.dropTarget = ''; },
+    canDropOn(accountId, path) {
+      const m = this.dragMsg;
+      if (!m) return false;
+      if (m.accountId !== accountId) return false;             // 跨账号要 COPY+DELETE，暂不支持
+      return (m.folder || this.currentFolderOf(m)) !== path;    // 拖回原文件夹没意义
+    },
+    onDragOver(accountId, path) {
+      if (!this.canDropOn(accountId, path)) return;
+      this.dropTarget = `${accountId}|${path}`;
+    },
+    onDragLeave(accountId, path) {
+      if (this.dropTarget === `${accountId}|${path}`) this.dropTarget = '';
+    },
+    async onDrop(accountId, path) {
+      const m = this.dragMsg;
+      this.dragMsg = null; this.dropTarget = '';
+      if (!m) return;
+      if (m.accountId !== accountId) return this.toast('暂不支持在不同邮箱之间搬邮件', 'error');
+      if ((m.folder || this.currentFolderOf(m)) === path) return;
+      await this.moveMessageTo(m, path);
+    },
+    async moveMessageTo(m, dest) {
+      try {
+        await this.api('/api/move', { method: 'POST', body: { account: m.accountId, folder: m.folder || this.currentFolderOf(m), uids: [m.uid], dest } });
+        this.messages = this.messages.filter((x) => !(x.uid === m.uid && x.accountId === m.accountId));
+        if (this.selected && this.selected.uid === m.uid && this.selected.accountId === m.accountId) {
+          this.selected = null; this.readerOpen = false;
+        }
+        this.loadAllFoldersAndUnread();
+        const f = this.foldersOf(m.accountId).find((x) => x.path === dest);
+        this.toast(`已移动到「${f ? this.folderLabel(f) : dest}」`, 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
     },
 
     pickAccount(id) {

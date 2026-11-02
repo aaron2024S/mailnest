@@ -166,6 +166,21 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .nav-item span.lbl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .nav-item .count{font-size:11.5px;color:var(--text-3);}
 .nav-item.is-active .count{color:var(--accent);}
+/* 左栏末尾的「新建文件夹」入口与行内输入 */
+.nav-new{color:var(--text-3);font-size:12.5px;}
+.nav-new:hover{background:var(--hover);color:var(--accent);}
+.nav-new svg{width:15px;height:15px;}
+.nav-new-edit{cursor:default;}
+.nav-new-edit:hover{background:transparent;}
+.new-folder-input{flex:1;min-width:0;height:24px;border:1px solid var(--accent);border-radius:6px;padding:0 6px;
+  font-size:12.5px;font-family:inherit;background:var(--surface);color:var(--text);outline:0;}
+.mini-btn{width:22px;height:22px;border:0;background:transparent;color:var(--text-3);border-radius:5px;
+  display:grid;place-items:center;cursor:pointer;flex:none;padding:0;}
+.mini-btn:hover{background:var(--hover);color:var(--text);}
+.mini-btn svg{width:13px;height:13px;}
+/* 拖放：可投放的文件夹高亮成虚线框 */
+.nav-item.drop-target{background:var(--accent-soft);color:var(--accent);outline:1.5px dashed var(--accent);outline-offset:-2px;}
+.row.is-dragging{opacity:.45;}
 .acct-sep{display:flex;align-items:center;gap:6px;margin:4px 10px 2px;font-size:11px;color:var(--text-3);}
 .acct-sep i{width:7px;height:7px;border-radius:3px;flex:none;}
 .rail-foot{padding:10px 6px 2px;font-size:11.5px;color:var(--text-3);}

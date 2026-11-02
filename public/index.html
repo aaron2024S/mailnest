@@ -203,20 +203,47 @@
             <template v-for="a in accounts" :key="a.id">
               <div class="acct-sep"><i :style="{background:a.color}"></i><span>{{ a.displayName }}</span></div>
               <button class="nav-item" v-for="f in foldersOf(a.id)" :key="f.path"
-                      :class="{'is-active': activeAccount==='all' && allFolder===a.id+'|'+f.path}"
-                      @click="pickAllFolder(a.id, f.path)" style="padding-left:18px">
+                      :class="{'is-active': activeAccount==='all' && allFolder===a.id+'|'+f.path,
+                               'drop-target': dropTarget===a.id+'|'+f.path}"
+                      @click="pickAllFolder(a.id, f.path)" style="padding-left:18px"
+                      @dragover.prevent="onDragOver(a.id,f.path)" @dragleave="onDragLeave(a.id,f.path)" @drop.prevent="onDrop(a.id,f.path)">
                 <svg class="i"><use href="#i-folder"/></svg>
                 <span class="lbl">{{ folderLabel(f) }}</span>
                 <span class="count" v-if="unseenOf(a.id,f.path)">{{ unseenOf(a.id,f.path) }}</span>
               </button>
+              <div class="nav-item nav-new" v-if="newFolder.accountId!==a.id" @click="startNewFolder(a.id)" style="padding-left:18px">
+                <svg class="i"><use href="#i-plus"/></svg><span class="lbl">新建文件夹</span>
+              </div>
+              <div class="nav-item nav-new-edit" v-else style="padding-left:18px">
+                <svg class="i"><use href="#i-folder"/></svg>
+                <input class="new-folder-input" :data-acc="a.id" v-model.trim="newFolder.name" maxlength="60" placeholder="新文件夹名称"
+                       @keyup.enter="createFolder(a.id)" @keyup.esc="cancelNewFolder">
+                <button class="mini-btn" title="创建" @click.stop="createFolder(a.id)" :disabled="newFolder.busy">
+                  <span class="spin" v-if="newFolder.busy"></span><svg class="i" v-else><use href="#i-check"/></svg>
+                </button>
+                <button class="mini-btn" title="取消" @click.stop="cancelNewFolder"><svg class="i"><use href="#i-x"/></svg></button>
+              </div>
             </template>
           </template>
           <template v-else>
-            <button class="nav-item" v-for="f in folders" :key="f.path" :class="{'is-active': activeFolder===f.path}"
-                    @click="pickFolder(f.path)">
+            <button class="nav-item" v-for="f in folders" :key="f.path" :class="{'is-active': activeFolder===f.path, 'drop-target': dropTarget===activeAccount+'|'+f.path}"
+                    @click="pickFolder(f.path)"
+                    @dragover.prevent="onDragOver(activeAccount,f.path)" @dragleave="onDragLeave(activeAccount,f.path)" @drop.prevent="onDrop(activeAccount,f.path)">
               <svg class="i"><use href="#i-inbox"/></svg><span class="lbl">{{ folderLabel(f) }}</span>
               <span class="count" v-if="unseenOf(activeAccount,f.path)">{{ unseenOf(activeAccount,f.path) }}</span>
             </button>
+            <div class="nav-item nav-new" v-if="newFolder.accountId!==activeAccount" @click="startNewFolder(activeAccount)">
+              <svg class="i"><use href="#i-plus"/></svg><span class="lbl">新建文件夹</span>
+            </div>
+            <div class="nav-item nav-new-edit" v-else>
+              <svg class="i"><use href="#i-folder"/></svg>
+              <input class="new-folder-input" :data-acc="activeAccount" v-model.trim="newFolder.name" maxlength="60" placeholder="新文件夹名称"
+                     @keyup.enter="createFolder(activeAccount)" @keyup.esc="cancelNewFolder">
+              <button class="mini-btn" title="创建" @click.stop="createFolder(activeAccount)" :disabled="newFolder.busy">
+                <span class="spin" v-if="newFolder.busy"></span><svg class="i" v-else><use href="#i-check"/></svg>
+              </button>
+              <button class="mini-btn" title="取消" @click.stop="cancelNewFolder"><svg class="i"><use href="#i-x"/></svg></button>
+            </div>
           </template>
         </nav>
         <div class="rail-foot">
@@ -238,9 +265,10 @@
           </div>
         </div>
         <div class="rows">
-          <div class="row" v-for="m in filteredMessages" :key="m.uid"
-               :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen')}"
-               @click="openMessage(m)">
+          <div class="row" v-for="m in filteredMessages" :key="m.uid" draggable="true"
+               :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
+                        'is-dragging': dragMsg && dragMsg.uid===m.uid && dragMsg.accountId===m.accountId}"
+               @click="openMessage(m)" @dragstart="onDragStart($event, m)" @dragend="onDragEnd">
             <div class="avatar" :style="{background: m._color}">{{ initials(m.from.name || m.from.address) }}</div>
             <div class="mid">
               <div class="l1">

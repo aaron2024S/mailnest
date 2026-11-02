@@ -160,4 +160,94 @@ function ctxWith(messages, selected = null) {
   }
 }
 
+// 8) 新建文件夹 + 拖放整理
+{
+  const base = [
+    { path: 'INBOX', name: 'INBOX', delim: '/', special: '\\Inbox' },
+    { path: 'Archive', name: 'Archive', delim: '/', special: '\\Archive' },
+  ];
+  const mk = () => {
+    const ctx = {
+      foldersByAccount: { a1: base.slice() },
+      folders: [],
+      activeAccount: 'a1',
+      newFolder: { accountId: 'a1', name: '', busy: false },
+      messages: [{ uid: 7, accountId: 'a1', folder: 'INBOX', flags: ['\\Seen'] }],
+      selected: null,
+      readerOpen: false,
+      dragMsg: null,
+      calls: [],
+      toasts: [],
+      async api(url, opts) {
+        ctx.calls.push({ url, body: opts?.body });
+        if (url === '/api/folders') return { folders: [...base, { path: ctx.newFolder.name, name: ctx.newFolder.name, delim: '/' }] };
+        return { ok: true };
+      },
+      toast(m, k) { ctx.toasts.push({ m, k }); },
+      loadAllFoldersAndUnread() {},
+      currentFolderOf() { return 'INBOX'; },
+    };
+    for (const k of ['foldersOf', 'createFolder', 'cancelNewFolder', 'canDropOn', 'onDrop', 'moveMessageTo', 'folderLabel']) ctx[k] = M[k];
+    return ctx;
+  };
+
+  // 校验：空 / 含分隔符 / 重名，都不该打到服务器
+  {
+    const ctx = mk();
+    ctx.newFolder.name = '   ';
+    await M.createFolder.call(ctx, 'a1');
+    ok('建文件夹：空名不发请求', ctx.calls.length === 0 && ctx.toasts.at(-1).m.includes('不能为空'));
+
+    ctx.newFolder.name = '客户/2026';
+    await M.createFolder.call(ctx, 'a1');
+    ok('建文件夹：含分隔符被拦下', ctx.calls.length === 0 && ctx.toasts.at(-1).m.includes('分隔符'));
+
+    ctx.newFolder.name = 'Archive';
+    await M.createFolder.call(ctx, 'a1');
+    ok('建文件夹：重名被拦下', ctx.calls.length === 0 && ctx.toasts.at(-1).m.includes('已存在'));
+  }
+
+  // 成功：更新文件夹列表并退出输入态
+  {
+    const ctx = mk();
+    ctx.newFolder.name = '客户';
+    await M.createFolder.call(ctx, 'a1');
+    ok('建文件夹：请求体正确', ctx.calls[0].body.account === 'a1' && ctx.calls[0].body.path === '客户');
+    ok('建文件夹：列表已刷新', ctx.foldersByAccount.a1.some((f) => f.path === '客户'));
+    ok('建文件夹：退出输入态', ctx.newFolder.accountId === null);
+  }
+
+  // 拖放可投放判定
+  {
+    const ctx = mk();
+    ctx.dragMsg = ctx.messages[0];
+    ok('拖放：拖回原文件夹不算可投放', ctx.canDropOn('a1', 'INBOX') === false);
+    ok('拖放：拖到其它文件夹可投放', ctx.canDropOn('a1', 'Archive') === true);
+    ok('拖放：跨账号不可投放', ctx.canDropOn('a2', 'Archive') === false);
+    ctx.dragMsg = null;
+    ok('拖放：没在拖东西时不可投放', ctx.canDropOn('a1', 'Archive') === false);
+  }
+
+  // 真正放下：调 /api/move 并把邮件从列表移除
+  {
+    const ctx = mk();
+    ctx.dragMsg = ctx.messages[0];
+    await M.onDrop.call(ctx, 'a1', 'Archive');
+    ok('拖放：调用 /api/move', ctx.calls[0].url === '/api/move');
+    ok('拖放：目标是 Archive', ctx.calls[0].body.dest === 'Archive' && ctx.calls[0].body.folder === 'INBOX');
+    ok('拖放：邮件从列表消失', ctx.messages.length === 0);
+    ok('拖放：提示里带文件夹中文名', ctx.toasts.at(-1).m.includes('归档'), ctx.toasts.at(-1).m);
+    ok('拖放：清空拖动态', ctx.dragMsg === null);
+  }
+
+  // 跨账号放下：拒绝并提示，不发请求
+  {
+    const ctx = mk();
+    ctx.dragMsg = ctx.messages[0];
+    await M.onDrop.call(ctx, 'a2', 'Archive');
+    ok('跨账号拖放：不发请求', ctx.calls.length === 0);
+    ok('跨账号拖放：有提示', ctx.toasts.at(-1).k === 'error');
+  }
+}
+
 console.log(`\n全部通过：${pass} 项断言`);
