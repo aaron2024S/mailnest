@@ -510,9 +510,10 @@ const app = createApp({
       try {
         const data = await this.api('/api/accounts', { method: 'POST', body: this.accountBody() });
         this.accounts = data.accounts;
-        await this.loadAllFoldersAndUnread();
         this.addForm.open = false;
         this.toast('账号已添加', 'ok');
+        // 文件夹与未读数后台补全，不阻塞保存按钮
+        this.loadAllFoldersAndUnread().catch(() => {});
       } catch (e) {
         this.addForm.message = e.message; this.addForm.ok = false;
       } finally { this.addForm.saving = false; }

@@ -32,18 +32,28 @@ async function getClient(uid, accountId) {
   if (!acc) throw Object.assign(new Error('邮箱账号不存在'), { status: 404 });
 
   const key = poolKey(uid, accountId);
+  const stamp = JSON.stringify(clientConfig(acc));
   let entry = pools.get(key);
-  if (entry && entry.client && !entry.client.closed && entry.accountStamp === JSON.stringify(clientConfig(acc))) {
-    return entry;
-  }
-  if (entry?.client && !entry.client.closed) {
+  if (entry && (entry.accountStamp !== stamp || entry.client.closed)) {
     try { entry.client.close(); } catch { /* ignore */ }
+    pools.delete(key);
+    entry = null;
   }
-  const client = new ImapFlow(clientConfig(acc));
-  const ready = client.connect();
-  entry = { client, ready, acc, accountStamp: JSON.stringify(clientConfig(acc)) };
-  pools.set(key, entry);
-  await ready;
+  if (!entry) {
+    const client = new ImapFlow(clientConfig(acc));
+    entry = { client, acc, accountStamp: stamp };
+    // ready 存进 entry：并发请求共享同一个连接建立过程，杜绝「连接未就绪就发命令」的竞态
+    entry.ready = client
+      .connect()
+      .then(() => entry)
+      .catch((e) => {
+        pools.delete(key);
+        try { client.close(); } catch { /* ignore */ }
+        throw e;
+      });
+    pools.set(key, entry);
+  }
+  await entry.ready;
   return entry;
 }
 
