@@ -43,6 +43,7 @@
   <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
   <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></symbol>
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5.5 8.5 12l6.5 6.5"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="m9 5.5 6.5 6.5L9 18.5"/></symbol>
   <symbol id="i-clip" viewBox="0 0 24 24"><path d="M20 12.5 12.6 20a5 5 0 0 1-7-7l7.7-7.8a3.4 3.4 0 0 1 4.8 4.8l-7.7 7.8a1.8 1.8 0 0 1-2.5-2.5l7-7"/></symbol>
   <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.7 3.8v4.4h-4.4"/></symbol>
   <symbol id="i-warn" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 8v4.6"/><path d="M12 15.8h.01"/></symbol>
@@ -237,7 +238,7 @@
           <div class="pager" v-if="total>pageSize">
             <button class="icon-btn" style="width:26px;height:26px" :disabled="page<=1" @click="gotoPage(page-1)"><svg class="i" style="width:14px;height:14px"><use href="#i-back"/></svg></button>
             {{ page }} / {{ Math.ceil(total/pageSize) }}
-            <button class="icon-btn" style="width:26px;height:26px" :disabled="page>=Math.ceil(total/pageSize)" @click="gotoPage(page+1)"><svg class="i" style="width:14px;height:14px"><use href="#i-forward"/></svg></button>
+            <button class="icon-btn" style="width:26px;height:26px" :disabled="page>=Math.ceil(total/pageSize)" @click="gotoPage(page+1)"><svg class="i" style="width:14px;height:14px"><use href="#i-next"/></svg></button>
           </div>
         </div>
         <div class="rows">
