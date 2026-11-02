@@ -70,7 +70,7 @@ const app = createApp({
       settingsTab: 'accounts',
       addForm: { open: false, email: '', displayName: '', password: '', preset: null, color: PALETTE[0], imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
       // Agent 接入：只存令牌元信息，明文只在创建那一次响应里出现
-      agent: { tokens: [], name: '', scopes: ['read'], days: 90, busy: false, created: '' },
+      agent: { tokens: [], name: '', scopes: ['read'], days: 90, busy: false, created: '', limit: 20 },
       scopeOptions: [{ key: 'read', label: '读取' }, { key: 'write', label: '整理' }, { key: 'send', label: '发信' }],
       palette: PALETTE,
       colorPickFor: null,
@@ -917,6 +917,7 @@ const app = createApp({
       try {
         const d = await this.api('/api/agent/tokens');
         this.agent.tokens = d.tokens || [];
+        if (d.limit) this.agent.limit = d.limit;
       } catch (e) { this.toast(e.message, 'error'); }
     },
     async createAgentToken() {

@@ -681,6 +681,10 @@
               </button>
             </template>
 
+            <div class="agent-count" v-if="agent.tokens.length">
+              <span>已有令牌 <b>{{ agent.tokens.length }}</b> / {{ agent.limit }}</span>
+              <span class="full" v-if="agent.tokens.length >= agent.limit">已达上限，撤销不用的再生成</span>
+            </div>
             <div class="agent-list" v-if="agent.tokens.length">
               <div class="agent-item" v-for="t in agent.tokens" :key="t.id" :class="{expired: t.expired}">
                 <div class="agent-item-main">

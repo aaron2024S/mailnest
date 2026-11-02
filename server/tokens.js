@@ -8,6 +8,8 @@ import crypto from 'node:crypto';
 import { system, saveSystem, findUser } from './store.js';
 
 export const SCOPES = ['read', 'write', 'send'];
+// 每人上限：既是防列表膨胀，也是防「一个客户端一个令牌」无限堆积
+export const TOKEN_LIMIT = 20;
 const PREFIX = 'mn_mcp_';
 
 function sha256(s) {
@@ -40,9 +42,8 @@ export function createToken(uid, { name, scopes, expiresInDays = 90 } = {}) {
 
   const sys = system();
   if (!Array.isArray(sys.mcpTokens)) sys.mcpTokens = [];
-  // 每人最多 20 个，防止列表无限膨胀
-  if (sys.mcpTokens.filter((t) => t.uid === uid).length >= 20) {
-    throw Object.assign(new Error('每个账号最多创建 20 个令牌，请先撤销不用的'), { status: 400 });
+  if (sys.mcpTokens.filter((t) => t.uid === uid).length >= TOKEN_LIMIT) {
+    throw Object.assign(new Error(`每个账号最多创建 ${TOKEN_LIMIT} 个令牌，请先撤销不用的`), { status: 400 });
   }
 
   const id = crypto.randomBytes(4).toString('hex');
@@ -67,7 +68,11 @@ export function createToken(uid, { name, scopes, expiresInDays = 90 } = {}) {
 
 export function listTokens(uid) {
   const sys = system();
-  return (sys.mcpTokens || []).filter((t) => t.uid === uid).map(publicView);
+  // 新的在最上面：与「刚生成就插到首位」保持一致，避免刷新后顺序反转
+  return (sys.mcpTokens || [])
+    .filter((t) => t.uid === uid)
+    .reverse()
+    .map(publicView);
 }
 
 export function revokeToken(uid, id) {

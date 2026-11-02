@@ -201,6 +201,15 @@ const listed = r.data?.tokens?.[0] || {};
 ok('令牌列表返回一条', r.data?.tokens?.length === 1, JSON.stringify(r.data));
 ok('列表不含 hash/明文', !('hash' in listed) && !('token' in listed), JSON.stringify(Object.keys(listed)));
 ok('列表标记未使用过', listed.calls === 0 && listed.lastUsedAt === 0, JSON.stringify(listed));
+ok('返回每人上限 limit', r.data?.limit === 20, String(r.data?.limit));
+
+// 排序约定：新生成的在最上面（与「刚生成就插到首位」一致，刷新后顺序不反转）
+await req('POST', '/api/agent/tokens', { name: '后来的', scopes: ['read'], expiresInDays: 30 });
+r = await req('GET', '/api/agent/tokens');
+ok('列表新的在顶部', r.data?.tokens?.[0]?.name === '后来的', JSON.stringify(r.data?.tokens?.map((t) => t.name)));
+await req('DELETE', `/api/agent/tokens/${r.data.tokens[0].id}`);
+r = await req('GET', '/api/agent/tokens');
+ok('撤销后还原为单条', r.data?.tokens?.length === 1 && r.data?.tokens?.[0]?.name === '测试只读', JSON.stringify(r.data?.tokens?.map((t) => t.name)));
 
 const INIT = {
   jsonrpc: '2.0', id: 1, method: 'initialize',
