@@ -34,6 +34,11 @@
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 6.5h15"/><path d="M9.5 6.5v-2h5v2"/><path d="M6.5 6.5 7.4 20h9.2l.9-13.5"/><path d="M10 10.5v6M14 10.5v6"/></symbol>
   <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4.6" rx="1.4"/><path d="M5.2 9.1v9a1.9 1.9 0 0 0 1.9 1.9h9.8a1.9 1.9 0 0 0 1.9-1.9v-9"/><path d="M10 13h4"/></symbol>
   <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9.5 7 4.5 12l5 5"/><path d="M4.5 12h9a6 6 0 0 1 6 6v1"/></symbol>
+  <symbol id="i-reply-all" viewBox="0 0 24 24"><path d="M7.5 7 2.5 12l5 5"/><path d="M12 7 7 12l5 5"/><path d="M7 12h7a6 6 0 0 1 6 6v1"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18.5" cy="12" r="1.4"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 9V4h10v5"/><rect x="4" y="9" width="16" height="7" rx="2"/><path d="M7 16h10v4H7z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v10"/><path d="m8 10.5 4 4 4-4"/><path d="M5 19h14"/></symbol>
+  <symbol id="i-unread-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5"/></symbol>
   <symbol id="i-forward" viewBox="0 0 24 24"><path d="m14.5 7 5 5-5 5"/><path d="M19.5 12h-9a6 6 0 0 0-6 6v1"/></symbol>
   <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.4"/><path d="m4.5 7.5 7.5 6 7.5-6"/></symbol>
   <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2Z"/></symbol>
@@ -255,21 +260,44 @@
       <!-- 列表 -->
       <section class="list">
         <div class="list-head">
-          <h3>{{ listTitle }}</h3>
-          <span class="n" v-if="total">{{ total }} 封</span>
-          <span class="sp"></span>
-          <div class="pager" v-if="total>pageSize">
-            <button class="icon-btn" style="width:26px;height:26px" :disabled="page<=1" @click="gotoPage(page-1)"><svg class="i" style="width:14px;height:14px"><use href="#i-back"/></svg></button>
-            {{ page }} / {{ Math.ceil(total/pageSize) }}
-            <button class="icon-btn" style="width:26px;height:26px" :disabled="page>=Math.ceil(total/pageSize)" @click="gotoPage(page+1)"><svg class="i" style="width:14px;height:14px"><use href="#i-next"/></svg></button>
+          <label class="list-cb" :class="{on:allSelected, part: selCount && !allSelected}" :title="allSelected?'取消全选':'全选本页'">
+            <input type="checkbox" :checked="allSelected" @change="toggleSelectAll">
+            <span class="cb"><svg class="i"><use href="#i-check"/></svg></span>
+          </label>
+          <template v-if="!selCount">
+            <h3>{{ listTitle }}</h3>
+            <span class="n" v-if="total">{{ total }} 封</span>
+            <span class="sp"></span>
+            <div class="pager" v-if="total>pageSize">
+              <button class="icon-btn" style="width:26px;height:26px" :disabled="page<=1" @click="gotoPage(page-1)"><svg class="i" style="width:14px;height:14px"><use href="#i-back"/></svg></button>
+              {{ page }} / {{ Math.ceil(total/pageSize) }}
+              <button class="icon-btn" style="width:26px;height:26px" :disabled="page>=Math.ceil(total/pageSize)" @click="gotoPage(page+1)"><svg class="i" style="width:14px;height:14px"><use href="#i-next"/></svg></button>
+            </div>
+          </template>
+          <div class="bulk" v-else>
+            <span class="bulk-n">已选 <b>{{ selCount }}</b> 封</span>
+            <button class="bulk-btn" @click="batchRead(true)" title="标记为已读"><svg class="i"><use href="#i-mail"/></svg><span>已读</span></button>
+            <button class="bulk-btn" @click="batchRead(false)" title="标记为未读"><svg class="i" style="fill:currentColor;stroke:none"><use href="#i-unread-dot"/></svg><span>未读</span></button>
+            <button class="bulk-btn" @click="batchStar(true)" title="加星标"><svg class="i"><use href="#i-star"/></svg><span>标星</span></button>
+            <button class="bulk-btn" @click="batchArchive()" title="归档"><svg class="i"><use href="#i-archive"/></svg><span>归档</span></button>
+            <button class="bulk-btn danger" @click="batchRemove()" title="删除所选"><svg class="i"><use href="#i-trash"/></svg><span>删除</span></button>
+            <span class="sp"></span>
+            <button class="bulk-text" @click="clearSel">取消选择</button>
           </div>
         </div>
-        <div class="rows">
+        <div class="rows" :class="{'has-sel': selCount>0}">
           <div class="row" v-for="m in filteredMessages" :key="m.uid" draggable="true"
                :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
+                        'is-sel': isSel(m),
                         'is-dragging': dragMsg && dragMsg.uid===m.uid && dragMsg.accountId===m.accountId}"
-               @click="openMessage(m)" @dragstart="onDragStart($event, m)" @dragend="onDragEnd">
-            <div class="avatar" :style="{background: m._color}">{{ initials(m.from.name || m.from.address) }}</div>
+               @click="openMessage(m)" @contextmenu.prevent="openCtx($event, m)" @dragstart="onDragStart($event, m)" @dragend="onDragEnd">
+            <div class="avatar-slot">
+              <div class="avatar" :style="{background: m._color}">{{ initials(m.from.name || m.from.address) }}</div>
+              <label class="cb-wrap" @click.stop>
+                <input type="checkbox" :checked="isSel(m)" @change="toggleSel($event, m)">
+                <span class="cb"><svg class="i"><use href="#i-check"/></svg></span>
+              </label>
+            </div>
             <div class="mid">
               <div class="l1">
                 <span class="acct-dot" :style="{background:m._color}" v-if="activeAccount==='all'" title="所属账号"></span>
@@ -301,8 +329,22 @@
           <button class="tool-btn m-back" @click="readerOpen=false"><svg class="i"><use href="#i-back"/></svg></button>
           <template v-if="selected">
             <button class="tool-btn primary" @click="reply(selected,'reply')"><svg class="i"><use href="#i-reply"/></svg><span>回复</span></button>
+            <button class="tool-btn" v-if="(selected.to?.length||0) + (selected.cc?.length||0) > 1" @click="replyAll(selected)" title="回复全部">
+              <svg class="i"><use href="#i-reply-all"/></svg><span>回复全部</span></button>
             <button class="tool-btn" @click="reply(selected,'forward')"><svg class="i"><use href="#i-forward"/></svg><span>转发</span></button>
             <span class="tool-sep"></span>
+            <div class="move-wrap">
+              <button class="tool-btn" @click.stop="readerMoveOpen=!readerMoveOpen" title="移动到文件夹">
+                <svg class="i"><use href="#i-folder"/></svg></button>
+              <div class="move-menu" v-if="readerMoveOpen" @click.stop>
+                <div class="move-title">移动到</div>
+                <button class="move-item" v-for="f in foldersOf(selected.accountId)" :key="f.path"
+                        :disabled="f.path===selected.folder" @click="readerMoveTo(f.path)">
+                  <svg class="i"><use href="#i-folder"/></svg><span>{{ folderLabel(f) }}</span>
+                  <svg class="i" style="margin-left:auto;width:13px;height:13px;color:var(--accent)" v-if="f.path===selected.folder"><use href="#i-check"/></svg>
+                </button>
+              </div>
+            </div>
             <button class="tool-btn" @click="toggleStar(selected)" :title="selected.flags.includes('\\Flagged')?'取消星标':'星标'">
               <svg class="i" :style="selected.flags.includes('\\Flagged')?'fill:#d8a72a;color:#d8a72a':''"><use href="#i-star"/></svg>
             </button>
@@ -622,6 +664,43 @@
     </div>
 
     <div class="toast"><div class="t" v-for="t in toasts" :key="t.id" :class="t.type">{{ t.text }}</div></div>
+
+    <!-- 邮件列表右键菜单 -->
+    <div class="ctx-menu" v-if="ctx.open" :style="{left:ctx.x+'px',top:ctx.y+'px'}" @click.stop @contextmenu.prevent>
+      <div class="ctx-head" v-if="selCount>1">已选 {{ selCount }} 封</div>
+      <button class="ctx-item" @click="ctxAct(m=>{reply(m,'reply')})">
+        <svg class="i"><use href="#i-reply"/></svg><span>回复</span></button>
+      <button class="ctx-item" @click="ctxAct(replyAll)">
+        <svg class="i"><use href="#i-reply-all"/></svg><span>回复全部</span></button>
+      <button class="ctx-item" @click="ctxAct(m=>{reply(m,'forward')})">
+        <svg class="i"><use href="#i-forward"/></svg><span>转发</span></button>
+      <div class="ctx-sep"></div>
+      <button class="ctx-item" @click="ctxAct(()=>batchRead(true))">
+        <svg class="i"><use href="#i-mail"/></svg><span>标记为已读</span></button>
+      <button class="ctx-item" @click="ctxAct(()=>batchRead(false))">
+        <svg class="i" style="fill:currentColor;stroke:none"><use href="#i-unread-dot"/></svg><span>标记为未读</span></button>
+      <button class="ctx-item" @click="ctxAct(()=>batchStar(true))">
+        <svg class="i"><use href="#i-star"/></svg><span>标为星标</span></button>
+      <div class="ctx-sep"></div>
+      <div class="ctx-sub-wrap" @mouseenter="ctx.sub=true" @mouseleave="ctx.sub=false">
+        <button class="ctx-item" :class="{open:ctx.sub}">
+          <svg class="i"><use href="#i-folder"/></svg><span>移动到…</span>
+          <svg class="i ctx-chev"><use href="#i-next"/></svg>
+        </button>
+        <div class="ctx-sub" v-if="ctx.sub && ctx.m">
+          <button class="ctx-item" v-for="f in foldersOf(ctx.m.accountId)" :key="f.path"
+                  :disabled="f.path===ctx.m.folder" @click="batchMove(f.path)">
+            <svg class="i"><use href="#i-folder"/></svg><span>{{ folderLabel(f) }}</span>
+            <svg class="i" style="margin-left:auto;width:12px;height:12px" v-if="f.path===ctx.m.folder"><use href="#i-check"/></svg>
+          </button>
+        </div>
+      </div>
+      <button class="ctx-item" @click="ctxAct(batchArchive)">
+        <svg class="i"><use href="#i-archive"/></svg><span>归档</span></button>
+      <div class="ctx-sep"></div>
+      <button class="ctx-item danger" @click="ctxAct(batchRemove)">
+        <svg class="i"><use href="#i-trash"/></svg><span>删除</span></button>
+    </div>
   </div>
 </div>
 

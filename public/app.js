@@ -64,6 +64,7 @@ const app = createApp({
       avatarOpen: false,
       railOpen: false,
       readerOpen: false,
+      readerMoveOpen: false,
       modals: { settings: false, users: false },
       settingsTab: 'accounts',
       addForm: { open: false, email: '', displayName: '', password: '', preset: null, color: PALETTE[0], imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
@@ -74,6 +75,11 @@ const app = createApp({
       editSaving: false,
       dragMsg: null,        // 正在拖动的邮件
       dropTarget: '',       // 高亮的投放目标 `账号id|文件夹路径`
+      // 多选：存 key（`账号id|文件夹|uid`），跨刷新也能对上
+      selection: [],
+      selAnchor: -1,
+      // 右键菜单
+      ctx: { open: false, x: 0, y: 0, m: null, sub: false },
       newFolder: { accountId: null, name: '', busy: false },
       // Outlook OAuth：应用 ID 由用户在界面上填一次，存在实例设置里
       outlook: {
@@ -112,11 +118,21 @@ const app = createApp({
       for (const [k, v] of Object.entries(this.unreadMap)) if (k.endsWith('|INBOX')) n += v;
       return n;
     },
+    // 当前列表里能被选中的行（搜索过滤后的可见行）
+    visibleRows() {
+      return this.messages.filter((m) => !this.searchQ || this.msgMatch(m));
+    },
+    selCount() { return this.selection.length; },
+    allSelected() {
+      const rows = this.visibleRows;
+      return rows.length > 0 && rows.every((m) => this.selection.includes(this.msgKey(m)));
+    },
+    selHasUnread() {
+      return this.messages.some((m) => this.selection.includes(this.msgKey(m)) && !m.flags.includes('\\Seen'));
+    },
     filteredMessages() {
       if (!this.searchQ) return this.messages;
-      const q = this.searchQ.toLowerCase();
-      return this.messages.filter((m) => (m.subject || '').toLowerCase().includes(q)
-        || (m.from?.name || '').toLowerCase().includes(q) || (m.from?.address || '').toLowerCase().includes(q));
+      return this.messages.filter((m) => this.msgMatch(m));
     },
     listTitle() {
       if (this.activeAccount === 'all') return '收件箱 · 所有账号';
@@ -332,6 +348,7 @@ const app = createApp({
       this.activeAccount = id;
       this.selected = null; this.readerOpen = false;
       this.page = 1; this.searchQ = '';
+      this.clearSel();
       if (id === 'all') {
         this.allFolder = null;
       } else {
@@ -345,15 +362,17 @@ const app = createApp({
       this.activeFolder = path;
       this.selected = null; this.readerOpen = false;
       this.page = 1; this.searchQ = '';
+      this.clearSel();
       this.loadMessages();
     },
     pickAllFolder(aid, path) {
       this.allFolder = `${aid}|${path}`;
       this.selected = null; this.readerOpen = false;
       this.page = 1; this.searchQ = '';
+      this.clearSel();
       this.loadMessages();
     },
-    gotoPage(p) { this.page = p; this.loadMessages(); },
+    gotoPage(p) { this.page = p; this.clearSel(); this.loadMessages(); },
 
     async loadMessages() {
       this.loadingMessages = true;
@@ -407,6 +426,7 @@ const app = createApp({
         this.selected = { ...full, ...m, folder: m.folder || this.currentFolderOf(m) };
         this.quickReplyText = '';
         this.readerOpen = true;
+        this.readerMoveOpen = false;
         // 以服务端 flags 为准，把列表里可能过期的星标/已读状态对齐（在别处标过星也能立刻反映）
         for (const f of ['\\Seen', '\\Flagged']) {
           const has = (full.flags || []).includes(f);
@@ -491,6 +511,161 @@ const app = createApp({
       } catch (e) { this.toast(e.message, 'error'); }
     },
 
+    // ---------- 多选与批量操作 ----------
+    msgMatch(m) {
+      if (!this.searchQ) return true;
+      const q = this.searchQ.toLowerCase();
+      return (m.subject || '').toLowerCase().includes(q)
+        || (m.from?.name || '').toLowerCase().includes(q)
+        || (m.from?.address || '').toLowerCase().includes(q);
+    },
+    msgKey(m) { return `${m.accountId}|${m.folder || this.currentFolderOf(m)}|${m.uid}`; },
+    isSel(m) { return this.selection.includes(this.msgKey(m)); },
+    toggleSel(e, m) {
+      const rows = this.filteredMessages;
+      const idx = rows.findIndex((x) => x.uid === m.uid && x.accountId === m.accountId);
+      const key = this.msgKey(m);
+      if (e && e.shiftKey && this.selAnchor >= 0 && this.selAnchor < rows.length) {
+        const [a, b] = [this.selAnchor, idx].sort((x, y) => x - y);
+        const keys = rows.slice(a, b + 1).map((x) => this.msgKey(x));
+        if (this.selection.includes(key)) this.selection = this.selection.filter((k) => !keys.includes(k));
+        else this.selection = [...new Set([...this.selection, ...keys])];
+      } else {
+        this.selection = this.selection.includes(key)
+          ? this.selection.filter((k) => k !== key)
+          : [...this.selection, key];
+        this.selAnchor = idx;
+      }
+    },
+    toggleSelectAll() {
+      if (this.allSelected) { this.clearSel(); return; }
+      this.selection = this.visibleRows.map((m) => this.msgKey(m));
+      this.selAnchor = 0;
+    },
+    clearSel() { this.selection = []; this.selAnchor = -1; },
+    selectedMessages() { return this.messages.filter((m) => this.selection.includes(this.msgKey(m))); },
+    // IMAP 的 UID 只在单个邮箱内唯一：批量请求必须按「账号 + 文件夹」分组发
+    groupSelection() {
+      const groups = new Map();
+      for (const m of this.selectedMessages()) {
+        const folder = m.folder || this.currentFolderOf(m);
+        const key = `${m.accountId}|${folder}`;
+        if (!groups.has(key)) groups.set(key, { accountId: m.accountId, folder, uids: [] });
+        groups.get(key).uids.push(m.uid);
+      }
+      return [...groups.values()];
+    },
+    trashOf(accountId) {
+      return (this.foldersByAccount[accountId] || []).find((f) => f.special === '\\Trash');
+    },
+    archiveOf(accountId) {
+      return (this.foldersByAccount[accountId] || []).find((f) => f.special === '\\Archive' || /archive/i.test(f.path));
+    },
+    dropRows(msgs) {
+      const keys = new Set(msgs.map((m) => this.msgKey(m)));
+      this.messages = this.messages.filter((m) => !keys.has(this.msgKey(m)));
+      this.selection = this.selection.filter((k) => !keys.has(k));
+      if (this.selected && keys.has(this.msgKey(this.selected))) { this.selected = null; this.readerOpen = false; }
+      if (this.selection.length) this.selAnchor = -1;
+    },
+    // 批量已读 / 未读（乐观更新，失败整体回滚）
+    async batchRead(read) {
+      const msgs = this.selectedMessages();
+      if (!msgs.length) return;
+      for (const m of msgs) this.setFlag(m, '\\Seen', read);
+      try {
+        await Promise.all(this.groupSelection().map((g) => this.api('/api/flags', {
+          method: 'POST', body: { account: g.accountId, folder: g.folder, uids: g.uids, action: read ? 'read' : 'unread' },
+        })));
+        this.toast(`已把 ${msgs.length} 封标为${read ? '已读' : '未读'}`, 'ok');
+        this.loadAllFoldersAndUnread();
+      } catch (e) {
+        for (const m of msgs) this.setFlag(m, '\\Seen', !read);
+        this.toast(e.message, 'error');
+      }
+    },
+    async batchStar(on) {
+      const msgs = this.selectedMessages();
+      if (!msgs.length) return;
+      for (const m of msgs) this.setFlag(m, '\\Flagged', on);
+      try {
+        await Promise.all(this.groupSelection().map((g) => this.api('/api/flags', {
+          method: 'POST', body: { account: g.accountId, folder: g.folder, uids: g.uids, action: on ? 'star' : 'unstar' },
+        })));
+        this.toast(`已${on ? '加星' : '取消星标'} ${msgs.length} 封`, 'ok');
+      } catch (e) {
+        for (const m of msgs) this.setFlag(m, '\\Flagged', !on);
+        this.toast(e.message, 'error');
+      }
+    },
+    async batchRemove() {
+      const msgs = this.selectedMessages();
+      if (!msgs.length) return;
+      if (!confirm(`把选中的 ${msgs.length} 封邮件移到已删除？`)) return;
+      try {
+        await Promise.all(this.groupSelection().map((g) => {
+          const trash = this.trashOf(g.accountId);
+          // 已在垃圾箱里就直接删掉（IMAP delete），否则移进垃圾箱
+          if (trash && g.folder !== trash.path) {
+            return this.api('/api/move', { method: 'POST', body: { account: g.accountId, folder: g.folder, uids: g.uids, dest: trash.path } });
+          }
+          return this.api('/api/delete', { method: 'POST', body: { account: g.accountId, folder: g.folder, uids: g.uids } });
+        }));
+        const n = msgs.length;
+        this.dropRows(msgs);
+        this.loadAllFoldersAndUnread();
+        this.toast(`已删除 ${n} 封`, 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    async batchArchive() {
+      const msgs = this.selectedMessages();
+      if (!msgs.length) return;
+      const groups = this.groupSelection();
+      const movable = groups.filter((g) => this.archiveOf(g.accountId));
+      if (!movable.length) { this.toast('所选邮箱没有归档文件夹', 'error'); return; }
+      try {
+        await Promise.all(movable.map((g) => this.api('/api/move', {
+          method: 'POST', body: { account: g.accountId, folder: g.folder, uids: g.uids, dest: this.archiveOf(g.accountId).path },
+        })));
+        const moved = msgs.filter((m) => this.archiveOf(m.accountId));
+        this.dropRows(moved);
+        this.toast(`已归档 ${moved.length} 封${movable.length < groups.length ? '（部分邮箱无归档文件夹，已跳过）' : ''}`, 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    async batchMove(dest) {
+      const msgs = this.selectedMessages();
+      if (!msgs.length) { this.closeCtx(); return; }
+      const groups = this.groupSelection().filter((g) => g.folder !== dest);
+      if (!groups.length) { this.toast('已经在这个文件夹里了'); this.closeCtx(); return; }
+      try {
+        await Promise.all(groups.map((g) => this.api('/api/move', {
+          method: 'POST', body: { account: g.accountId, folder: g.folder, uids: g.uids, dest },
+        })));
+        this.dropRows(msgs);
+        this.toast(`已移动 ${msgs.length} 封到「${this.folderLabel(this.folders.find((f) => f.path === dest) || { path: dest, name: dest })}」`, 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+      this.closeCtx();
+    },
+
+    // ---------- 右键菜单 ----------
+    openCtx(e, m) {
+      // 与 QQ 邮箱一致：右键点在未选中的行上时，只对这一封操作
+      if (!this.isSel(m)) { this.selection = [this.msgKey(m)]; this.selAnchor = -1; }
+      const w = 208, h = 316;
+      this.ctx = {
+        open: true,
+        x: Math.max(8, Math.min(e.clientX, window.innerWidth - w - 8)),
+        y: Math.max(8, Math.min(e.clientY, window.innerHeight - h - 8)),
+        m, sub: false,
+      };
+    },
+    closeCtx() { if (this.ctx.open) this.ctx = { open: false, x: 0, y: 0, m: null, sub: false }; },
+    ctxAct(fn) {
+      const m = this.ctx.m;
+      this.closeCtx();
+      if (m) fn(m);
+    },
+
     // ---------- 写信 ----------
     openCompose(opts = {}) {
       this.compose.open = true;
@@ -498,7 +673,7 @@ const app = createApp({
       this.compose.replyTo = opts.replyTo || null;
       this.compose.accountId = opts.accountId || (this.accounts[0] ? this.accounts[0].id : '');
       this.compose.to = opts.to || '';
-      this.compose.cc = ''; this.compose.showCc = false;
+      this.compose.cc = opts.cc || ''; this.compose.showCc = !!opts.cc;
       this.compose.subject = opts.subject || '';
       this.compose.text = opts.text || '';
       this.compose.attachments = [];
@@ -513,6 +688,7 @@ const app = createApp({
           to: m.from?.address || '',
           subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
           text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${(m.text || '').split('\n').map((l) => '> ' + l).join('\n').slice(0, 4000)}`,
+          replyTo: m,
         });
       } else {
         this.openCompose({
@@ -522,6 +698,43 @@ const app = createApp({
         });
       }
       this.readerOpen = false;
+      this.readerMoveOpen = false;
+    },
+    // 回复全部：收件人 = 原发件人 + 原收件人 + 抄送（去掉自己、去重）
+    replyAll(m) {
+      const acc = this.accounts.find((a) => a.id === m.accountId);
+      const me = (acc?.email || '').toLowerCase();
+      const norm = (x) => String(x || '').trim().toLowerCase();
+      const all = [m.from?.address, ...(m.to || []).map((x) => x.address), ...(m.cc || []).map((x) => x.address)]
+        .filter((a) => a && norm(a) !== me);
+      const seen = new Set();
+      const uniq = [];
+      for (const a of all) { const k = norm(a); if (!seen.has(k)) { seen.add(k); uniq.push(a); } }
+      if (!uniq.length) { this.toast('这封邮件没有其他收件人', 'error'); return; }
+      this.openCompose({
+        mode: 'reply', accountId: m.accountId,
+        to: uniq[0],
+        cc: uniq.slice(1).join(', '),
+        subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
+        text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${(m.text || '').split('\n').map((l) => '> ' + l).join('\n').slice(0, 4000)}`,
+        replyTo: m,
+      });
+      this.readerOpen = false;
+    },
+    async readerMoveTo(dest) {
+      const m = this.selected;
+      this.readerMoveOpen = false;
+      if (!m) return;
+      const folder = m.folder || this.currentFolderOf(m);
+      if (folder === dest) return;
+      try {
+        await this.api('/api/move', { method: 'POST', body: { account: m.accountId, folder, uids: [m.uid], dest } });
+        const f = (this.foldersByAccount[m.accountId] || []).find((x) => x.path === dest);
+        this.messages = this.messages.filter((x) => !(x.uid === m.uid && x.accountId === m.accountId));
+        this.selected = null; this.readerOpen = false;
+        this.loadAllFoldersAndUnread();
+        this.toast(`已移动到「${f ? this.folderLabel(f) : dest}」`, 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
     },
     pickFiles() { this.$refs.fileInput.click(); },
     onFiles(ev) {
@@ -833,7 +1046,23 @@ const app = createApp({
   },
 
   async mounted() {
-    document.addEventListener('click', () => { this.acctOpen = false; this.avatarOpen = false; });
+    document.addEventListener('click', () => { this.acctOpen = false; this.avatarOpen = false; this.closeCtx(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { this.closeCtx(); }
+      // 列表页 Delete 键删除选中（输入框里不抢）
+      const t = e.target || {};
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable;
+      if (!typing && this.view === 'app' && this.selection.length && (e.key === 'Delete' || e.key === 'Backspace')) {
+        e.preventDefault();
+        this.batchRemove();
+      }
+      if (!typing && this.view === 'app' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && this.messages.length) {
+        e.preventDefault();
+        this.toggleSelectAll();
+      }
+    });
+    window.addEventListener('scroll', () => this.closeCtx(), true);
+    window.addEventListener('resize', () => this.closeCtx());
     try {
       const st = await this.api('/api/setup-status');
       if (!st.setupDone) { this.authMode = 'setup'; this.view = 'auth'; return; }

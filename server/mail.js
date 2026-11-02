@@ -333,16 +333,19 @@ export async function getAttachment(uid, accountId, folder, messageUid, attachme
 }
 
 // ---------- 标记 / 移动 / 删除 ----------
-export async function setFlags(uid, accountId, folder, messageUid, { add = [], remove = [], set = null }) {
+export async function setFlags(uid, accountId, folder, messageUids, { add = [], remove = [], set = null }) {
   try {
+    // 支持单个 uid 或 uid 数组：imapflow 的 flags 系列都吃逗号分隔的 UID 集合
+    const seq = Array.isArray(messageUids) ? messageUids.map(String).join(',') : String(messageUids);
+    if (!seq) throw new Error('没有选择邮件');
     return await withMailbox(uid, accountId, folder, async (client) => {
       const opts = { uid: true };
       if (Array.isArray(set)) {
-        await client.messageFlagsSet(String(messageUid), set, opts);
+        await client.messageFlagsSet(seq, set, opts);
         return { ok: true, flags: set };
       }
-      if (add.length) await client.messageFlagsAdd(String(messageUid), add, opts);
-      if (remove.length) await client.messageFlagsRemove(String(messageUid), remove, opts);
+      if (add.length) await client.messageFlagsAdd(seq, add, opts);
+      if (remove.length) await client.messageFlagsRemove(seq, remove, opts);
       return { ok: true };
     });
   } catch (e) {

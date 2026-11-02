@@ -406,7 +406,10 @@ api.get('/attachment', guard, async (req, res) => {
 
 api.post('/flags', guard, async (req, res) => {
   try {
-    const { account, folder, uid, action } = req.body || {};
+    const { account, folder, action } = req.body || {};
+    // 兼容单封（uid）与批量（uids）两种入参
+    const uids = Array.isArray(req.body?.uids) ? req.body.uids.filter(Boolean) : (req.body?.uid ? [req.body.uid] : []);
+    if (!uids.length) return res.status(400).json({ error: '没有选择邮件' });
     const map = {
       read: { add: ['\\Seen'] },
       unread: { remove: ['\\Seen'] },
@@ -414,7 +417,8 @@ api.post('/flags', guard, async (req, res) => {
       unstar: { remove: ['\\Flagged'] },
     };
     if (!map[action]) return res.status(400).json({ error: '未知操作' });
-    res.json(await setFlags(req.user.id, String(account), String(folder), String(uid), map[action]));
+    const out = await setFlags(req.user.id, String(account), String(folder), uids, map[action]);
+    res.json({ ...out, count: uids.length });
   } catch (e) { fail(res, e); }
 });
 

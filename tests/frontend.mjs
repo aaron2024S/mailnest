@@ -250,4 +250,166 @@ function ctxWith(messages, selected = null) {
   }
 }
 
+// ============ 多选 / 批量操作 / 右键菜单 ============
+console.log('\n--- 多选与批量操作 ---');
+globalThis.confirm = () => true;
+globalThis.window = globalThis.window || { innerWidth: 1280, innerHeight: 800, addEventListener() {} };
+
+const C = captured.computed;
+function bulkCtx(messages, opts = {}) {
+  const ctx = {
+    messages,
+    selection: opts.selection || [],
+    selAnchor: -1,
+    searchQ: opts.searchQ || '',
+    foldersByAccount: opts.foldersByAccount || {},
+    calls: [],
+    async api(url, o) { ctx.calls.push({ url, body: o?.body }); if (ctx.fail) throw new Error('boom'); return { ok: true }; },
+    loadAllFoldersAndUnread() {},
+    currentFolderOf(m) { return m.folder || 'INBOX'; },
+    toast(m, k) { (ctx.toasts = ctx.toasts || []).push({ m, k }); },
+    readerOpen: true,
+  };
+  for (const k of ['msgMatch', 'msgKey', 'isSel', 'toggleSel', 'toggleSelectAll', 'clearSel',
+    'selectedMessages', 'groupSelection', 'trashOf', 'archiveOf', 'dropRows',
+    'batchRead', 'batchStar', 'batchRemove', 'batchArchive', 'batchMove',
+    'setFlag', 'flagTargets', 'openCtx', 'closeCtx', 'ctxAct', 'folderLabel']) ctx[k] = M[k];
+  for (const k of ['visibleRows', 'filteredMessages', 'allSelected', 'selCount']) {
+    Object.defineProperty(ctx, k, { get() { return C[k].call(ctx); } });
+  }
+  return ctx;
+}
+
+// 1) 全选 / 取消全选
+{
+  const rows = [msg({ uid: 1 }), msg({ uid: 2 }), msg({ uid: 3 })];
+  const ctx = bulkCtx(rows);
+  ok('全选：初始不是全选状态', C.allSelected.call(ctx) === false);
+  M.toggleSelectAll.call(ctx);
+  ok('全选：三封都进 selection', ctx.selection.length === 3);
+  ok('全选：判定为全选', C.allSelected.call(ctx) === true);
+  M.toggleSelectAll.call(ctx);
+  ok('全选：再点一次清空', ctx.selection.length === 0);
+}
+
+// 2) 搜索过滤后只选可见行
+{
+  const rows = [msg({ uid: 1, subject: '发票' }), msg({ uid: 2, subject: '会议' })];
+  const ctx = bulkCtx(rows, { searchQ: '发票' });
+  M.toggleSelectAll.call(ctx);
+  ok('全选：只选搜索命中的行', ctx.selection.length === 1 && ctx.selection[0].endsWith('|1'));
+}
+
+// 3) Shift 连选
+{
+  const rows = [msg({ uid: 1 }), msg({ uid: 2 }), msg({ uid: 3 }), msg({ uid: 4 })];
+  const ctx = bulkCtx(rows);
+  M.toggleSel.call(ctx, null, rows[0]);
+  ok('单选：(0) 已选', ctx.selection.length === 1);
+  M.toggleSel.call(ctx, { shiftKey: true }, rows[2]);
+  ok('Shift 连选：0→2 共三封', ctx.selection.length === 3);
+  M.toggleSel.call(ctx, null, rows[3]);
+  ok('普通点击：追加而不是替换', ctx.selection.length === 4);
+}
+
+// 4) 批量已读：同账号同文件夹合并成一个请求，uids 是数组
+{
+  const rows = [msg({ uid: 1, flags: [] }), msg({ uid: 2, flags: [] })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|1', 'a1|INBOX|2'] });
+  await M.batchRead.call(ctx, true);
+  ok('批量已读：只发一个请求', ctx.calls.length === 1, JSON.stringify(ctx.calls));
+  ok('批量已读：uids 是数组', JSON.stringify(ctx.calls[0].body.uids) === '[1,2]');
+  ok('批量已读：action=read', ctx.calls[0].body.action === 'read');
+  ok('批量已读：本地 flags 同步', rows.every((r) => r.flags.includes('\\Seen')));
+  ok('批量已读：有成功提示', /2 封/.test(ctx.toasts.at(-1).m));
+}
+
+// 5) 跨账号 / 跨文件夹必须分组发
+{
+  const rows = [msg({ uid: 1, accountId: 'a1' }), msg({ uid: 1, accountId: 'a2' }), msg({ uid: 5, folder: 'Archive' })];
+  const ctx = bulkCtx(rows, { selection: rows.map((r) => r.accountId + '|' + r.folder + '|' + r.uid) });
+  await M.batchRead.call(ctx, false);
+  ok('分组：三个不同邮箱/文件夹发三个请求', ctx.calls.length === 3, String(ctx.calls.length));
+  ok('分组：每个请求只带自己的 uid', ctx.calls.every((c) => c.body.uids.length === 1));
+}
+
+// 6) 批量已读失败要整体回滚
+{
+  const rows = [msg({ uid: 1, flags: [] })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|1'] });
+  ctx.fail = true;
+  await M.batchRead.call(ctx, true);
+  ok('批量已读失败：flags 回滚', !rows[0].flags.includes('\\Seen'));
+  ok('批量已读失败：提示错误', ctx.toasts.at(-1).k === 'error');
+}
+
+// 7) 批量删除：有垃圾箱就移动过去
+{
+  const rows = [msg({ uid: 1 }), msg({ uid: 2 })];
+  const ctx = bulkCtx(rows, {
+    selection: ['a1|INBOX|1', 'a1|INBOX|2'],
+    foldersByAccount: { a1: [{ path: 'INBOX' }, { path: 'Trash', special: '\\Trash' }] },
+  });
+  await M.batchRemove.call(ctx);
+  ok('批量删除：用 move 进垃圾箱', ctx.calls[0].url === '/api/move' && ctx.calls[0].body.dest === 'Trash');
+  ok('批量删除：列表里剔除', ctx.messages.length === 0 && ctx.selection.length === 0);
+  ok('批量删除：提示条数', /2 封/.test(ctx.toasts.at(-1).m));
+}
+
+// 8) 已在垃圾箱里：直接 delete（不再 move 到同一个文件夹）
+{
+  const rows = [msg({ uid: 9, folder: 'Trash' })];
+  const ctx = bulkCtx(rows, {
+    selection: ['a1|Trash|9'],
+    foldersByAccount: { a1: [{ path: 'Trash', special: '\\Trash' }] },
+  });
+  await M.batchRemove.call(ctx);
+  ok('垃圾箱内删除：走 /api/delete', ctx.calls[0].url === '/api/delete');
+}
+
+// 9) 批量归档：没有归档文件夹的账号被跳过
+{
+  const rows = [msg({ uid: 1, accountId: 'a1' }), msg({ uid: 2, accountId: 'a2' })];
+  const ctx = bulkCtx(rows, {
+    selection: rows.map((r) => r.accountId + '|INBOX|' + r.uid),
+    foldersByAccount: { a1: [{ path: 'Archive', special: '\\Archive' }], a2: [] },
+  });
+  await M.batchArchive.call(ctx);
+  ok('批量归档：只给有 Archive 的账号发请求', ctx.calls.length === 1 && ctx.calls[0].body.account === 'a1');
+  ok('批量归档：移走的从列表剔除、没归档的留下', ctx.messages.length === 1 && ctx.messages[0].accountId === 'a2');
+}
+
+// 10) 右键：点在未选中的行上只对这一封操作
+{
+  const rows = [msg({ uid: 1 }), msg({ uid: 2 })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|1'] });
+  M.openCtx.call(ctx, { clientX: 100, clientY: 100 }, rows[1]);
+  ok('右键未选中行：selection 换成这一封', ctx.selection.length === 1 && ctx.selection[0].endsWith('|2'));
+  ok('右键：菜单打开并记住邮件', ctx.ctx.open === true && ctx.ctx.m.uid === 2);
+  M.openCtx.call(ctx, { clientX: 100, clientY: 100 }, rows[0]);
+  ok('右键已选中行：保留多选', ctx.selection.length === 1);
+  M.closeCtx.call(ctx);
+  ok('右键：closeCtx 关闭', ctx.ctx.open === false && ctx.ctx.m === null);
+}
+
+// 11) 右键菜单动作：先关菜单再执行，且拿到的是右键那一封
+{
+  const rows = [msg({ uid: 4 })];
+  const ctx = bulkCtx(rows, { selection: ['a1|INBOX|4'] });
+  M.openCtx.call(ctx, { clientX: 10, clientY: 10 }, rows[0]);
+  let got = null;
+  M.ctxAct.call(ctx, (m) => { got = m.uid; });
+  ok('ctxAct：把邮件传给回调', got === 4);
+  ok('ctxAct：执行后菜单关闭', ctx.ctx.open === false);
+}
+
+// 12) msgKey 区分账号与文件夹
+{
+  const ctx = bulkCtx([]);
+  ok('msgKey：账号+文件夹+uid 组成唯一键',
+    M.msgKey.call(ctx, { uid: 3, accountId: 'a1', folder: 'INBOX' }) === 'a1|INBOX|3');
+  ok('msgKey：不同文件夹不同键',
+    M.msgKey.call(ctx, { uid: 3, accountId: 'a1', folder: 'Trash' }) !== M.msgKey.call(ctx, { uid: 3, accountId: 'a1', folder: 'INBOX' }));
+}
+
 console.log(`\n全部通过：${pass} 项断言`);

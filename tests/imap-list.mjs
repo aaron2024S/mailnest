@@ -1,9 +1,13 @@
 // 假 IMAP 服务器 + listMessages 端到端验证（本机无真实邮箱时用）
 // 用法：node tests/imap-list.mjs
 import net from 'node:net';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // store.js 在导入时读取 MAILNEST_DATA，必须先设好（保持跨平台，不依赖 shell 变量语法）
 process.env.MAILNEST_DATA = process.env.MAILNEST_DATA || '.imap-test';
+// 上次运行留下的 system.json 会让 createUser 撞「用户名已存在」：导入 store 之前先清掉
+fs.rmSync(path.join(path.resolve(process.env.MAILNEST_DATA), 'system.json'), { force: true });
 
 const COUNT = 14;
 const SENT_BODY = 'BODYSTRUCTURE ("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 20 1)';
