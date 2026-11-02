@@ -118,7 +118,6 @@ const app = createApp({
       return f ? this.folderLabel(f) : this.activeFolder;
     },
     totalAttachSize() { return this.compose.attachments.reduce((s, a) => s + a.size, 0); },
-    storagePct() { return Math.min(100, this.accounts.length * 12 + 8); },
   },
 
   methods: {

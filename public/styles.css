@@ -169,8 +169,6 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .acct-sep{display:flex;align-items:center;gap:6px;margin:4px 10px 2px;font-size:11px;color:var(--text-3);}
 .acct-sep i{width:7px;height:7px;border-radius:3px;flex:none;}
 .rail-foot{padding:10px 6px 2px;font-size:11.5px;color:var(--text-3);}
-.rail-foot .bar{height:3px;border-radius:2px;background:var(--surface-3);margin-top:6px;overflow:hidden;}
-.rail-foot .bar i{display:block;height:100%;background:var(--accent);border-radius:2px;}
 
 /* ---- 列表 ---- */
 .list{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border);background:var(--surface);}
