@@ -49,17 +49,19 @@ function oauthError(body, fallback) {
   const code = String(body?.error || '');
   const detail = String(body?.error_description || '');
   const aadsts = (detail.match(/AADSTS\d+/) || [])[0] || '';
+  // 具体的 AADSTS 码优先于 error 字段的笼统兜底（invalid_request 会吞掉有价值的码）
+  if (aadsts === 'AADSTS700016') return Object.assign(new Error('找不到这个应用：应用 ID 可能抄错了，或者应用建在了别的租户下'), { status: 400, code });
+  if (aadsts === 'AADSTS7000218') return Object.assign(new Error('这个应用没开启「允许公共客户端流」，请在 Azure 门户 → 你的应用 → Authentication 拉到底打开后点 Save 重试'), { status: 400, code });
+  if (aadsts === 'AADSTS500011') return Object.assign(new Error('应用缺少邮件权限：请在 Azure 门户 → API 权限 里添加 Office 365 Exchange Online 的 IMAP.AccessAsUser.All 与 SMTP.Send'), { status: 400, code });
+  if (aadsts === 'AADSTS50194') return Object.assign(new Error('这个应用只允许自己组织的账户使用（注册时账户类型选错了）。改法：Azure 门户 → 你的应用 → Manifest（清单）→ 把 signInAudience 改为 AzureADandPersonalMicrosoftAccounts 并保存；或重新注册一个账户类型选「任何组织目录中的账户和个人 Microsoft 账户」的应用'), { status: 400, code });
   const known = {
     invalid_client: '应用 ID 不被微软接受：请确认复制的是「应用程序(客户端) ID」，并且该应用已开启「允许公共客户端流」',
     unauthorized_client: '这个应用不允许设备码登录：请在 Azure 门户 → 身份验证 → 打开「允许公共客户端流」后重试',
     invalid_grant: '授权已失效，请重新点击连接',
-    invalid_request: '请求被微软拒绝：检查应用 ID 是否正确、应用类型是否支持个人账户',
+    invalid_request: '请求被微软拒绝：请检查①应用 ID 是否复制完整；②应用页面 Overview 里 Supported account types 是否为「any organizational directory and personal Microsoft accounts」；③Authentication 页的 Allow public client flows 是否已设为 Yes 并点了 Save',
     unsupported_grant_type: '授权方式不被支持，请确认应用已开启「允许公共客户端流」',
   };
   if (known[code]) return Object.assign(new Error(known[code]), { status: 400, code });
-  if (aadsts === 'AADSTS700016') return Object.assign(new Error('找不到这个应用：应用 ID 可能抄错了，或者应用建在了别的租户下'), { status: 400, code });
-  if (aadsts === 'AADSTS7000218') return Object.assign(new Error('这个应用没开启「允许公共客户端流」，请在 Azure 门户 → 身份验证 里打开后重试'), { status: 400, code });
-  if (aadsts === 'AADSTS500011') return Object.assign(new Error('应用缺少邮件权限：请在 Azure 门户 → API 权限 里添加 Office 365 Exchange Online 的 IMAP.AccessAsUser.All 与 SMTP.Send'), { status: 400, code });
   return Object.assign(new Error(fallback || '微软登录服务返回了错误，请稍后重试'), { status: 400, code });
 }
 
