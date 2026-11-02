@@ -1,9 +1,9 @@
 {
   "name": "mailnest",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "description": "MailNest \u2014 self-hosted multi-account webmail",
+  "description": "MailNest — self-hosted multi-account webmail",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js"
