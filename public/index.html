@@ -193,7 +193,7 @@
       </div>
     </header>
 
-    <div class="workspace">
+    <div class="workspace" :style="{'--list-w': listWidth + 'px'}">
       <!-- 左栏 -->
       <aside class="rail" :class="{open:railOpen}">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" v-if="railOpen">
@@ -321,6 +321,8 @@
           </div>
           <div class="empty" v-if="loadingMessages && !filteredMessages.length"><span class="spin"></span> 正在从服务器读取…</div>
         </div>
+        <div class="col-resizer" :class="{on:resizing}" title="拖动调节列表宽度"
+             @mousedown.prevent="startListResize" @dblclick="resetListWidth"></div>
       </section>
 
       <!-- 阅读区 -->

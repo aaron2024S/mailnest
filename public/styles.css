@@ -147,7 +147,7 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .avatar-menu{position:absolute;top:calc(100% + 8px);right:0;width:230px;background:var(--surface);border:1px solid var(--border);
   border-radius:12px;box-shadow:var(--shadow-lg);padding:6px;z-index:60;}
 
-.workspace{display:grid;grid-template-columns:236px 384px minmax(0,1fr);min-height:0;background:var(--surface);}
+.workspace{display:grid;grid-template-columns:236px var(--list-w,384px) minmax(0,1fr);min-height:0;background:var(--surface);}
 
 /* ---- 左栏 ---- */
 .rail{display:flex;flex-direction:column;min-height:0;padding:12px 10px 10px;border-right:1px solid var(--border);background:var(--rail);}
@@ -186,7 +186,7 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .rail-foot{padding:10px 6px 2px;font-size:11.5px;color:var(--text-3);}
 
 /* ---- 列表 ---- */
-.list{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border);background:var(--surface);}
+.list{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border);background:var(--surface);position:relative;container-type:inline-size;}
 .list-head{display:flex;align-items:center;gap:8px;padding:12px 14px 8px;}
 .list-head h3{margin:0;font-size:14px;font-weight:650;}
 .list-head .n{font-size:11.5px;color:var(--text-3);}
@@ -449,7 +449,8 @@ button.swatch-btn.swatch{width:30px;height:30px;border-radius:9px;padding:0;}
 .list-cb.part .cb .i{opacity:0;}
 .list-cb .cb{position:relative;}
 
-.bulk{display:flex;align-items:center;gap:2px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none;}
+.bulk{display:flex;align-items:center;gap:2px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none;
+  padding:2px 4px;margin:-2px -4px;align-self:stretch;}
 .bulk::-webkit-scrollbar{display:none;}
 .bulk-n{font-size:12px;color:var(--text-2);white-space:nowrap;margin-right:6px;}
 .bulk-n b{color:var(--accent);font-weight:700;}
@@ -503,3 +504,17 @@ button.swatch-btn.swatch{width:30px;height:30px;border-radius:9px;padding:0;}
 .compose-fields{padding:8px 22px 0;}
 .compose textarea.body{padding:18px 22px;font-size:14px;}
 .compose-foot{padding:12px 22px;}
+
+/* ============ 列表宽度拖拽 ============ */
+.col-resizer{position:absolute;top:0;right:-4px;bottom:0;width:8px;cursor:col-resize;z-index:30;}
+.col-resizer::after{content:"";position:absolute;left:3px;top:0;bottom:0;width:2px;background:transparent;transition:background .15s;}
+.col-resizer:hover::after,.col-resizer.on::after{background:var(--accent);}
+body.col-resizing{cursor:col-resize;user-select:none;}
+body.col-resizing .col-resizer::after{background:var(--accent);}
+
+/* 列表栏自身放不下时，批量按钮只留图标（容器查询，跟窗口宽度无关） */
+@container (max-width:440px){
+  .bulk-btn span{display:none;}
+  .bulk-btn{padding:0 7px;}
+  .bulk-text span{display:none;}
+}

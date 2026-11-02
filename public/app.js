@@ -76,6 +76,8 @@ const app = createApp({
       editSaving: false,
       dragMsg: null,        // 正在拖动的邮件
       dropTarget: '',       // 高亮的投放目标 `账号id|文件夹路径`
+      listWidth: Math.min(640, Math.max(300, Number(localStorage.getItem('mn.listWidth')) || 384)),
+      resizing: false,      // 正在拖拽调节列表宽度
       // 多选：存 key（`账号id|文件夹|uid`），跨刷新也能对上
       selection: [],
       selAnchor: -1,
@@ -319,6 +321,29 @@ const app = createApp({
       }
     },
     onDragEnd() { this.dragMsg = null; this.dropTarget = ''; },
+
+    // ---------- 列表宽度拖拽 ----------
+    startListResize(e) {
+      this.resizing = true;
+      document.body.classList.add('col-resizing');
+      const startX = e.clientX, startW = this.listWidth;
+      const move = (ev) => {
+        // 分割线在列表右缘：向右拖 = 列表变宽
+        const w = Math.min(720, Math.max(300, startW + (ev.clientX - startX)));
+        this.listWidth = w;
+      };
+      const up = () => {
+        this.resizing = false;
+        document.body.classList.remove('col-resizing');
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        try { localStorage.setItem('mn.listWidth', String(this.listWidth)); } catch {}
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    },
+    resetListWidth() { this.listWidth = 384; try { localStorage.setItem('mn.listWidth', '384'); } catch {} },
+
     canDropOn(accountId, path) {
       const m = this.dragMsg;
       if (!m) return false;
