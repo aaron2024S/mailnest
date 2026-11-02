@@ -284,7 +284,8 @@ const app = createApp({
           const jobs = this.accounts.map(async (a) => {
             try {
               const d = await this.api(`/api/messages?account=${a.id}&folder=INBOX&page=1&pageSize=${this.pageSize}`);
-              return d.messages.map((m) => ({ ...m, accountId: a.id, accountEmail: a.email, _color: a.color }));
+              // folder 必须显式带上：汇总视图里的星标/删除/归档都靠它定位邮件
+              return d.messages.map((m) => ({ ...m, accountId: a.id, folder: 'INBOX', accountEmail: a.email, _color: a.color }));
             } catch (e) {
               this.toast(`${a.displayName}：${e.message}`, 'error');
               return [];
@@ -302,7 +303,7 @@ const app = createApp({
           }
           const d = await this.api(`/api/messages?account=${aid}&folder=${encodeURIComponent(folder)}&page=${this.page}&pageSize=${this.pageSize}`);
           const acc = this.accounts.find((a) => a.id === aid);
-          this.messages = d.messages.map((m) => ({ ...m, accountId: aid, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
+          this.messages = d.messages.map((m) => ({ ...m, accountId: aid, folder: m.folder || folder, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
           this.total = d.total;
         }
       } catch (e) {
@@ -327,8 +328,13 @@ const app = createApp({
         this.selected = { ...full, ...m, folder: m.folder || this.currentFolderOf(m) };
         this.quickReplyText = '';
         this.readerOpen = true;
+        // 以服务端 flags 为准，把列表里可能过期的星标/已读状态对齐（在别处标过星也能立刻反映）
+        for (const f of ['\\Seen', '\\Flagged']) {
+          const has = (full.flags || []).includes(f);
+          if (m.flags.includes(f) !== has) this.setFlag(m, f, has);
+        }
         if (!m.flags.includes('\\Seen')) {
-          m.flags.push('\\Seen');
+          this.setFlag(m, '\\Seen', true);
           this.api('/api/flags', { method: 'POST', body: { account: m.accountId, folder: m.folder || this.currentFolderOf(m), uid: m.uid, action: 'read' } })
             .then(() => this.loadAllFoldersAndUnread()).catch(() => {});
         }
@@ -341,20 +347,43 @@ const app = createApp({
       if (this.activeAccount === 'all') return this.allFolder ? this.allFolder.split('|')[1] : 'INBOX';
       return this.activeFolder;
     },
+    // 同一封邮件在「列表项」和「阅读区 selected」里是两份对象（flags 还可能共用同一个数组）。
+    // 只改其中一份 ⇒ 列表的星标一直亮着、再点又变回星标。所以统一在这里改，且原地增删。
+    flagTargets(m) {
+      const same = (x) => x && x.uid === m.uid && x.accountId === m.accountId;
+      const list = this.messages.filter(same);
+      if (same(this.selected)) list.push(this.selected);
+      list.push(m);
+      return [...new Set(list)];
+    },
+    setFlag(m, flag, on) {
+      for (const t of this.flagTargets(m)) {
+        if (!Array.isArray(t.flags)) continue;
+        const i = t.flags.indexOf(flag);
+        if (on && i < 0) t.flags.push(flag);
+        else if (!on && i >= 0) t.flags.splice(i, 1);
+      }
+    },
     async markRead(m, read) {
+      this.setFlag(m, '\\Seen', read);
       try {
-        await this.api('/api/flags', { method: 'POST', body: { account: m.accountId, folder: m.folder, uid: m.uid, action: read ? 'read' : 'unread' } });
-        if (read) { if (!m.flags.includes('\\Seen')) m.flags.push('\\Seen'); }
-        else { m.flags = m.flags.filter((f) => f !== '\\Seen'); }
+        await this.api('/api/flags', { method: 'POST', body: { account: m.accountId, folder: m.folder || this.currentFolderOf(m), uid: m.uid, action: read ? 'read' : 'unread' } });
         this.loadAllFoldersAndUnread();
-      } catch (e) { this.toast(e.message, 'error'); }
+      } catch (e) {
+        this.setFlag(m, '\\Seen', !read);
+        this.toast(e.message, 'error');
+      }
     },
     async toggleStar(m) {
       const on = m.flags.includes('\\Flagged');
+      this.setFlag(m, '\\Flagged', !on); // 先动界面，失败再回滚
       try {
-        await this.api('/api/flags', { method: 'POST', body: { account: m.accountId, folder: m.folder, uid: m.uid, action: on ? 'unstar' : 'star' } });
-        if (on) m.flags = m.flags.filter((f) => f !== '\\Flagged'); else m.flags.push('\\Flagged');
-      } catch (e) { this.toast(e.message, 'error'); }
+        await this.api('/api/flags', { method: 'POST', body: { account: m.accountId, folder: m.folder || this.currentFolderOf(m), uid: m.uid, action: on ? 'unstar' : 'star' } });
+        this.loadAllFoldersAndUnread();
+      } catch (e) {
+        this.setFlag(m, '\\Flagged', on);
+        this.toast(e.message, 'error');
+      }
     },
     async remove(m) {
       if (!confirm('把这封邮件移到已删除？')) return;

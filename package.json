@@ -7,7 +7,10 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test:imap": "node tests/imap-list.mjs"
+    "test": "node tests/imap-list.mjs && node tests/oauth-device.mjs && node tests/frontend-flags.mjs",
+    "test:imap": "node tests/imap-list.mjs",
+    "test:oauth": "node tests/oauth-device.mjs",
+    "test:ui": "node tests/frontend-flags.mjs"
   },
   "engines": {
     "node": ">=20"

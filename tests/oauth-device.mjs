@@ -5,6 +5,14 @@ process.env.MAILNEST_DATA = process.env.MAILNEST_DATA || '.oauth-test';
 const { ensureDataDirs, saveSystem, system } = await import('../server/store.js');
 ensureDataDirs();
 
+// 复用 .oauth-test 目录，但每次开跑前把应用 ID 清空：否则上一次跑完存下的 client_id
+// 会让「初始未配置应用 ID」这条断言从第二次运行起永远失败（假的回归）。
+{
+  const s = system();
+  s.settings = { ...(s.settings || {}), outlookClientId: '' };
+  saveSystem(s);
+}
+
 const oauth = await import('../server/oauth.js');
 
 let pass = 0; let fail = 0;

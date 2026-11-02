@@ -252,7 +252,8 @@
             <div class="right">
               <span class="date">{{ shortDate(m.date) }}</span>
               <span class="icons">
-                <svg class="i" :class="{starred:m.flags.includes('\\Flagged')}" style="fill:currentColor" v-if="m.flags.includes('\\Flagged')"><use href="#i-star"/></svg>
+                <button class="star-btn" :class="{on:m.flags.includes('\\Flagged')}" @click.stop="toggleStar(m)"
+                        :title="m.flags.includes('\\Flagged')?'取消星标':'加星标'"><svg class="i"><use href="#i-star"/></svg></button>
                 <svg class="i" v-if="m.hasAttachment"><use href="#i-clip"/></svg>
               </span>
             </div>
