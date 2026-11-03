@@ -181,6 +181,8 @@ const app = createApp({
     },
     // 清空只对真删除的垃圾箱类文件夹开放（服务端同样校验）
     canEmpty() { return ['\\Trash', '\\Junk'].includes(this.curFolderNode?.special); },
+    // 已删除/垃圾/已发送/草稿没有未读语义，「未读」筛选和「全部已读」不该出现（汇总视图 curFolderNode 为 null → 正常显示）
+    showReadTools() { return !['\\Trash', '\\Junk', '\\Sent', '\\Drafts'].includes(this.curFolderNode?.special); },
     listTitle() {
       if (this.activeAccount === 'all') {
         // 汇总视图：没选具体文件夹时是跨账号的「全部收件箱」；点了某账号的某文件夹要如实显示

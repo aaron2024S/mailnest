@@ -488,6 +488,17 @@ function bulkCtx(messages, opts = {}) {
      C.visibleRows.call({ filteredMessages: [1, 2, 3] }).length === 3);
 }
 
+// 15c) 特殊文件夹隐藏「未读/全部已读」：已删除/垃圾/已发送/草稿没有未读语义
+{
+  const mk = (special) => C.showReadTools.call({ curFolderNode: special === null ? null : { special } });
+  ok('已删除隐藏', mk('\\Trash') === false, String(mk('\\Trash')));
+  ok('垃圾邮件隐藏', mk('\\Junk') === false);
+  ok('已发送隐藏', mk('\\Sent') === false);
+  ok('草稿箱隐藏', mk('\\Drafts') === false);
+  ok('汇总视图（无具体文件夹）正常显示', mk(null) === true);
+  ok('INBOX 显示', mk(undefined) === true);
+}
+
 // 16) 单封删除走同一条路径：总数也要减
 {
   const rows = [msg({ uid: 9 }), msg({ uid: 10 })];

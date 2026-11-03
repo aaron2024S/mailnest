@@ -280,8 +280,10 @@
             <h3>{{ listTitle }}</h3>
             <span class="n" v-if="total">{{ total }} 封<template v-if="messages.length<total"> · 已加载 {{ messages.length }}</template></span>
             <span class="sp"></span>
-            <label class="list-act" :class="{on: unreadOnly}" @click="unreadOnly=!unreadOnly" title="只显示未读邮件">未读</label>
-            <button class="list-act" v-if="total" @click="readAllFolder" title="整个文件夹全部标为已读，服务端一次完成">全部已读</button>
+            <template v-if="showReadTools">
+              <label class="list-act" :class="{on: unreadOnly}" @click="unreadOnly=!unreadOnly" title="只显示未读邮件">未读</label>
+              <button class="list-act" v-if="total" @click="readAllFolder" title="整个文件夹全部标为已读，服务端一次完成">全部已读</button>
+            </template>
             <button class="list-act danger" v-if="canEmpty" @click="emptyTrash" title="永久删除此文件夹的全部邮件">清空</button>
           </template>
           <div class="bulk" v-else>
