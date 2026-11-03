@@ -45,6 +45,7 @@ const app = createApp({
       activeAccount: 'all',
       foldersByAccount: {},   // aid -> [folder]
       unreadMap: {},          // `${aid}|${path}` -> count
+      es: null,               // EventSource（实时推送）
       folders: [],
       activeFolder: 'INBOX',
       allFolder: null,        // all 模式下选中的 `aid|path`
@@ -282,6 +283,7 @@ const app = createApp({
     },
     async logout() {
       this.avatarOpen = false;
+      this.disconnectEvents();
       try { await this.api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
       this.view = 'auth'; this.authMode = 'login'; this.authForm = { username: '', password: '', password2: '' };
     },
@@ -297,6 +299,37 @@ const app = createApp({
       this.view = 'app';
       await this.loadAllFoldersAndUnread();
       this.pickAccount('all');
+      this.connectEvents();
+    },
+
+    // ---------- 实时推送（SSE，服务端 IMAP IDLE 驱动） ----------
+    connectEvents() {
+      if (this.es) return;
+      const es = new EventSource('/api/events');
+      this.es = es;
+      es.onmessage = (e) => {
+        let d;
+        try { d = JSON.parse(e.data); } catch { return; }
+        if (d.type !== 'new-mail') return;
+        // 角标直接采用推送的该夹未读数（服务端缓存里算好的）
+        if (typeof d.unseen === 'number') this.unreadMap[`${d.accountId}|${d.folder}`] = d.unseen;
+        const acc = this.accounts.find((a) => a.id === d.accountId);
+        const name = acc?.displayName || d.email || '邮箱';
+        this.toast(`${name} 收到 ${d.count} 封新邮件`, 'ok');
+        // 正开着这个文件夹就静默重载第一页（缓存已由监听器更新，这次拉取是纯本地库查询）
+        const ref = this.curFolderRef;
+        const isCur = ref && ref.account === d.accountId && ref.folder === d.folder;
+        const isSummaryInbox = this.activeAccount === 'all' && !this.allFolder && d.folder === 'INBOX';
+        if (isCur || isSummaryInbox) {
+          this.page = 1;
+          this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+        }
+      };
+      // 断线 EventSource 原生自动重连，无需手动处理
+      es.onerror = () => { /* ignore */ };
+    },
+    disconnectEvents() {
+      if (this.es) { this.es.close(); this.es = null; }
     },
 
     // ---------- 账号 / 文件夹 ----------
@@ -470,7 +503,7 @@ const app = createApp({
       this.loadMore();
     },
 
-    async loadMessages(append = false) {
+    async loadMessages(append = false, sync = false) {
       if (append) this.loadingMore = true; else this.loadingMessages = true;
       try {
         if (this.activeAccount === 'all' && !this.allFolder) {
@@ -478,7 +511,7 @@ const app = createApp({
           // （此前把「本页条数」当总数，outlook 68 封 + QQ 几十封时头上却显示 50）
           const jobs = this.accounts.map(async (a) => {
             try {
-              const d = await this.api(`/api/messages?account=${a.id}&folder=INBOX&page=${this.page}&pageSize=${this.pageSize}`);
+              const d = await this.api(`/api/messages?account=${a.id}&folder=INBOX&page=${this.page}&pageSize=${this.pageSize}${sync ? '&sync=1' : ''}`);
               // folder 必须显式带上：汇总视图里的星标/删除/归档都靠它定位邮件
               return { total: d.total || 0,
                        messages: d.messages.map((m) => ({ ...m, accountId: a.id, folder: 'INBOX', accountEmail: a.email, _color: a.color })) };
@@ -500,7 +533,7 @@ const app = createApp({
           } else {
             aid = this.activeAccount; folder = this.activeFolder;
           }
-          const d = await this.api(`/api/messages?account=${aid}&folder=${encodeURIComponent(folder)}&page=${this.page}&pageSize=${this.pageSize}`);
+          const d = await this.api(`/api/messages?account=${aid}&folder=${encodeURIComponent(folder)}&page=${this.page}&pageSize=${this.pageSize}${sync ? '&sync=1' : ''}`);
           const acc = this.accounts.find((a) => a.id === aid);
           const rows = d.messages.map((m) => ({ ...m, accountId: aid, folder: m.folder || folder, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
           this.messages = append ? this.messages.concat(rows) : rows;
@@ -519,7 +552,8 @@ const app = createApp({
       this.syncing = true;
       try {
         await this.loadAllFoldersAndUnread();
-        await this.loadMessages();
+        // 手动刷新走 sync=1：服务端整夹快照重同步，保证与服务器强一致
+        await this.loadMessages(false, true);
       } finally { this.syncing = false; }
     },
 

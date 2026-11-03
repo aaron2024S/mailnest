@@ -20,6 +20,8 @@ import {
 } from './oauth.js';
 import { createToken, listTokens, revokeToken, TOKEN_LIMIT } from './tokens.js';
 import { mountMcp } from './mcp.js';
+import * as cache from './cache.js';
+import * as idle from './idle.js';
 
 // 版本号唯一来源：package.json（登录页、客户端 ID 等处都从这里取，避免多处手改漏掉）
 const APP_VERSION = (() => {
@@ -93,6 +95,56 @@ app.use('/api', (req, res, next) => {
 const api = express.Router();
 app.use('/api', api);
 
+// ---------- 实时推送（SSE）与 IDLE 监听 ----------
+const sseClients = new Map(); // uid -> Set<res>
+
+function sendToUser(uid, obj) {
+  const set = sseClients.get(uid);
+  if (!set?.size) return;
+  const line = `data: ${JSON.stringify(obj)}\n\n`;
+  for (const res of set) { try { res.write(line); } catch { /* ignore */ } }
+}
+
+// IDLE 事件 → SSE：只转发前端用得上的新邮件事件
+idle.setEventHandler((ev) => {
+  if (ev.type !== 'new-mail') return;
+  const acc = findAccount(ev.uid, ev.accountId);
+  sendToUser(ev.uid, {
+    type: 'new-mail',
+    accountId: ev.accountId,
+    email: acc?.email || '',
+    folder: ev.folder,
+    count: ev.count,
+    unseen: ev.unseen,
+  });
+});
+
+function ensureUserWatchers(uid) {
+  for (const a of listAccounts(uid)) {
+    idle.ensureWatcher(uid, a.id).catch(() => { /* runWatcher 内部兜底 */ });
+  }
+}
+
+api.get('/events', guard, (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write(':connected\n\n');
+  const uid = req.user.id;
+  if (!sseClients.has(uid)) sseClients.set(uid, new Set());
+  sseClients.get(uid).add(res);
+  const hb = setInterval(() => { try { res.write(':hb\n\n'); } catch { /* ignore */ } }, 25_000);
+  req.on('close', () => {
+    clearInterval(hb);
+    const set = sseClients.get(uid);
+    set?.delete(res);
+    if (set && !set.size) sseClients.delete(uid);
+  });
+});
+
 // ---------- 首次启动 / 登录 ----------
 const loginFails = new Map(); // ip+username -> {count, until}
 
@@ -133,6 +185,7 @@ api.post('/setup', async (req, res) => {
     saveSystem();
     audit(user.id, 'setup', `创建管理员 ${user.username}`, clientIp(req));
     setSessionCookie(res, createSession(user.id, { ip: clientIp(req), ua: req.headers['user-agent'] }));
+    ensureUserWatchers(user.id);
     res.json({ user: publicUser(user) });
   } catch (e) { fail(res, e); }
 });
@@ -152,6 +205,7 @@ api.post('/login', (req, res) => {
     loginFails.delete(key);
     setSessionCookie(res, createSession(user.id, { ip: clientIp(req), ua: req.headers['user-agent'] }));
     audit(user.id, 'login', '', clientIp(req));
+    ensureUserWatchers(user.id);
     res.json({ user: publicUser(user) });
   } catch (e) { fail(res, e); }
 });
@@ -266,6 +320,7 @@ api.post('/accounts', guard, async (req, res) => {
     accounts.push(acc);
     saveAccounts(req.user.id, accounts);
     audit(req.user.id, 'account-add', acc.email, clientIp(req));
+    idle.ensureWatcher(req.user.id, acc.id).catch(() => { /* 内部兜底 */ });
     res.json({ accounts: accounts.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
 });
@@ -284,6 +339,9 @@ api.patch('/accounts/:id', guard, async (req, res) => {
     if (req.body?.auth?.pass && acc.auth?.type !== 'oauth2') acc.auth.pass = String(req.body.auth.pass);
     saveAccounts(req.user.id, accounts);
     await dropConnections(req.user.id, acc.id);
+    // 授权码可能变了：重启监听连接，用新凭据重连
+    await idle.stopWatcher(req.user.id, acc.id);
+    idle.ensureWatcher(req.user.id, acc.id).catch(() => { /* 内部兜底 */ });
     res.json({ accounts: accounts.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
 });
@@ -295,6 +353,8 @@ api.delete('/accounts/:id', guard, async (req, res) => {
     if (next.length === accounts.length) return res.status(404).json({ error: '账号不存在' });
     saveAccounts(req.user.id, next);
     await dropConnections(req.user.id, req.params.id);
+    await idle.stopWatcher(req.user.id, req.params.id);
+    cache.dropAccount(req.user.id, req.params.id);
     audit(req.user.id, 'account-remove', req.params.id, clientIp(req));
     res.json({ accounts: next.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
@@ -366,6 +426,7 @@ api.post('/oauth/outlook/poll', guard, async (req, res) => {
     accounts.push(acc);
     saveAccounts(req.user.id, accounts);
     audit(req.user.id, 'account-add', `outlook:${email}`, clientIp(req));
+    idle.ensureWatcher(req.user.id, acc.id).catch(() => { /* 内部兜底 */ });
     res.json({ done: true, email, accounts: accounts.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
 });
@@ -392,16 +453,44 @@ api.post('/folders', guard, async (req, res) => {
 
 api.get('/messages', guard, async (req, res) => {
   try {
-    res.json(await listMessages(req.user.id, String(req.query.account || ''), String(req.query.folder || 'INBOX'), {
-      page: Number(req.query.page) || 1,
-      pageSize: Number(req.query.pageSize) || 50,
-    }));
+    const accountId = String(req.query.account || '');
+    const folder = String(req.query.folder || 'INBOX');
+    const opts = { page: Number(req.query.page) || 1, pageSize: Number(req.query.pageSize) || 50 };
+    // sync=1（手动刷新）：整夹快照重同步后回缓存，保证与服务器强一致
+    if (req.query.sync) {
+      try {
+        await idle.resyncFolder(req.user.id, accountId, folder);
+      } catch { /* 快照失败则退回直拉单页 */ }
+    }
+    const cached = cache.getPage(req.user.id, accountId, folder, opts);
+    if (cached) return res.json(cached);
+    // 该文件夹从未同步过：直拉兜底并把这一页写进缓存
+    const fresh = await listMessages(req.user.id, accountId, folder, opts);
+    if (fresh.uidvalidity) {
+      cache.setUidvalidity(req.user.id, accountId, folder, fresh.uidvalidity);
+      cache.upsertEnvelopes(req.user.id, accountId, folder, fresh.messages, fresh.uidvalidity);
+    }
+    res.json(fresh);
   } catch (e) { fail(res, e); }
 });
 
 api.get('/message', guard, async (req, res) => {
   try {
-    res.json(await getMessage(req.user.id, String(req.query.account || ''), String(req.query.folder || ''), String(req.query.uid || '')));
+    const accountId = String(req.query.account || '');
+    const folder = String(req.query.folder || '');
+    const messageUid = String(req.query.uid || '');
+    // 正文缓存命中直接回（旗标由 IDLE 增量维护）；未命中拉一次并 write-through
+    if (!req.query.sync) {
+      const hit = cache.getBody(req.user.id, accountId, folder, messageUid);
+      if (hit) return res.json({ uid: Number(messageUid), ...hit });
+    }
+    const fresh = await getMessage(req.user.id, accountId, folder, messageUid);
+    cache.putBody(req.user.id, accountId, folder, messageUid, {
+      from: fresh.from, to: fresh.to, cc: fresh.cc, subject: fresh.subject, date: fresh.date,
+      messageId: fresh.messageId, inReplyTo: fresh.inReplyTo, references: fresh.references,
+      text: fresh.text, html: fresh.html, attachments: fresh.attachments,
+    });
+    res.json(fresh);
   } catch (e) { fail(res, e); }
 });
 
@@ -428,6 +517,7 @@ api.post('/flags', guard, async (req, res) => {
     };
     if (!map[action]) return res.status(400).json({ error: '未知操作' });
     const out = await setFlags(req.user.id, String(account), String(folder), uids, map[action]);
+    try { cache.updateFlags(req.user.id, String(account), String(folder), uids, map[action]); } catch { /* 缓存回写失败不影响主流程 */ }
     res.json({ ...out, count: uids.length });
   } catch (e) { fail(res, e); }
 });
@@ -436,7 +526,13 @@ api.post('/move', guard, async (req, res) => {
   try {
     const { account, folder, uids, dest } = req.body || {};
     if (!Array.isArray(uids) || !uids.length) return res.status(400).json({ error: '没有选择邮件' });
-    res.json(await moveMessages(req.user.id, String(account), String(folder), uids, String(dest)));
+    const out = await moveMessages(req.user.id, String(account), String(folder), uids, String(dest));
+    try {
+      cache.moveUids(req.user.id, String(account), String(folder), uids);
+      // 目的夹的 UID 由服务器重新分配，本地推算不了 —— 异步重同步目的夹
+      idle.resyncFolder(req.user.id, String(account), String(dest)).catch(() => { /* 下次访问兜底 */ });
+    } catch { /* 缓存回写失败不影响主流程 */ }
+    res.json(out);
   } catch (e) { fail(res, e); }
 });
 
@@ -444,13 +540,23 @@ api.post('/delete', guard, async (req, res) => {
   try {
     const { account, folder, uids } = req.body || {};
     if (!Array.isArray(uids) || !uids.length) return res.status(400).json({ error: '没有选择邮件' });
-    res.json(await deleteMessages(req.user.id, String(account), String(folder), uids));
+    const out = await deleteMessages(req.user.id, String(account), String(folder), uids);
+    try { cache.removeUids(req.user.id, String(account), String(folder), uids); } catch { /* 缓存回写失败不影响主流程 */ }
+    res.json(out);
   } catch (e) { fail(res, e); }
 });
 
 api.get('/unread', guard, async (req, res) => {
   try {
-    res.json({ counts: await unseenCounts(req.user.id, String(req.query.account || '')) });
+    const accountId = String(req.query.account || '');
+    // 缓存里有这个账号的登记就走 SQLite（零 IMAP 往返）；IDLE 会持续刷新计数
+    const rows = cache.folderCounts(req.user.id).filter((r) => r.account_id === accountId);
+    if (rows.length) {
+      const counts = {};
+      for (const r of rows) counts[r.path] = r.unseen;
+      return res.json({ counts, cached: true });
+    }
+    res.json({ counts: await unseenCounts(req.user.id, accountId) });
   } catch (e) { fail(res, e); }
 });
 
@@ -462,7 +568,9 @@ api.post('/folders/read-all', guard, async (req, res) => {
     const acc = findAccount(req.user.id, String(account));
     if (!acc) return res.status(404).json({ error: '邮箱账号不存在' });
     audit(req.user.id, 'folder-read-all', `${acc.email}/${folder}`, clientIp(req));
-    res.json(await markAllRead(req.user.id, acc.id, String(folder)));
+    const out = await markAllRead(req.user.id, acc.id, String(folder));
+    try { cache.addFlagToAll(req.user.id, acc.id, String(folder), '\\Seen'); } catch { /* 缓存回写失败不影响主流程 */ }
+    res.json(out);
   } catch (e) { fail(res, e); }
 });
 
@@ -478,7 +586,9 @@ api.post('/folders/empty', guard, async (req, res) => {
       return res.status(400).json({ error: '只能清空「已删除」或「垃圾邮件」文件夹' });
     }
     audit(req.user.id, 'folder-empty', `${acc.email}/${folder}`, clientIp(req));
-    res.json(await emptyFolder(req.user.id, acc.id, String(folder)));
+    const out = await emptyFolder(req.user.id, acc.id, String(folder));
+    try { cache.clearFolder(req.user.id, acc.id, String(folder)); } catch { /* 缓存回写失败不影响主流程 */ }
+    res.json(out);
   } catch (e) { fail(res, e); }
 });
 
@@ -489,7 +599,9 @@ api.delete('/folders', guard, async (req, res) => {
     const acc = findAccount(req.user.id, String(account));
     if (!acc) return res.status(404).json({ error: '邮箱账号不存在' });
     audit(req.user.id, 'folder-delete', `${acc.email}/${folder}`, clientIp(req));
-    res.json(await deleteFolder(req.user.id, acc.id, String(folder)));
+    const out = await deleteFolder(req.user.id, acc.id, String(folder));
+    try { cache.dropFolder(req.user.id, acc.id, String(folder)); } catch { /* ignore */ }
+    res.json(out);
   } catch (e) { fail(res, e); }
 });
 

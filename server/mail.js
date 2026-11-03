@@ -150,6 +150,22 @@ async function withMailbox(uid, accountId, folder, fn) {
   });
 }
 
+// 专用监听连接（IDLE 用）：与读写池完全独立，互不挤占。
+// 调用方（idle.js）负责关闭与重连。
+export async function createListenerClient(uid, accountId) {
+  const acc = findAccount(uid, accountId);
+  if (!acc) throw Object.assign(new Error('邮箱账号不存在'), { status: 404 });
+  const token = isOAuth(acc) ? await accessTokenFor(uid, acc) : null;
+  const client = new ImapFlow(clientConfig(acc, token));
+  try {
+    await client.connect();
+  } catch (e) {
+    try { client.close(); } catch { /* ignore */ }
+    throw imapError(e);
+  }
+  return { client, acc };
+}
+
 function imapError(e) {
   // 已经是翻译过的、给用户看的中文错误（例如 OAuth 失效），别再套一层
   if (e?.oauth) return e;
@@ -247,10 +263,11 @@ export async function listMessages(uid, accountId, folder, { page = 1, pageSize 
       // 注意：getMailboxLock 返回的锁对象只有 { path, release }，没有 count；
       // 邮件总数要从 client.mailbox.exists 取（选中的邮箱对象）
       const total = client.mailbox?.exists || 0;
+      const uidvalidity = client.mailbox?.uidValidity != null ? Number(client.mailbox.uidValidity) : null;
       const start = Math.max(1, total - (page - 1) * pageSize - pageSize + 1);
       const end = total - (page - 1) * pageSize;
       const out = [];
-      if (end < 1) return { total, page, pageSize, messages: [] };
+      if (end < 1) return { total, page, pageSize, uidvalidity, messages: [] };
       for await (const msg of client.fetch(`${start}:${end}`, {
         uid: true, flags: true, envelope: true, bodyStructure: true,
         internalDate: true, size: true,
@@ -270,7 +287,7 @@ export async function listMessages(uid, accountId, folder, { page = 1, pageSize 
         });
       }
       out.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-      return { total, page, pageSize, messages: out };
+      return { total, page, pageSize, uidvalidity, messages: out };
     });
   } catch (e) {
     throw imapError(e);
