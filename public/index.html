@@ -226,6 +226,7 @@
                       :class="{'is-active': activeAccount==='all' && allFolder===a.id+'|'+f.path,
                                'drop-target': dropTarget===a.id+'|'+f.path}"
                       @click="pickAllFolder(a.id, f.path)" style="padding-left:18px"
+                      @contextmenu.prevent="openNavCtx($event, a.id, f)"
                       @dragover.prevent="onDragOver(a.id,f.path)" @dragleave="onDragLeave(a.id,f.path)" @drop.prevent="onDrop(a.id,f.path)">
                 <svg class="i"><use href="#i-folder"/></svg>
                 <span class="lbl">{{ folderLabel(f) }}</span>
@@ -248,6 +249,7 @@
           <template v-else>
             <button class="nav-item" v-for="f in folders" :key="f.path" :class="{'is-active': activeFolder===f.path, 'drop-target': dropTarget===activeAccount+'|'+f.path}"
                     @click="pickFolder(f.path)"
+                    @contextmenu.prevent="openNavCtx($event, activeAccount, f)"
                     @dragover.prevent="onDragOver(activeAccount,f.path)" @dragleave="onDragLeave(activeAccount,f.path)" @drop.prevent="onDrop(activeAccount,f.path)">
               <svg class="i"><use href="#i-inbox"/></svg><span class="lbl">{{ folderLabel(f) }}</span>
               <span class="count" v-if="unseenOf(activeAccount,f.path)">{{ unseenOf(activeAccount,f.path) }}</span>
@@ -787,6 +789,20 @@
     </div>
 
     <div class="toast"><div class="t" v-for="t in toasts" :key="t.id" :class="t.type">{{ t.text }}</div></div>
+
+    <!-- 左栏文件夹右键菜单 -->
+    <div class="ctx-menu" v-if="navCtx.open" :style="{left:navCtx.x+'px',top:navCtx.y+'px'}" @click.stop @contextmenu.prevent>
+      <div class="ctx-head">{{ folderLabel(navCtx.node) }}</div>
+      <button class="ctx-item" @click="navAct(navReadAll)">
+        <svg class="i"><use href="#i-mail-open"/></svg><span>全部标为已读</span></button>
+      <button class="ctx-item" v-if="canEmptyNode(navCtx.node)" @click="navAct(navEmpty)">
+        <svg class="i"><use href="#i-trash"/></svg><span>清空文件夹</span></button>
+      <template v-if="canDeleteFolder(navCtx.node)">
+        <div class="ctx-sep"></div>
+        <button class="ctx-item" style="color:var(--err)" @click="navAct(navDeleteFolder)">
+          <svg class="i"><use href="#i-trash"/></svg><span>删除文件夹</span></button>
+      </template>
+    </div>
 
     <!-- 邮件列表右键菜单 -->
     <div class="ctx-menu" v-if="ctx.open" :style="{left:ctx.x+'px',top:ctx.y+'px'}" @click.stop @contextmenu.prevent>

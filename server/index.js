@@ -10,7 +10,7 @@ import {
   findAccount, userDir, saveProfile, readProfile, audit,
 } from './store.js';
 import {
-  listFolders, createFolder, listMessages, getMessage, getAttachment, setFlags,
+  listFolders, createFolder, deleteFolder, listMessages, getMessage, getAttachment, setFlags,
   moveMessages, deleteMessages, markAllRead, emptyFolder, sendMail, testAccount,
   listDrafts, saveDraft, deleteDraft, dropConnections, unseenCounts,
 } from './mail.js';
@@ -479,6 +479,17 @@ api.post('/folders/empty', guard, async (req, res) => {
     }
     audit(req.user.id, 'folder-empty', `${acc.email}/${folder}`, clientIp(req));
     res.json(await emptyFolder(req.user.id, acc.id, String(folder)));
+  } catch (e) { fail(res, e); }
+});
+
+api.delete('/folders', guard, async (req, res) => {
+  try {
+    const { account, folder } = req.body || {};
+    if (!account || !folder) return res.status(400).json({ error: '缺少账号或文件夹' });
+    const acc = findAccount(req.user.id, String(account));
+    if (!acc) return res.status(404).json({ error: '邮箱账号不存在' });
+    audit(req.user.id, 'folder-delete', `${acc.email}/${folder}`, clientIp(req));
+    res.json(await deleteFolder(req.user.id, acc.id, String(folder)));
   } catch (e) { fail(res, e); }
 });
 

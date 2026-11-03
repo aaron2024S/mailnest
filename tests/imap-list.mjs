@@ -19,6 +19,7 @@ function envelope(i) {
 let sawXoauth2 = false;
 const storeLog = [];
 let expungeCount = 0;
+const deleteLog = [];
 
 const server = net.createServer((sock) => {
   sock.setEncoding('utf8');
@@ -62,10 +63,17 @@ const server = net.createServer((sock) => {
         sock.write('* OK [UIDVALIDITY 1] ok\r\n* OK [UIDNEXT 115] ok\r\n');
         sock.write(`${tag2} OK [READ-WRITE] selected\r\n`);
       } else if (C === 'LIST') {
-        sock.write('* LIST (\\HasNoChildren) "/" "INBOX"\r\n');
-        sock.write('* LIST (\\HasNoChildren \\Trash) "/" "Trash"\r\n');
-        sock.write('* LIST (\\HasNoChildren \\Sent) "/" "Sent"\r\n');
-        sock.write(`${tag2} OK done\r\n`);
+        // LIST "" "" 是 imapflow 的命名空间探测：必须按规范回空条目，
+        // 否则最后一个文件夹会被当成命名空间前缀，后续所有路径都被拼上它
+        if (/^""\s+""$/.test(rest.trim())) {
+          sock.write(`* LIST (\\Noselect) "/" ""\r\n${tag2} OK done\r\n`);
+        } else {
+          sock.write('* LIST (\\HasNoChildren) "/" "INBOX"\r\n');
+          sock.write('* LIST (\\HasNoChildren \\Trash) "/" "Trash"\r\n');
+          sock.write('* LIST (\\HasNoChildren \\Sent) "/" "Sent"\r\n');
+          sock.write('* LIST (\\HasNoChildren) "/" "Projects2026"\r\n');
+          sock.write(`${tag2} OK done\r\n`);
+        }
       } else if (C === 'STATUS') {
         sock.write(`* STATUS ${rest.split(/\s+/).slice(0, -1).join(' ')} (UNSEEN 14)\r\n${tag2} OK done\r\n`);
       } else if (C === 'FETCH') {
@@ -108,6 +116,11 @@ const server = net.createServer((sock) => {
       } else if (C === 'EXPUNGE') {
         expungeCount++;
         sock.write(`${tag2} OK expunge done\r\n`);
+      } else if (C === 'DELETE') {
+        deleteLog.push(rest);
+        sock.write(`${tag2} OK delete done\r\n`);
+      } else if (C === 'CREATE' || C === 'RENAME' || C === 'SUBSCRIBE') {
+        sock.write(`${tag2} OK done\r\n`);
       } else if (C === 'LOGOUT') {
         sock.write(`* BYE bye\r\n${tag2} OK done\r\n`);
         sock.end();
@@ -173,7 +186,7 @@ const [folders, unread, page1] = await Promise.all([
   listMessages(user.id, 'a_test', 'INBOX', { page: 1, pageSize: 50 }),
 ]);
 
-check('文件夹列表非空', folders.length === 3, JSON.stringify(folders.map((f) => f.path)));
+check('文件夹列表非空', folders.length === 4, JSON.stringify(folders.map((f) => f.path)));
 check('未读数', unread.INBOX === 14, JSON.stringify(unread));
 check('邮件总数 = 14', page1.total === 14, `total=${page1.total}`);
 check('返回邮件条数 = 14', page1.messages.length === 14, `len=${page1.messages.length}`);
@@ -205,6 +218,15 @@ check('全部已读发出 STORE 1:* +\\Seen', storeLog.some((l) => /^1:\*\s+\+FL
 await emptyFolder(user.id, 'a_test', 'Trash');
 check('清空发出 STORE \\Deleted', storeLog.some((l) => /\\Deleted/.test(l)), JSON.stringify(storeLog));
 check('清空触发 EXPUNGE（真删，不是再进垃圾箱）', expungeCount >= 1, String(expungeCount));
+
+// ---------- 删除文件夹：只放行自建（无 special），INBOX/系统文件夹在进 IMAP 前就拒绝 ----------
+const { deleteFolder: delFolder } = await import('../server/mail.js');
+await delFolder(user.id, 'a_test', 'INBOX').then(() => check('INBOX 拒绝删除', false, '居然成功了')).catch((e) => check('INBOX 拒绝删除', /收件箱不能删除/.test(e.message), e.message));
+await delFolder(user.id, 'a_test', 'Trash').then(() => check('系统文件夹拒绝删除', false, '居然成功了')).catch((e) => check('系统文件夹拒绝删除', /系统文件夹不能删除/.test(e.message), e.message));
+await delFolder(user.id, 'a_test', '不存在/的文件夹').then(() => check('不存在的文件夹报 404 语义', false, '居然成功了')).catch((e) => check('不存在的文件夹报 404 语义', /文件夹不存在/.test(e.message), e.message));
+console.log('DEBUG listFolders:', JSON.stringify(await listFolders(user.id, 'a_test')));
+await delFolder(user.id, 'a_test', 'Projects2026');
+check('自建文件夹发出 DELETE 命令', deleteLog.length === 1 && /Projects2026/.test(deleteLog[0]), JSON.stringify(deleteLog));
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'HAS FAILURES'}  pass=${pass} fail=${fail}`);
 server.close();

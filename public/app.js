@@ -93,6 +93,7 @@ const app = createApp({
       selAnchor: -1,
       // 右键菜单
       ctx: { open: false, x: 0, y: 0, m: null, sub: false },
+      navCtx: { open: false, x: 0, y: 0, account: '', node: null },
       newFolder: { accountId: null, name: '', busy: false },
       // Outlook OAuth：应用 ID 由用户在界面上填一次，存在实例设置里
       outlook: {
@@ -814,6 +815,64 @@ const app = createApp({
       if (m) fn(m);
     },
 
+    // ---------- 左栏文件夹右键菜单 ----------
+    openNavCtx(e, account, node) {
+      const w = 190, h = 120;
+      this.navCtx = {
+        open: true,
+        x: Math.max(8, Math.min(e.clientX, window.innerWidth - w - 8)),
+        y: Math.max(8, Math.min(e.clientY, window.innerHeight - h - 8)),
+        account, node,
+      };
+    },
+    closeNavCtx() { if (this.navCtx.open) this.navCtx = { open: false, x: 0, y: 0, account: '', node: null }; },
+    canDeleteFolder(node) { return node && node.path !== 'INBOX' && !node.special; },
+    canEmptyNode(node) { return node && ['\\Trash', '\\Junk'].includes(node.special); },
+    navAct(fn) {
+      const { account, node } = this.navCtx;
+      this.closeNavCtx();
+      if (node) fn(account, node);
+    },
+    // 右键 → 全部标为已读：整夹在服务端一次完成，本地角标清零
+    async navReadAll(account, node) {
+      try {
+        await this.api('/api/folders/read-all', { method: 'POST', body: { account, folder: node.path } });
+        this.unreadMap[`${account}|${node.path}`] = 0;
+        const key = `${account}|${node.path}`;
+        for (const m of this.messages) {
+          if (`${m.accountId}|${m.folder}` === key && !m.flags.includes('\\Seen')) m.flags.push('\\Seen');
+        }
+        this.toast('已全部标为已读', 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    async navEmpty(account, node) {
+      if (!confirm(`清空「${this.folderLabel(node)}」？其中全部邮件将被永久删除，无法恢复。`)) return;
+      try {
+        await this.api('/api/folders/empty', { method: 'POST', body: { account, folder: node.path } });
+        this.unreadMap[`${account}|${node.path}`] = 0;
+        if (this.curFolderRef && this.curFolderRef.account === account && this.curFolderRef.folder === node.path) {
+          this.page = 1;
+          await this.loadMessages();
+        }
+        this.toast('已清空', 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    // 右键 → 删除文件夹：仅自建文件夹；IMAP DELETE 语义下邮件随文件夹一并消失
+    async navDeleteFolder(account, node) {
+      if (!confirm(`删除文件夹「${this.folderLabel(node)}」？其中的邮件将一并删除，且无法恢复。`)) return;
+      try {
+        await this.api('/api/folders', { method: 'DELETE', body: { account, folder: node.path } });
+        // 正看着这个文件夹 → 回收件箱；否则原地刷新文件夹树
+        if (this.activeAccount === account && this.activeFolder === node.path) {
+          this.pickFolder('INBOX');
+        } else if (this.allFolder === `${account}|${node.path}`) {
+          this.pickAllInbox();
+        }
+        await this.loadAllFoldersAndUnread();
+        this.toast('文件夹已删除', 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+
     // ---------- 写信 ----------
     openCompose(opts = {}) {
       this.compose.open = true;
@@ -1271,9 +1330,9 @@ const app = createApp({
   },
 
   async mounted() {
-    document.addEventListener('click', () => { this.acctOpen = false; this.avatarOpen = false; this.closeCtx(); });
+    document.addEventListener('click', () => { this.acctOpen = false; this.avatarOpen = false; this.closeCtx(); this.closeNavCtx(); });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { this.closeCtx(); }
+      if (e.key === 'Escape') { this.closeCtx(); this.closeNavCtx(); }
       // 列表页 Delete 键删除选中（输入框里不抢）
       const t = e.target || {};
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable;

@@ -210,6 +210,23 @@ export async function createFolder(uid, accountId, path) {
   }
 }
 
+// 删除文件夹：只允许用户自建的（无 special 标记且非 INBOX）。
+// IMAP DELETE 语义：文件夹连同其中的邮件一并消失（多数服务器不转移），必须由前端 confirm 兜底
+export async function deleteFolder(uid, accountId, path) {
+  if (path === 'INBOX') throw Object.assign(new Error('收件箱不能删除'), { status: 400 });
+  const node = (await listFolders(uid, accountId)).find((f) => f.path === path);
+  if (!node) throw Object.assign(new Error('文件夹不存在'), { status: 404 });
+  if (node.special) throw Object.assign(new Error('系统文件夹不能删除'), { status: 400 });
+  try {
+    return await withClient(uid, accountId, async ({ client }) => {
+      await client.mailboxDelete(path);
+      return { ok: true, path };
+    });
+  } catch (e) {
+    throw imapError(e);
+  }
+}
+
 // ---------- 邮件列表 ----------
 const PAGE_MAX = 100;
 
