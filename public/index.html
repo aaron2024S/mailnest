@@ -333,8 +333,15 @@
             </div>
           </div>
           <div class="empty" v-if="!loadingMessages && !filteredMessages.length">
-            <svg class="i"><use href="#i-inbox"/></svg>
-            <div>{{ searchQ || unreadOnly ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
+            <template v-if="loadErrors.length">
+              <svg class="i"><use href="#i-inbox"/></svg>
+              <div>{{ loadErrors.join('、') }} 暂时没连上，其余邮箱已显示</div>
+              <button class="btn-ghost" style="margin-top:10px" @click="retryLoad">重试</button>
+            </template>
+            <template v-else>
+              <svg class="i"><use href="#i-inbox"/></svg>
+              <div>{{ searchQ || unreadOnly ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
+            </template>
           </div>
           <div class="empty" v-if="loadingMessages && !filteredMessages.length"><span class="spin"></span> 正在从服务器读取…</div>
           <div class="load-more" v-if="messages.length < total">

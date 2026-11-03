@@ -187,6 +187,29 @@ test('搜索：未同步的文件夹不会误报命中', () => {
   assert.equal(cache.hasAccountData(uid, 'a_no_such'), false);
 });
 
+test('文件夹清单缓存：put/get/覆盖与账号隔离', () => {
+  // 未写入前没有缓存（触发首次真 LIST）
+  assert.equal(cache.getFolders(uid, acc), null);
+  const list1 = [
+    { path: 'INBOX', name: 'INBOX', delim: '/', special: '\\Inbox', subscribed: true },
+    { path: 'Trash', name: 'Trash', delim: '/', special: '\\Trash', subscribed: true },
+  ];
+  cache.putFolders(uid, acc, list1);
+  assert.deepEqual(cache.getFolders(uid, acc), list1);
+  // 覆盖更新（后台刷新拿到新清单）
+  const list2 = [...list1, { path: 'Archive', name: 'Archive', delim: '/', special: '\\Archive', subscribed: false }];
+  cache.putFolders(uid, acc, list2);
+  assert.equal(cache.getFolders(uid, acc).length, 3);
+  // 账号隔离
+  assert.equal(cache.getFolders(uid, 'a_other_acc'), null);
+  cache.putFolders(uid, 'a_other_acc', list1);
+  assert.equal(cache.getFolders(uid, 'a_other_acc').length, 2);
+  assert.equal(cache.getFolders(uid, acc).length, 3);
+  // 畸形 JSON 不炸、返回 null
+  cache.putFolders(uid, 'a_bad', undefined);
+  assert.deepEqual(cache.getFolders(uid, 'a_bad'), []);
+});
+
 after(() => {
   cache.closeDb(uid);
   cache.closeDb('u_other');

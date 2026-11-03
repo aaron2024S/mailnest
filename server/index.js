@@ -458,7 +458,19 @@ api.post('/oauth/outlook/poll', guard, async (req, res) => {
 // ---------- 收信 ----------
 api.get('/folders', guard, async (req, res) => {
   try {
-    res.json({ folders: await listFolders(req.user.id, String(req.query.account || '')) });
+    const accountId = String(req.query.account || '');
+    // 命中缓存先回（左栏永远即时渲染），真 LIST 在后台刷新给下一次用——
+    // outlook 冷连接慢，同步等 LIST 一超时左栏整个账号就空了
+    const cached = cache.getFolders(req.user.id, accountId);
+    if (cached) {
+      listFolders(req.user.id, accountId)
+        .then((fresh) => cache.putFolders(req.user.id, accountId, fresh))
+        .catch(() => { /* IMAP 暂时连不上就继续用上次的清单 */ });
+      return res.json({ folders: cached, cached: true });
+    }
+    const folders = await listFolders(req.user.id, accountId);
+    cache.putFolders(req.user.id, accountId, folders);
+    res.json({ folders });
   } catch (e) { fail(res, e); }
 });
 
@@ -471,7 +483,9 @@ api.post('/folders', guard, async (req, res) => {
     if (/[\u0000-\u001f]/.test(raw)) return res.status(400).json({ error: '文件夹名称含非法字符' });
     if (/^\/|\/$/.test(raw) || raw.includes('//')) return res.status(400).json({ error: '文件夹名称不能以分隔符开头或结尾' });
     const created = await createFolder(req.user.id, account, raw);
-    res.json({ ...created, folders: await listFolders(req.user.id, account) });
+    const folders = await listFolders(req.user.id, account);
+    cache.putFolders(req.user.id, account, folders);
+    res.json({ ...created, folders });
   } catch (e) { fail(res, e); }
 });
 
@@ -630,6 +644,7 @@ api.delete('/folders', guard, async (req, res) => {
     audit(req.user.id, 'folder-delete', `${acc.email}/${folder}`, clientIp(req));
     const out = await deleteFolder(req.user.id, acc.id, String(folder));
     try { cache.dropFolder(req.user.id, acc.id, String(folder)); } catch { /* ignore */ }
+    try { cache.putFolders(req.user.id, acc.id, await listFolders(req.user.id, acc.id)); } catch { /* 清单刷新失败下次访问再试 */ }
     res.json(out);
   } catch (e) { fail(res, e); }
 });

@@ -45,6 +45,7 @@ const app = createApp({
       activeAccount: 'all',
       foldersByAccount: {},   // aid -> [folder]
       unreadMap: {},          // `${aid}|${path}` -> count
+      loadErrors: [],         // 本次列表加载失败的账号名；非空时空态区显示重试按钮
       indexing: null,         // {done,total} 首次全量建索引进度（SSE 推送）
       es: null,               // EventSource（实时推送）
       folders: [],
@@ -524,27 +525,54 @@ const app = createApp({
 
     async loadMessages(append = false, sync = false) {
       if (append) this.loadingMore = true; else this.loadingMessages = true;
+      // 代际号：快速切换文件夹/账号时，慢的旧响应不允许覆盖新请求的结果
+      const gen = (this._loadGen = (this._loadGen || 0) + 1);
+      if (!append) this.loadErrors = [];
+      let progressive = false; // 汇总视图自行管理 loading 收尾（分账号到达），跳过统一 finally
       try {
         if (this.activeAccount === 'all' && !this.allFolder) {
-          // 汇总视图：各账号 INBOX 各取当前页，按时间归并；总数 = 各账号真实总数之和
-          // （此前把「本页条数」当总数，outlook 68 封 + QQ 几十封时头上却显示 50）
-          const jobs = this.accounts.map(async (a) => {
-            try {
-              const d = await this.api(`/api/messages?account=${a.id}&folder=INBOX&page=${this.page}&pageSize=${this.pageSize}${sync ? '&sync=1' : ''}`);
-              // folder 必须显式带上：汇总视图里的星标/删除/归档都靠它定位邮件
-              return { total: d.total || 0,
-                       messages: d.messages.map((m) => ({ ...m, accountId: a.id, folder: 'INBOX', accountEmail: a.email, _color: a.color })) };
-            } catch (e) {
-              this.toast(`${a.displayName}：${e.message}`, 'error');
-              return { total: 0, messages: [] };
+          progressive = true;
+          // 汇总视图：各账号 INBOX 并行拉取，**谁先回来先渲染谁**——
+          // outlook 冷连接十几秒，Promise.all 会把 QQ/163 已就绪的邮件一起拖住；
+          // 单账号失败只记名字（列表头下方给重试按钮），不再假装「文件夹是空的」
+          const parts = new Map(); // aid -> {total, messages}
+          const failed = [];
+          let settled = 0;
+          const apply = () => {
+            if (gen !== this._loadGen) return; // 已被新请求取代
+            const merged = [...parts.values()].flatMap((p) => p.messages)
+              .sort((x, y) => new Date(y.date || 0) - new Date(x.date || 0));
+            this.total = [...parts.values()].reduce((sum, p) => sum + p.total, 0);
+            // 追加时不截断：跨账号归并翻页本来就有交错误差，再截断会把行永远弄丢
+            this.messages = append ? this.messages.concat(merged) : merged;
+            this.loadErrors = failed.slice();
+            this.prefetchBodies(); // 有自己的代际守卫，重复调用安全
+            // 有账号失败时自动补试一次（网络抖动多半几秒内自愈）；成功后复位
+            if (failed.length && !this._loadRetried) {
+              this._loadRetried = true;
+              setTimeout(() => {
+                if (this.view === 'app' && this.loadErrors.length && gen === this._loadGen) this.loadMessages(false, sync);
+              }, 4000);
+            } else if (!failed.length) {
+              this._loadRetried = false;
             }
-          });
-          const parts = await Promise.all(jobs);
-          this.total = parts.reduce((sum, p) => sum + p.total, 0);
-          const merged = parts.flatMap((p) => p.messages)
-            .sort((x, y) => new Date(y.date || 0) - new Date(x.date || 0));
-          // 追加时不截断：跨账号归并翻页本来就有交错误差，再截断会把行永远弄丢
-          this.messages = append ? this.messages.concat(merged) : merged;
+          };
+          for (const a of this.accounts) {
+            this.api(`/api/messages?account=${a.id}&folder=INBOX&page=${this.page}&pageSize=${this.pageSize}${sync ? '&sync=1' : ''}`)
+              .then((d) => {
+                // folder 必须显式带上：汇总视图里的星标/删除/归档都靠它定位邮件
+                parts.set(a.id, { total: d.total || 0,
+                  messages: (d.messages || []).map((m) => ({ ...m, accountId: a.id, folder: 'INBOX', accountEmail: a.email, _color: a.color })) });
+              })
+              .catch((e) => { failed.push(a.displayName || a.email); this.toast(`${a.displayName}：${e.message}`, 'error'); })
+              .finally(() => {
+                settled++;
+                if (gen !== this._loadGen) return;
+                apply();
+                if (settled === this.accounts.length) this.loadingMessages = false;
+              });
+          }
+          return; // loadingMessages 由最后一个 finally 收掉
         } else {
           let aid, folder;
           if (this.activeAccount === 'all') {
@@ -553,19 +581,27 @@ const app = createApp({
             aid = this.activeAccount; folder = this.activeFolder;
           }
           const d = await this.api(`/api/messages?account=${aid}&folder=${encodeURIComponent(folder)}&page=${this.page}&pageSize=${this.pageSize}${sync ? '&sync=1' : ''}`);
+          if (gen !== this._loadGen) return;
           const acc = this.accounts.find((a) => a.id === aid);
           const rows = d.messages.map((m) => ({ ...m, accountId: aid, folder: m.folder || folder, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
           this.messages = append ? this.messages.concat(rows) : rows;
           this.total = d.total;
         }
-        if (!append) this.prefetchBodies(); // 后台预取正文：切邮件时秒开（尤其 outlook）
+        if (!append && !progressive) this.prefetchBodies(); // 后台预取正文：切邮件时秒开（尤其 outlook）
       } catch (e) {
         if (append) this.page--; // 追加失败回退页码，下次滚动还能重试
         if (!e.handled) this.toast(e.message, 'error');
       } finally {
-        this.loadingMessages = false;
+        if (!progressive) this.loadingMessages = false; // 汇总视图在分账号 finally 里收
         this.loadingMore = false;
       }
+    },
+
+    // 列表加载失败后的手动重试（自动补试也会走这里）
+    retryLoad() {
+      this.loadErrors = [];
+      this.page = 1;
+      this.loadMessages();
     },
     // 后台预取当前列表前 15 封的正文（write-through 进缓存）：
     // 第一次点开会慢（一个 IMAP 来回），预取过后切换邮件就是纯本地速度。

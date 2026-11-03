@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS messages (
   PRIMARY KEY (account_id, folder, uid)
 );
 CREATE INDEX IF NOT EXISTS idx_msg_uid ON messages (account_id, folder, uid DESC);
+CREATE TABLE IF NOT EXISTS folder_lists (
+  account_id TEXT PRIMARY KEY,
+  folders    TEXT NOT NULL, -- JSON：[{path,name,delim,special,subscribed}]
+  synced_at  INTEGER
+);
 `;
 
 export function getDb(uid) {
@@ -184,6 +189,22 @@ export function folderCounts(uid) {
   return getDb(uid).prepare('SELECT account_id, path, total, unseen FROM folders').all();
 }
 
+// ---------- 文件夹清单缓存 ----------
+// 左栏的文件夹列表以前每次都现场 IMAP LIST——outlook 冷连接慢（国内经常 10s+），
+// 一超时左栏这个账号就是空的。现在落库：命中直接回，后台静默刷新，失败也不影响显示。
+export function getFolders(uid, accountId) {
+  const row = getDb(uid).prepare('SELECT folders FROM folder_lists WHERE account_id = ?').get(accountId);
+  if (!row) return null;
+  try { return JSON.parse(row.folders); } catch { return null; }
+}
+
+export function putFolders(uid, accountId, folders) {
+  getDb(uid).prepare(`
+    INSERT INTO folder_lists (account_id, folders, synced_at) VALUES (?, ?, ?)
+    ON CONFLICT(account_id) DO UPDATE SET folders = excluded.folders, synced_at = excluded.synced_at
+  `).run(accountId, JSON.stringify(folders || []), Date.now());
+}
+
 // ---------- 搜索（Agent 用） ----------
 // 只在本地缓存里找：信封（主题/发件人/收件人）+ 已缓存过的正文。
 // 缓存空的时候调用方应先同步，这里只负责检索，不做网络动作。
@@ -329,4 +350,5 @@ export function dropAccount(uid, accountId) {
   const db = getDb(uid);
   db.prepare('DELETE FROM messages WHERE account_id = ?').run(accountId);
   db.prepare('DELETE FROM folders WHERE account_id = ?').run(accountId);
+  db.prepare('DELETE FROM folder_lists WHERE account_id = ?').run(accountId);
 }
