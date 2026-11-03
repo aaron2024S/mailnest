@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS folders (
   total       INTEGER NOT NULL DEFAULT 0,
   unseen      INTEGER NOT NULL DEFAULT 0,
   synced_at   INTEGER,
+  -- 1 = 这个夹的信封是完整索引（整夹快照跑完过）。
+  -- 只有完整索引才允许做 UIDNEXT 增量：局部索引（直拉兜底只存了 50 封）中间有大段空洞，
+  -- 光拉「最大 UID 之后」永远补不回来。
+  full_index  INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account_id, path)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -57,6 +61,11 @@ function migrate(db) {
   if (!cols.includes('body_tries')) {
     db.exec('ALTER TABLE messages ADD COLUMN body_tries INTEGER NOT NULL DEFAULT 0');
   }
+  const fcols = db.prepare('PRAGMA table_info(folders)').all().map((c) => c.name);
+  if (!fcols.includes('full_index')) {
+    // 老库里的夹都是跑的整夹快照（没有其他写入路径），一律按完整索引对待
+    db.exec('ALTER TABLE folders ADD COLUMN full_index INTEGER NOT NULL DEFAULT 1');
+  }
 }
 
 export function getDb(uid) {
@@ -95,6 +104,56 @@ export function getUidvalidity(uid, accountId, folderPath) {
   const row = getDb(uid).prepare('SELECT uidvalidity FROM folders WHERE account_id = ? AND path = ?')
     .get(accountId, folderPath);
   return row?.uidvalidity ?? null;
+}
+
+// 增量同步的判定依据：本地这个夹到底完整不完整、同步到哪个 UID 了
+export function getFolderSync(uid, accountId, folderPath) {
+  const row = getDb(uid).prepare(`
+    SELECT uidvalidity, total, full_index, synced_at FROM folders WHERE account_id = ? AND path = ?
+  `).get(accountId, folderPath);
+  if (!row) return null;
+  const maxUid = getDb(uid).prepare(
+    'SELECT MAX(uid) AS m FROM messages WHERE account_id = ? AND folder = ?'
+  ).get(accountId, folderPath)?.m || 0;
+  return { uidvalidity: row.uidvalidity, total: row.total, fullIndex: !!row.full_index, maxUid, syncedAt: row.synced_at };
+}
+
+export function markFullIndex(uid, accountId, folderPath, on = true) {
+  getDb(uid).prepare(`
+    INSERT INTO folders (account_id, path, full_index) VALUES (?, ?, ?)
+    ON CONFLICT(account_id, path) DO UPDATE SET full_index = excluded.full_index
+  `).run(accountId, folderPath, on ? 1 : 0);
+}
+
+// 校验过但没有任何变化：只刷新时间戳（下次判断仍按内容比，不靠时间）
+export function touchFolder(uid, accountId, folderPath) {
+  getDb(uid).prepare('UPDATE folders SET synced_at = ? WHERE account_id = ? AND path = ?')
+    .run(Date.now(), accountId, folderPath);
+}
+
+// 整夹重建期间把 synced_at 清掉：别让列表以为「这个夹真的空了」而返回空页，
+// 让调用方回退直拉，用户看到的始终是服务器上的真实状态
+export function markFolderStale(uid, accountId, folderPath) {
+  getDb(uid).prepare('UPDATE folders SET synced_at = NULL WHERE account_id = ? AND path = ?')
+    .run(accountId, folderPath);
+}
+
+export function folderTotal(uid, accountId, folderPath) {
+  return getDb(uid).prepare(
+    'SELECT COUNT(*) AS n FROM messages WHERE account_id = ? AND folder = ?'
+  ).get(accountId, folderPath).n;
+}
+
+// 全量校准的最后一步：服务器上已经没有的 uid，本地必须跟着删。
+// 之前这里只做 upsert，导致「在手机/网页上删掉的邮件」在本地永远是幽灵行 ——
+// 只有 uidvalidity 变化（几乎不会）才会重建。
+export function pruneFolder(uid, accountId, folderPath, keepUids) {
+  const keep = new Set(keepUids.map(Number));
+  const rows = getDb(uid).prepare('SELECT uid FROM messages WHERE account_id = ? AND folder = ?')
+    .all(accountId, folderPath);
+  const gone = rows.map((r) => r.uid).filter((u) => !keep.has(u));
+  if (gone.length) removeUids(uid, accountId, folderPath, gone);
+  return gone.length;
 }
 
 // ---------- 整夹同步 ----------

@@ -215,3 +215,171 @@ after(() => {
   cache.closeDb('u_other');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+// ---------- 增量同步决策（decideSync）+ 全量校准的删除对齐 ----------
+const { decideSync } = await import('../server/idle.js');
+const ACC2 = 'a_sync';
+
+function seedFolder() {
+  cache.syncFolderFull(uid, ACC2, 'Archive', 777, [
+    mkMsg(10, 'a', '2026-11-01T00:00:00.000Z'),
+    mkMsg(11, 'b', '2026-11-02T00:00:00.000Z'),
+  ]);
+  cache.markFullIndex(uid, ACC2, 'Archive', true);
+  return cache.getFolderSync(uid, ACC2, 'Archive');
+}
+
+test('增量决策：完全一致时一封都不拉', () => {
+  const meta = seedFolder();
+  assert.equal(meta.total, 2);
+  assert.equal(meta.maxUid, 11);
+  const plan = decideSync(meta, { messages: 2, uidNext: 12, uidValidity: 777 });
+  assert.equal(plan.mode, 'skip');
+});
+
+test('增量决策：只有新邮件时只拉最大 UID 之后', () => {
+  const meta = seedFolder();
+  const plan = decideSync(meta, { messages: 4, uidNext: 14, uidValidity: 777 });
+  assert.equal(plan.mode, 'incremental');
+  assert.equal(plan.range, '12:*');
+  assert.equal(plan.minUid, 11);
+});
+
+test('增量决策：纯删除（服务器比本地少）直接全量', () => {
+  const meta = seedFolder();
+  assert.equal(decideSync(meta, { messages: 1, uidNext: 12, uidValidity: 777 }).mode, 'full');
+  // 总数没变但最大 UID 前进了 = 删一封又进一封，也判不出来，全量最稳
+  assert.equal(decideSync(meta, { messages: 2, uidNext: 13, uidValidity: 777 }).mode, 'full');
+});
+
+test('增量决策：新增与删除同时发生 —— 先增量，拉完数量对不上再全量', () => {
+  const meta = seedFolder();
+  // 新到 2 封（12、13）、又删了 1 封旧信：总数 3，本地 2，serverMax 13
+  // 决策层无法只凭数字知道「删了哪封」，所以先增量拉 12:*，再由调用方的
+  // 「拉完 total === status.messages 才算数」兜底 —— total 会变 4，于是转全量
+  assert.equal(decideSync(meta, { messages: 3, uidNext: 14, uidValidity: 777 }).mode, 'incremental');
+});
+
+test('增量决策：UIDVALIDITY 变了 / 索引不完整 / 拿不到状态 → 全量', () => {
+  const meta = seedFolder();
+  assert.equal(decideSync(meta, { messages: 2, uidNext: 12, uidValidity: 888 }).mode, 'full');
+  assert.equal(decideSync({ ...meta, fullIndex: false }, { messages: 2, uidNext: 12, uidValidity: 777 }).mode, 'full');
+  assert.equal(decideSync(meta, null).mode, 'full');
+  assert.equal(decideSync(null, { messages: 2, uidNext: 12, uidValidity: 777 }).mode, 'full');
+});
+
+test('增量决策：uidNext 缺失时不敢跳（保守走全量）', () => {
+  const meta = seedFolder();
+  // 没有 uidNext 就无法判断有没有新增，宁可多拉
+  assert.equal(decideSync(meta, { messages: 2, uidValidity: 777 }).mode, 'skip');
+  assert.equal(decideSync(meta, { messages: 3, uidValidity: 777 }).mode, 'full');
+});
+
+test('全量校准：服务器已不存在的 uid 会被删掉（跨客户端删除不留幽灵）', () => {
+  const meta = seedFolder();
+  assert.equal(meta.total, 2);
+  // 模拟手机上删掉 uid 10，服务器只剩 11
+  const pruned = cache.pruneFolder(uid, ACC2, 'Archive', [11]);
+  assert.equal(pruned, 1);
+  assert.equal(cache.folderTotal(uid, ACC2, 'Archive'), 1);
+  assert.equal(cache.getPage(uid, ACC2, 'Archive', { page: 1, pageSize: 10 }).messages[0].uid, 11);
+  // 全文索引也跟着删（不能只删 messages 留索引）
+  assert.ok(!cache.searchMessages(uid, ACC2, 'a').some((m) => m.uid === 10));
+});
+
+test('全量校准：prune 不会误删仍在服务器上的邮件', () => {
+  cache.upsertEnvelopes(uid, ACC2, 'Archive', [mkMsg(12, 'c', '2026-11-03T00:00:00.000Z')], 777);
+  assert.equal(cache.folderTotal(uid, ACC2, 'Archive'), 2);
+  assert.equal(cache.pruneFolder(uid, ACC2, 'Archive', [11, 12]), 0);
+  assert.equal(cache.folderTotal(uid, ACC2, 'Archive'), 2);
+});
+
+test('全量校准：markFullIndex / markFolderStale 的语义', () => {
+  cache.markFullIndex(uid, ACC2, 'Archive', false);
+  assert.equal(cache.getFolderSync(uid, ACC2, 'Archive').fullIndex, false);
+  cache.markFullIndex(uid, ACC2, 'Archive', true);
+  assert.equal(cache.getFolderSync(uid, ACC2, 'Archive').fullIndex, true);
+  // stale：列表应回退直拉（getPage 返回 null），而不是把空当成真的空
+  cache.markFolderStale(uid, ACC2, 'Archive');
+  assert.equal(cache.getPage(uid, ACC2, 'Archive', { page: 1, pageSize: 10 }), null);
+  assert.equal(cache.getFolderSync(uid, ACC2, 'Archive').fullIndex, true);
+});
+
+// ---------- 同步流程端到端（假 IMAP 客户端，验「真的少发了命令」）----------
+const { syncFolderSnapshot } = await import('../server/idle.js');
+const ACC3 = 'a_flow';
+
+// 假 imapflow client：只需 getMailboxLock / status / fetch 三个接口
+function fakeClient(state) {
+  const calls = [];
+  const msg = (uid) => ({
+    uid,
+    envelope: {
+      from: [{ name: `发件人${uid}`, address: `u${uid}@example.com` }],
+      to: [{ name: '', address: 'me@example.com' }],
+      subject: `主题 ${uid}`,
+    },
+    internalDate: new Date(Date.UTC(2026, 10, 1, 0, uid)),
+    flags: new Set(['\\Seen']),
+    size: 1000 + uid,
+    bodyStructure: null,
+  });
+  return {
+    calls,
+    mailbox: { uidValidity: state.uidValidity },
+    async getMailboxLock() { return { release() { /* noop */ } }; },
+    async status() {
+      return { messages: state.messages, uidNext: state.uidNext, uidValidity: state.uidValidity };
+    },
+    async *fetch(range) {
+      calls.push(range);
+      const from = range === '1:*' ? 1 : Number(String(range).split(':')[0]);
+      for (let uid = from; uid <= state.maxUid; uid++) {
+        if (state.uidSet.includes(uid)) yield msg(uid);
+      }
+    },
+  };
+}
+
+test('同步流程：首次全量，第二次零 fetch，新增只拉增量，删除触发校准', async () => {
+  const state = { uidValidity: 4242, messages: 3, maxUid: 3, uidNext: 4, uidSet: [1, 2, 3] };
+  let client = fakeClient(state);
+
+  // ① 首次：没有缓存 → 全量
+  let r = await syncFolderSnapshot(uid, ACC3, client, 'INBOX');
+  assert.equal(r.mode, 'full');
+  assert.deepEqual(client.calls, ['1:*']);
+  assert.equal(cache.folderTotal(uid, ACC3, 'INBOX'), 3);
+
+  // ② 什么都没变：一条 fetch 都不发（这是这次改动的核心收益）
+  client = fakeClient(state);
+  r = await syncFolderSnapshot(uid, ACC3, client, 'INBOX');
+  assert.equal(r.mode, 'skip');
+  assert.deepEqual(client.calls, []);
+
+  // ③ 来了 2 封新邮件：只拉 (maxUid+1):*
+  state.messages = 5; state.maxUid = 5; state.uidNext = 6; state.uidSet = [1, 2, 3, 4, 5];
+  client = fakeClient(state);
+  r = await syncFolderSnapshot(uid, ACC3, client, 'INBOX');
+  assert.equal(r.mode, 'incremental');
+  assert.deepEqual(client.calls, ['4:*']);
+  assert.equal(cache.folderTotal(uid, ACC3, 'INBOX'), 5);
+
+  // ④ 在手机上删掉 1 封（服务器 4 封）：全量校准 + prune，本地不能留幽灵
+  state.messages = 4; state.uidSet = [2, 3, 4, 5];
+  client = fakeClient(state);
+  r = await syncFolderSnapshot(uid, ACC3, client, 'INBOX');
+  assert.equal(r.mode, 'full');
+  assert.deepEqual(client.calls, ['1:*']);
+  assert.equal(cache.folderTotal(uid, ACC3, 'INBOX'), 4);
+  const uids = cache.getPage(uid, ACC3, 'INBOX', { page: 1, pageSize: 10 }).messages.map((m) => m.uid).sort();
+  assert.deepEqual(uids, [2, 3, 4, 5]);
+
+  // ⑤ UIDVALIDITY 变了：整夹重建，不能拼出「旧 uid + 新 uid」的混合体
+  state.uidValidity = 9999; state.messages = 1; state.maxUid = 7; state.uidNext = 8; state.uidSet = [7];
+  client = fakeClient(state);
+  r = await syncFolderSnapshot(uid, ACC3, client, 'INBOX');
+  assert.equal(r.mode, 'full');
+  assert.equal(cache.folderTotal(uid, ACC3, 'INBOX'), 1);
+  assert.equal(cache.getFolderSync(uid, ACC3, 'INBOX').uidvalidity, 9999);
+});

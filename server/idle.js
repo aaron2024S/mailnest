@@ -223,35 +223,98 @@ function hasAttachment(node) {
   return (node.childNodes || []).some(hasAttachment);
 }
 
-// 整夹快照：status 拿 uidvalidity → fetch 全部信封 → 全量替换缓存。
+// 整夹快照：status 拿 uidvalidity/uidNext/messages → 决定「跳过 / 只拉新增 / 全量校准」。
 // 每 500 封 flush 一次：大夹子（outlook 归档几万封）同步到一半就有部分索引可用，内存也不积压
 const SNAPSHOT_BATCH = 500;
 
-async function syncFolderSnapshot(uid, accountId, client, folderPath) {
+// 同步策略：本地完整索引 + UIDVALIDITY 未变时，用 UIDNEXT/MESSAGES 判断能不能少干活。
+// 纯函数，便于把「跳过 / 增量 / 全量」的边界单独测掉（这是最容易出错的一段）。
+export function decideSync(meta, st) {
+  if (!meta || !st) return { mode: 'full' };
+  if (!meta.fullIndex) return { mode: 'full' }; // 局部索引中间有洞，只能全量补
+  const uv = st.uidValidity != null ? Number(st.uidValidity) : null;
+  if (meta.uidvalidity == null || uv == null || Number(meta.uidvalidity) !== uv) return { mode: 'full' };
+  const serverMax = (st.uidNext || 0) - 1;
+  if (st.messages === meta.total && serverMax <= meta.maxUid) return { mode: 'skip' };
+  if (st.messages > meta.total && serverMax > meta.maxUid) {
+    return { mode: 'incremental', range: `${meta.maxUid + 1}:*`, minUid: meta.maxUid };
+  }
+  // 数量对不上（有删除/移动，或新增与删除同时发生）→ 全量校准，顺带 prune
+  return { mode: 'full' };
+}
+
+export async function syncFolderSnapshot(uid, accountId, client, folderPath, { force = false } = {}) {
   const lock = await client.getMailboxLock(folderPath);
   try {
-    const uidvalidity = client.mailbox?.uidValidity != null ? Number(client.mailbox.uidValidity) : null;
-    const replaceAll = cache.getUidvalidity(uid, accountId, folderPath) !== uidvalidity;
-    let flushed = false;
-    let batch = [];
-    const flush = (rows) => {
-      // uidvalidity 变了（或首次）→ 整夹重建；之后的部分批次直接追加
-      if (replaceAll && !flushed) {
-        cache.syncFolderFull(uid, accountId, folderPath, uidvalidity, rows);
-        flushed = true;
-      } else if (rows.length) {
-        cache.upsertEnvelopes(uid, accountId, folderPath, rows, uidvalidity);
-      }
-    };
-    for await (const msg of client.fetch('1:*', fetchQuery)) {
-      batch.push(toEnvelope(msg));
-      if (batch.length >= SNAPSHOT_BATCH) { flush(batch); batch = []; }
+    // SELECT 已经带回 uidValidity/uidNext，但 IDLE 期间服务器推的 EXISTS 不一定同步 uidNext，
+    // 所以显式 STATUS 一次 —— 一条命令换掉后面几万条 envelope 的重传，很划算
+    let st = null;
+    if (!force) {
+      try {
+        st = await client.status(folderPath, { messages: true, uidNext: true, uidValidity: true });
+      } catch { /* 少数服务器对已选中的夹 STATUS 报错，退回全量 */ }
     }
-    flush(batch);
-    if (!flushed) flush([]); // 空夹也要落一行 folders 记录，标记「已同步过」
+    const plan = decideSync(cache.getFolderSync(uid, accountId, folderPath), st);
+    const uidvalidity = st?.uidValidity != null ? Number(st.uidValidity) : null;
+
+    if (plan.mode === 'skip') {
+      cache.touchFolder(uid, accountId, folderPath);
+      return { mode: 'skip', fetched: 0 };
+    }
+    if (plan.mode === 'incremental') {
+      const { count } = await fetchIntoCache(uid, accountId, client, folderPath, {
+        range: plan.range, uidvalidity, minUid: plan.minUid,
+      });
+      // 拉完数量仍对不上 ⇒ 这期间还有删除/移动，全量校准一次
+      if (cache.folderTotal(uid, accountId, folderPath) === st.messages) {
+        cache.markFullIndex(uid, accountId, folderPath, true);
+        return { mode: 'incremental', fetched: count };
+      }
+    }
+    const out = await fullSync(uid, accountId, client, folderPath, uidvalidity
+      ?? (client.mailbox?.uidValidity != null ? Number(client.mailbox.uidValidity) : null));
+    return { mode: 'full', ...out };
   } finally {
     lock.release();
   }
+}
+
+// 全量校准：清空（仅 uidvalidity 变了时）→ 分批拉全部信封 → 删掉服务器已不存在的 uid。
+// 中途失败时 full_index 保持 0，下次连接会重跑全量，不会留下「以为是完整的局部索引」。
+async function fullSync(uid, accountId, client, folderPath, uidvalidity) {
+  const replaceAll = cache.getUidvalidity(uid, accountId, folderPath) !== uidvalidity;
+  cache.markFullIndex(uid, accountId, folderPath, false);
+  if (replaceAll) {
+    cache.clearFolder(uid, accountId, folderPath); // uid 全部重排，旧行没意义
+    cache.markFolderStale(uid, accountId, folderPath); // 让列表回退直拉，而不是显示空
+  }
+  const { count, seen } = await fetchIntoCache(uid, accountId, client, folderPath, { range: '1:*', uidvalidity });
+  // 同一 uidvalidity 下 upsert 不会删掉「别的客户端删掉的信」，这里补齐
+  const pruned = replaceAll ? 0 : cache.pruneFolder(uid, accountId, folderPath, seen);
+  cache.setUidvalidity(uid, accountId, folderPath, uidvalidity);
+  cache.markFullIndex(uid, accountId, folderPath, true);
+  return { fetched: count, pruned };
+}
+
+async function fetchIntoCache(uid, accountId, client, folderPath, { range, uidvalidity, minUid = 0 }) {
+  const seen = [];
+  let count = 0;
+  let batch = [];
+  const flush = () => {
+    if (!batch.length) return;
+    cache.upsertEnvelopes(uid, accountId, folderPath, batch, uidvalidity);
+    count += batch.length;
+    batch = [];
+  };
+  for await (const msg of client.fetch(range, fetchQuery)) {
+    if (msg.uid <= minUid) continue;
+    const env = toEnvelope(msg);
+    seen.push(env.uid);
+    batch.push(env);
+    if (batch.length >= SNAPSHOT_BATCH) flush();
+  }
+  flush();
+  return { count, seen };
 }
 
 function maxUid(uid, accountId, folderPath) {
