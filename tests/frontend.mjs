@@ -545,4 +545,69 @@ function bulkCtx(messages, opts = {}) {
   ok('一句话点明传输类型 HTTP', /类型 HTTP/.test(brief), brief);
 }
 
+// 18) 打开邮件的代际守卫：慢连接上连点两封，慢的那封后到也不能盖掉后点的
+{
+  const A = msg({ uid: 1 });
+  const B = msg({ uid: 2 });
+  const ctx = {
+    messages: [A, B], selected: null, readerOpen: false, openingKey: null,
+    setFlag() {},
+    loadAllFoldersAndUnread() {},
+    toast() {},
+    currentFolderOf() { return 'INBOX'; },
+    // 按 uid 控制响应顺序：A 慢 30ms，B 只用 5ms（复现「点了 B 却显示 A」）
+    api(url) {
+      const uid = Number(new URL(url, 'http://local').searchParams.get('uid'));
+      return new Promise((resolve) => {
+        setTimeout(() => resolve({ uid, flags: ['\\Seen'], to: [], subject: `s${uid}`, accountId: 'a1', folder: 'INBOX' }), uid === 1 ? 30 : 5);
+      });
+    },
+  };
+  ctx.msgKey = M.msgKey;
+  const pA = M.openMessage.call(ctx, A);
+  const pB = M.openMessage.call(ctx, B);
+  await Promise.all([pA, pB]);
+  ok('慢的 A 后到也不覆盖后点的 B', ctx.selected?.uid === 2, String(ctx.selected?.uid));
+  ok('打开结束后清掉「正在打开」标记', ctx.openingKey === null);
+  ok('点击即打开阅读区（移动端才有反馈）', ctx.readerOpen === true);
+}
+
+// 19) 删除确认的分级：移到已删除不打断，垃圾箱里的真删除才确认
+{
+  let confirms = 0;
+  globalThis.confirm = () => { confirms++; return true; };
+  const inbox = msg({ folder: 'INBOX' });
+  const ctx = {
+    foldersByAccount: { a1: [{ path: 'Trash', special: '\\Trash' }] },
+    messages: [inbox], total: 1, selection: [], selected: null, searchMode: false, searchHits: [],
+    api() { return Promise.resolve({}); },
+    toast() {}, loadAllFoldersAndUnread() {},
+    currentFolderOf() { return 'INBOX'; },
+  };
+  ctx.msgKey = M.msgKey; ctx.dropRows = M.dropRows;
+  await M.remove.call(ctx, inbox);
+  ok('移到已删除不弹确认（可恢复操作）', confirms === 0, String(confirms));
+  const inTrash = msg({ folder: 'Trash', uid: 9 });
+  await M.remove.call(ctx, inTrash);
+  ok('垃圾箱里永久删除仍要确认', confirms === 1, String(confirms));
+}
+
+// 20) 归档必须走 dropRows：总数、选中态、搜索结果三处一起收
+{
+  const m = msg({ uid: 5 });
+  const ctx = {
+    foldersByAccount: { a1: [{ path: 'Archive', special: '\\Archive' }] },
+    messages: [m], total: 3, selection: ['a1|INBOX|5'], selected: m, readerOpen: true,
+    searchMode: true, searchHits: [{ ...m }],
+    api() { return Promise.resolve({}); },
+    toast() {}, currentFolderOf() { return 'INBOX'; },
+  };
+  ctx.msgKey = M.msgKey; ctx.dropRows = M.dropRows;
+  await M.archive.call(ctx, m);
+  ok('归档后总数跟着减', ctx.total === 2, String(ctx.total));
+  ok('归档后选中态清空', ctx.selection.length === 0);
+  ok('归档后搜索结果里也消失', ctx.searchHits.length === 0);
+  ok('归档后阅读区关闭', ctx.readerOpen === false && ctx.selected === null);
+}
+
 console.log(`\n全部通过：${pass} 项断言`);

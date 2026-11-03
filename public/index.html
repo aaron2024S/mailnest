@@ -226,6 +226,7 @@
               <button class="nav-item" v-for="f in foldersOf(a.id)" :key="f.path"
                       :class="{'is-active': activeAccount==='all' && allFolder===a.id+'|'+f.path,
                                'drop-target': dropTarget===a.id+'|'+f.path}"
+                      :title="`${a.displayName} · ${folderLabel(f)}`"
                       @click="pickAllFolder(a.id, f.path)" style="padding-left:18px"
                       @contextmenu.prevent="openNavCtx($event, a.id, f)"
                       @dragover.prevent="onDragOver(a.id,f.path)" @dragleave="onDragLeave(a.id,f.path)" @drop.prevent="onDrop(a.id,f.path)">
@@ -249,6 +250,7 @@
           </template>
           <template v-else>
             <button class="nav-item" v-for="f in folders" :key="f.path" :class="{'is-active': activeFolder===f.path, 'drop-target': dropTarget===activeAccount+'|'+f.path}"
+                    :title="folderLabel(f) + (unseenOf(activeAccount,f.path) ? `（${unseenOf(activeAccount,f.path)} 封未读）` : '')"
                     @click="pickFolder(f.path)"
                     @contextmenu.prevent="openNavCtx($event, activeAccount, f)"
                     @dragover.prevent="onDragOver(activeAccount,f.path)" @dragleave="onDragLeave(activeAccount,f.path)" @drop.prevent="onDrop(activeAccount,f.path)">
@@ -271,11 +273,11 @@
         </nav>
         <div class="rail-foot">
           <div>{{ accounts.length }} 个邮箱账号</div>
-          <div class="rail-cache" v-if="prefetch" :title="`正在缓存「${prefetch.folder}」`">
-            <span class="spin"></span> 正在缓存到本地 {{ prefetch.done }}/{{ prefetch.pending }} 封
+          <div class="rail-cache" v-if="prefetch" :title="`正在缓存「${prefetch.folder}」到本地`">
+            <span class="spin"></span> <span class="rc-txt">正在缓存到本地</span> {{ prefetch.done }}/{{ prefetch.pending }}<span class="rc-txt"> 封</span>
           </div>
           <div class="rail-cache is-err" v-else-if="prefetchErr" :title="prefetchErr">
-            ⚠ 缓存中断，自动重试中
+            ⚠<span class="rc-txt"> 缓存中断，自动重试中</span>
           </div>
         </div>
       </aside>
@@ -283,6 +285,12 @@
 
       <!-- 列表 -->
       <section class="list">
+        <!-- 窄屏顶栏放不下搜索框（会挤掉账号切换），在列表顶部补一个 -->
+        <div class="list-search">
+          <svg class="i" style="width:14px;height:14px"><use href="#i-inbox"/></svg>
+          <input v-model.trim="searchQ" @input="onSearchInput" @keyup.enter="searchAll" @keyup.esc="exitSearch"
+                 placeholder="搜索全部邮箱（回车）" autocomplete="off" spellcheck="false">
+        </div>
         <div class="list-head">
           <label class="list-cb" :class="{on:allSelected, part: selCount && !allSelected}" :title="allSelected?'取消全选':'全选已加载的邮件'">
             <input type="checkbox" :checked="allSelected" @change="toggleSelectAll">
@@ -326,7 +334,7 @@
         <div class="rows" :class="{'has-sel': selCount>0}" @scroll="onRowsScroll">
           <div class="row" v-for="m in filteredMessages" :key="m.accountId + '|' + m.folder + '|' + m.uid" draggable="true"
                :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
-                        'is-sel': isSel(m),
+                        'is-sel': isSel(m), 'is-opening': openingKey===msgKey(m),
                         'is-dragging': dragMsg && dragMsg.uid===m.uid && dragMsg.accountId===m.accountId}"
                @click="openMessage(m)" @contextmenu.prevent="openCtx($event, m)" @dragstart="onDragStart($event, m)" @dragend="onDragEnd">
             <div class="avatar-slot">
@@ -345,7 +353,8 @@
               <span class="preview" v-if="m._preview">{{ m._preview }}</span>
             </div>
             <div class="right">
-              <span class="date">{{ shortDate(m.date) }}</span>
+              <span class="spin row-spin" v-if="openingKey===msgKey(m)"></span>
+              <span class="date" v-else>{{ shortDate(m.date) }}</span>
               <span class="icons">
                 <button class="star-btn" :class="{on:m.flags.includes('\\Flagged')}" @click.stop="toggleStar(m)"
                         :title="m.flags.includes('\\Flagged')?'取消星标':'加星标'"><svg class="i"><use href="#i-star"/></svg></button>
@@ -366,13 +375,20 @@
             </template>
             <template v-else>
               <svg class="i"><use href="#i-inbox"/></svg>
-              <div>{{ searchQ || unreadOnly ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
+              <!-- 输入关键词时先做的是本地过滤：只覆盖已加载的这几百封。
+                   如果这里直接说「没有匹配」，用户会以为整个邮箱都没有，必须点明并给出口。 -->
+              <template v-if="searchQ && messages.length < total">
+                <div>已加载的 {{ messages.length }} 封里没有匹配</div>
+                <div class="muted" style="margin-top:6px;font-size:12px">这个文件夹共 {{ total }} 封，按回车搜索全部邮箱</div>
+                <button class="btn-ghost" style="margin-top:10px;width:auto;padding:0 14px" @click="searchAll">搜索全部邮箱</button>
+              </template>
+              <div v-else>{{ searchQ || unreadOnly ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
             </template>
           </div>
           <div class="empty" v-if="loadingMessages && !filteredMessages.length"><span class="spin"></span> 正在从服务器读取…</div>
           <div class="load-more" v-if="!searchMode && messages.length < total">
             <span v-if="loadingMore"><span class="spin"></span> 正在加载更多…</span>
-            <span v-else>向上滚动加载更多（已加载 {{ messages.length }} / {{ total }}）</span>
+            <span v-else>继续向下滚动加载更多（已加载 {{ messages.length }} / {{ total }}）</span>
           </div>
         </div>
         <div class="col-resizer" :class="{on:resizing}" title="拖动调节列表宽度"
@@ -421,6 +437,7 @@
 
         <div class="reader-body" v-if="selected">
           <div class="inner">
+            <div class="r-opening" v-if="openingKey"><span class="spin"></span> 正在打开邮件…</div>
             <h1 class="r-subject">{{ selected.subject }}</h1>
             <div class="r-sender">
               <div class="avatar" :style="{background:selected._color}">{{ initials(selected.from?.text || selected.from?.address || '?') }}</div>
@@ -455,8 +472,11 @@
         </div>
         <div class="reader-body" v-else style="display:grid;place-items:center">
           <div class="empty" style="padding:0">
-            <svg class="i" style="width:44px;height:44px"><use href="#i-mail"/></svg>
-            <div>选择一封邮件查看</div>
+            <template v-if="openingKey"><span class="spin"></span><div style="margin-top:10px">正在打开邮件…</div></template>
+            <template v-else>
+              <svg class="i" style="width:44px;height:44px"><use href="#i-mail"/></svg>
+              <div>选择一封邮件查看</div>
+            </template>
           </div>
         </div>
       </section>
@@ -805,6 +825,16 @@
             <div class="form-grid">
               <div class="form-row"><div class="wrap"><input v-model="pw.next" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password"></div></div>
               <button class="btn-ghost" style="height:42px" @click="changePw" :disabled="pw.busy"><span v-if="!pw.busy">更新密码</span><span class="spin" v-else></span></button>
+            </div>
+            <!-- 快捷键不写出来就等于没有 -->
+            <div class="kbd-panel">
+              <div class="kbd-title">键盘快捷键</div>
+              <div class="kbd-row"><span><kbd>J</kbd><kbd>K</kbd></span><span>下一封 / 上一封</span></div>
+              <div class="kbd-row"><span><kbd>R</kbd></span><span>回复当前邮件</span></div>
+              <div class="kbd-row"><span><kbd>/</kbd></span><span>搜索全部邮箱</span></div>
+              <div class="kbd-row"><span><kbd>Esc</kbd></span><span>关掉最上面一层 / 返回列表</span></div>
+              <div class="kbd-row"><span><kbd>Ctrl</kbd><kbd>A</kbd></span><span>全选列表（阅读区里是选中正文）</span></div>
+              <div class="kbd-row"><span><kbd>Del</kbd></span><span>删除选中的邮件</span></div>
             </div>
           </template>
         </div>

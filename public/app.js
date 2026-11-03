@@ -64,6 +64,9 @@ const app = createApp({
       loadingMore: false,
       unreadOnly: false,
       selected: null,
+      // 正在打开的邮件 key：慢连接上点一封没缓存的邮件要等一个 IMAP 来回，
+      // 期间必须给反馈（行上转圈 + 阅读区提示），否则用户以为没点上会连点几次
+      openingKey: null,
       searchQ: '',
       // 全邮箱搜索：回车触发，结果直接铺在列表区（FTS5 索引，跨账号跨文件夹）
       searchMode: false,
@@ -222,7 +225,12 @@ const app = createApp({
         body: opts.body ? JSON.stringify(opts.body) : undefined,
       });
       if (res.status === 401 && this.view === 'app') {
+        // 会话过期时直接跳回登录页会让人莫名其妙（正在写信的内容也看不见了），
+        // 登录页上要说清原因，写信草稿留在内存里，重新登录还在
         this.view = 'auth'; this.authMode = 'login';
+        this.authError = this.compose.open || this.compose.text
+          ? '登录已过期，请重新登录（未发送的内容仍保留在写信窗口）'
+          : '登录已过期，请重新登录';
         throw Object.assign(new Error('登录已过期'), { handled: true });
       }
       const data = await res.json().catch(() => ({}));
@@ -597,7 +605,6 @@ const app = createApp({
             // 追加时不截断：跨账号归并翻页本来就有交错误差，再截断会把行永远弄丢
             this.messages = append ? this.messages.concat(merged) : merged;
             this.loadErrors = failed.slice();
-            this.prefetchBodies(); // 有自己的代际守卫，重复调用安全
             // 有账号失败时自动补试一次（网络抖动多半几秒内自愈）；成功后复位
             if (failed.length && !this._loadRetried) {
               this._loadRetried = true;
@@ -647,7 +654,8 @@ const app = createApp({
           this.total = d.total;
           this.listError = null;
         }
-        if (!append && !progressive) this.prefetchBodies(); // 后台预取正文：切邮件时秒开（尤其 outlook）
+        // 正文预取交给服务端的预热队列（按文件夹顺序填，只在空闲连接上跑）。
+        // 前端再串行拉 15 封只会跟「用户真正点开的那一封」抢同一把连接锁，越帮越慢。
       } catch (e) {
         if (append) this.page--; // 追加失败回退页码，下次滚动还能重试
         // 非追加失败时旧列表会留在屏幕上 —— 必须明说「没换成」，否则用户只看到
@@ -698,20 +706,8 @@ const app = createApp({
       this.searchQ = '';
     },
 
-    // 后台预取当前列表前 15 封的正文（write-through 进缓存）：
-    // 第一次点开会慢（一个 IMAP 来回），预取过后切换邮件就是纯本地速度。
-    // 顺序慢慢来（不并发打爆 outlook），换夹即停
-    async prefetchBodies() {
-      const gen = (this._prefetchGen = (this._prefetchGen || 0) + 1);
-      for (const m of this.messages.slice(0, 15)) {
-        if (gen !== this._prefetchGen) return;
-        try {
-          await this.api(`/api/message?account=${m.accountId}&folder=${encodeURIComponent(m.folder)}&uid=${m.uid}`);
-        } catch { /* 预取失败无所谓，用户点开时再拉 */ }
-      }
-    },
-
-    async refreshAll() {      if (this.syncing) return;
+    async refreshAll() {
+      if (this.syncing) return;
       this.syncing = true;
       try {
         await this.loadAllFoldersAndUnread();
@@ -768,11 +764,18 @@ const app = createApp({
 
     // ---------- 阅读 ----------
     async openMessage(m) {
+      const key = this.msgKey(m);
+      // 代际号：连点几封时只认最后一次点击。慢连接上 A 的响应可能晚于 B 到达，
+      // 没有这个守卫就会出现「点了 B，阅读区显示的是 A」
+      const gen = (this._openGen = (this._openGen || 0) + 1);
+      this.openingKey = key;
+      // 移动端阅读区是整屏覆盖层，不先打开的话点了完全没反应
+      this.readerOpen = true;
       try {
         const full = await this.api(`/api/message?account=${m.accountId}&folder=${encodeURIComponent(m.folder || this.currentFolderOf(m))}&uid=${m.uid}`);
+        if (gen !== this._openGen) return;
         this.selected = { ...full, ...m, folder: m.folder || this.currentFolderOf(m) };
         this.quickReplyText = '';
-        this.readerOpen = true;
         this.readerMoveOpen = false;
         // 以服务端 flags 为准，把列表里可能过期的星标/已读状态对齐（在别处标过星也能立刻反映）
         for (const f of ['\\Seen', '\\Flagged']) {
@@ -785,8 +788,29 @@ const app = createApp({
             .then(() => this.loadAllFoldersAndUnread()).catch(() => {});
         }
       } catch (e) {
+        if (gen !== this._openGen) return;
+        // 打不开就退回原状，别让阅读区停在一个空白骨架屏上
+        this.readerOpen = !!this.selected;
         if (!e.handled) this.toast(e.message, 'error');
+      } finally {
+        if (gen === this._openGen) this.openingKey = null;
       }
+    },
+    // 键盘上下切换当前邮件（j/k 或 ↑/↓）
+    stepMessage(delta) {
+      const rows = this.filteredMessages;
+      if (!rows.length) return;
+      const at = rows.findIndex((x) => this.selected && x.uid === this.selected.uid && x.accountId === this.selected.accountId);
+      let i = at < 0 ? (delta > 0 ? 0 : rows.length - 1) : at + delta;
+      i = Math.max(0, Math.min(rows.length - 1, i));
+      const m = rows[i];
+      if (!m || (at === i && this.selected)) return;
+      this.openMessage(m);
+      // 键盘走到屏幕外的行要跟着滚，否则选中了也看不见
+      this.$nextTick(() => {
+        const el = document.querySelector('.row.is-active');
+        if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+      });
     },
     currentFolderOf(m) {
       if (m.folder) return m.folder;
@@ -833,9 +857,11 @@ const app = createApp({
     },
     async remove(m) {
       const trash = (this.foldersByAccount[m.accountId] || []).find((f) => f.special === '\\Trash');
-      const inTrash = trash && m.folder === trash.path;
-      // 已在垃圾箱里 = 真删除（IMAP \Deleted + EXPUNGE），不可恢复；文案要跟实际动作一致
-      if (!confirm(inTrash ? '永久删除这封邮件？此操作不可恢复！' : '把这封邮件移到已删除？')) return;
+      // 少数服务器不给 \Trash 标记：与其抛一个 undefined 的技术错误，不如说人话
+      if (!trash) { this.toast('这个邮箱没有「已删除」文件夹，无法删除邮件', 'error'); return; }
+      const inTrash = m.folder === trash.path;
+      // 「移到已删除」是可恢复操作（和桌面客户端一致，不打断用户）；只有垃圾箱里的真删除才确认
+      if (inTrash && !confirm('永久删除这封邮件？此操作不可恢复！')) return;
       try {
         if (!inTrash) {
           await this.api('/api/move', { method: 'POST', body: { account: m.accountId, folder: m.folder, uids: [m.uid], dest: trash.path } });
@@ -844,7 +870,7 @@ const app = createApp({
         }
         this.dropRows([m]);
         this.loadAllFoldersAndUnread();
-        this.toast(inTrash ? '已永久删除' : '已删除', 'ok');
+        this.toast(inTrash ? '已永久删除' : '已移到已删除', 'ok');
       } catch (e) { this.toast(e.message, 'error'); }
     },
     async archive(m) {
@@ -852,8 +878,8 @@ const app = createApp({
         const dest = (this.foldersByAccount[m.accountId] || []).find((f) => f.special === '\\Archive' || /archive/i.test(f.path));
         if (!dest) { this.toast('该账号没有归档文件夹', 'error'); return; }
         await this.api('/api/move', { method: 'POST', body: { account: m.accountId, folder: m.folder, uids: [m.uid], dest: dest.path } });
-        this.messages = this.messages.filter((x) => x.uid !== m.uid || x.accountId !== m.accountId);
-        this.selected = null; this.readerOpen = false;
+        // 走统一的移除路径：总数要跟着减、选中态要清、搜索结果里也要消失
+        this.dropRows([m]);
         this.toast('已归档', 'ok');
       } catch (e) { this.toast(e.message, 'error'); }
     },
@@ -913,6 +939,12 @@ const app = createApp({
       const before = this.messages.length;
       this.messages = this.messages.filter((m) => !keys.has(this.msgKey(m)));
       const removed = before - this.messages.length;
+      // 搜索结果里同一封也要消失，否则删完还能在搜索列表里点开它（然后报「邮件不存在」）
+      if (this.searchMode) {
+        const beforeHits = this.searchHits.length;
+        this.searchHits = this.searchHits.filter((m) => !keys.has(this.msgKey(m)));
+        if (this.searchHits.length !== beforeHits) this.searchInfo = '';
+      }
       // 列表头上的「xx 封」是服务端总数，删/移走几封就得同步减，否则数字不动
       if (removed > 0) this.total = Math.max(0, this.total - removed);
       this.selection = this.selection.filter((k) => !keys.has(k));
@@ -1578,18 +1610,41 @@ const app = createApp({
   async mounted() {
     document.addEventListener('click', () => { this.acctOpen = false; this.avatarOpen = false; this.closeCtx(); this.closeNavCtx(); });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { this.closeCtx(); this.closeNavCtx(); }
-      // 列表页 Delete 键删除选中（输入框里不抢）
       const t = e.target || {};
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable;
-      if (!typing && this.view === 'app' && this.selection.length && (e.key === 'Delete' || e.key === 'Backspace')) {
+      // Esc 按「最上面一层」逐层关：右键菜单 → 关窗确认 → 写信 → 设置 → 搜索 → 阅读区
+      if (e.key === 'Escape') {
+        if (this.ctx.open || this.navCtx.open) { this.closeCtx(); this.closeNavCtx(); return; }
+        if (this.composeAskClose) { this.composeAskClose = false; return; }
+        if (this.compose.open) { this.closeCompose(); return; }
+        if (this.modals.settings || this.modals.users) { this.modals.settings = false; this.modals.users = false; return; }
+        if (this.searchMode) { this.exitSearch(); return; }
+        if (this.readerOpen) { this.readerOpen = false; }
+        return;
+      }
+      if (typing || this.view !== 'app') return;
+      // 列表页 Delete/Backspace 删除选中
+      if (this.selection.length && (e.key === 'Delete' || e.key === 'Backspace')) {
         e.preventDefault();
         this.batchRemove();
+        return;
       }
-      if (!typing && this.view === 'app' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && this.messages.length) {
+      // Ctrl+A 只在该全选邮件时全选 —— 阅读区里按 Ctrl+A 是「选中正文」，不能变成批量操作
+      const inReader = !!(t.closest && t.closest('.reader'));
+      if (!inReader && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && this.messages.length) {
         e.preventDefault();
         this.toggleSelectAll();
+        return;
       }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // 有了浮层/写信窗就不抢单键快捷键
+      if (this.compose.open || this.modals.settings || this.modals.users) return;
+      const k = e.key;
+      // 只绑 j/k，不碰 ↑/↓：阅读区长邮件要能正常用方向键滚动正文
+      if (k === 'j' || k === 'k') { e.preventDefault(); this.stepMessage(k === 'j' ? 1 : -1); return; }
+      // 只在单封阅读时可用，避免误以为在给整个列表回信
+      if (k === 'r' && this.selected && this.readerOpen) { e.preventDefault(); this.reply(this.selected, 'reply'); return; }
+      if (k === '/') { e.preventDefault(); document.querySelector('.search input, .list-search input')?.focus(); }
     });
     window.addEventListener('scroll', () => this.closeCtx(), true);
     window.addEventListener('resize', () => this.closeCtx());
