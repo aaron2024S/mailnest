@@ -11,7 +11,7 @@ import {
 } from './store.js';
 import {
   listFolders, createFolder, deleteFolder, listMessages, getMessage, getAttachment, setFlags,
-  moveMessages, deleteMessages, markAllRead, emptyFolder, sendMail, testAccount,
+  moveMessages, deleteMessages, markAllRead, emptyFolderIsolated, sendMail, testAccount,
   listDrafts, saveDraft, deleteDraft, dropConnections, unseenCounts,
 } from './mail.js';
 import {
@@ -123,6 +123,30 @@ function ensureUserWatchers(uid) {
   for (const a of listAccounts(uid)) {
     idle.ensureWatcher(uid, a.id).catch(() => { /* runWatcher 内部兜底 */ });
   }
+}
+
+// 后台清空：同账号同夹同时只跑一个任务，完成后用 SSE 告知前端结果。
+// 几千封邮件的 EXPUNGE 在 Outlook 上可能十几秒到几十秒，同步等待会让界面像卡死，
+// 所以缓存先清空、请求立刻返回，这里只负责把服务器那边的活干完。
+const emptyJobs = new Set();
+function emptyInBackground(uid, accountId, folder, count) {
+  const key = `${uid}:${accountId}:${folder}`;
+  if (emptyJobs.has(key)) return;
+  emptyJobs.add(key);
+  const t0 = Date.now();
+  emptyFolderIsolated(uid, accountId, folder)
+    .then(() => {
+      const ms = Date.now() - t0;
+      console.log(`[mailnest] 清空完成 ${folder} (${count} 封) 用时 ${ms}ms`);
+      sendToUser(uid, { type: 'empty-done', accountId, folder, count, ms });
+    })
+    .catch((e) => {
+      // 失败：把该夹从缓存里剔掉，下次打开会重新直拉，避免界面显示空、服务器其实还在
+      try { cache.dropFolder(uid, accountId, folder); } catch { /* ignore */ }
+      console.log(`[mailnest] 清空失败 ${folder}: ${e?.message || e}`);
+      sendToUser(uid, { type: 'empty-error', accountId, folder, message: e?.message || '清空失败' });
+    })
+    .finally(() => emptyJobs.delete(key));
 }
 
 api.get('/events', guard, (req, res) => {
@@ -587,10 +611,13 @@ api.post('/folders/empty', guard, async (req, res) => {
     if (!node || !['\\Trash', '\\Junk'].includes(node.special)) {
       return res.status(400).json({ error: '只能清空「已删除」或「垃圾邮件」文件夹' });
     }
+    const total = (cache.folderCounts(req.user.id) || [])
+      .find((f) => f.account_id === acc.id && f.path === String(folder))?.total || 0;
     audit(req.user.id, 'folder-empty', `${acc.email}/${folder}`, clientIp(req));
-    const out = await emptyFolder(req.user.id, acc.id, String(folder));
+    // 缓存先清、立即响应：界面马上变空，真正的 IMAP 删除在后台跑
     try { cache.clearFolder(req.user.id, acc.id, String(folder)); } catch { /* 缓存回写失败不影响主流程 */ }
-    res.json(out);
+    res.json({ ok: true, queued: true, count: total });
+    emptyInBackground(req.user.id, acc.id, String(folder), total);
   } catch (e) { fail(res, e); }
 });
 

@@ -434,6 +434,25 @@ export async function emptyFolder(uid, accountId, folder) {
   }
 }
 
+// 后台清空专用：不碰读写池（一个账号只有一条池连接，几千封 EXPUNGE 可能跑几十秒，
+// 复用池会让这期间所有请求排队）。后台任务不怕多一次握手开销。
+export async function emptyFolderIsolated(uid, accountId, folder) {
+  const { client } = await createListenerClient(uid, accountId);
+  try {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      await client.messageDelete('1:*', { uid: true });
+    } finally {
+      lock.release();
+    }
+    return { ok: true };
+  } catch (e) {
+    throw imapError(e);
+  } finally {
+    try { client.close(); } catch { /* ignore */ }
+  }
+}
+
 export async function deleteMessages(uid, accountId, folder, messageUids) {
   try {
     return await withMailbox(uid, accountId, folder, async (client) => {

@@ -316,6 +316,19 @@ const app = createApp({
           this.indexing = d.done >= d.total ? null : { done: d.done, total: d.total };
           return;
         }
+        if (d.type === 'empty-done' || d.type === 'empty-error') {
+          if (d.type === 'empty-done') {
+            this.toast(d.count ? `已彻底删除 ${d.count} 封邮件` : '文件夹已清空', 'ok');
+          } else {
+            this.toast(`清空失败：${d.message}`, 'error');
+            const cur = this.curFolderRef;
+            if (cur && cur.account === d.accountId && cur.folder === d.folder) {
+              this.page = 1;
+              this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+            }
+          }
+          return;
+        }
         if (d.type !== 'new-mail') return;
         // 角标直接采用推送的该夹未读数（服务端缓存里算好的）
         if (typeof d.unseen === 'number') this.unreadMap[`${d.accountId}|${d.folder}`] = d.unseen;
@@ -603,13 +616,23 @@ const app = createApp({
       if (!ref) return;
       const n = this.total;
       if (!confirm(`清空「${this.listTitle}」？其中全部 ${n} 封邮件将被永久删除，无法恢复。`)) return;
+      // 乐观清空：界面立刻变空，真正的 IMAP 删除由服务端后台跑（Outlook 上几千封 EXPUNGE 要几十秒，
+      // 同步等会让按钮像卡死）。失败时回滚，并由 SSE 的 empty-error 提示 + 重新拉取。
+      const backupRows = this.messages;
+      const backupTotal = this.total;
+      this.messages = [];
+      this.total = 0;
+      this.clearSel();
+      this.page = 1;
+      this.unreadMap[`${ref.account}|${ref.folder}`] = 0;
+      if (n) this.toast(`已清空 ${n} 封，正在后台删除…`, 'ok');
       try {
         await this.api('/api/folders/empty', { method: 'POST', body: ref });
-        this.unreadMap[`${ref.account}|${ref.folder}`] = 0;
-        this.page = 1;
-        await this.loadMessages();
-        this.toast('已清空', 'ok');
-      } catch (e) { this.toast(e.message, 'error'); }
+      } catch (e) {
+        this.messages = backupRows;
+        this.total = backupTotal;
+        this.toast(e.message, 'error');
+      }
     },
 
     // ---------- 阅读 ----------

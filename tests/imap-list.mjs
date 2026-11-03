@@ -219,6 +219,12 @@ await emptyFolder(user.id, 'a_test', 'Trash');
 check('清空发出 STORE \\Deleted', storeLog.some((l) => /\\Deleted/.test(l)), JSON.stringify(storeLog));
 check('清空触发 EXPUNGE（真删，不是再进垃圾箱）', expungeCount >= 1, String(expungeCount));
 
+// 后台清空走独立连接（不占读写池）：要能自己握手、选夹、删干净
+const { emptyFolderIsolated } = await import('../server/mail.js');
+const expungeBefore = expungeCount;
+await emptyFolderIsolated(user.id, 'a_test', 'Trash');
+check('后台清空用独立连接也能真删', expungeCount > expungeBefore, `${expungeBefore} -> ${expungeCount}`);
+
 // ---------- 删除文件夹：只放行自建（无 special），INBOX/系统文件夹在进 IMAP 前就拒绝 ----------
 const { deleteFolder: delFolder } = await import('../server/mail.js');
 await delFolder(user.id, 'a_test', 'INBOX').then(() => check('INBOX 拒绝删除', false, '居然成功了')).catch((e) => check('INBOX 拒绝删除', /收件箱不能删除/.test(e.message), e.message));
