@@ -755,6 +755,32 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   fail(res, err);
 });
 
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log(`[mailnest] listening on http://${HOST}:${PORT}  data=${process.env.MAILNEST_DATA || 'data/'}`);
 });
+
+// ---------- 优雅退出 ----------
+// NAS 面板升级/重启容器时，Docker 对 PID 1 发 SIGTERM。没有任何收尾逻辑时，
+// 监听中的 IMAP 长连接被强拆会抛出未处理的 rejection，Node 直接以退出码 1 结束，
+// 面板上就显示「非正常退出（exit 1）」。这里主动把连接/数据库关干净再以 0 退出。
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[mailnest] 收到 ${signal}，正在退出…`);
+  const done = () => process.exit(0);
+  setTimeout(done, 3000).unref(); // 兜底：任何一步卡住也不拖过 Docker 默认 10 秒宽限
+  try {
+    for (const set of sseClients.values()) for (const res of set) { try { res.end(); } catch { /* ignore */ } }
+    sseClients.clear();
+  } catch { /* ignore */ }
+  try { idle.closeAll(); } catch { /* ignore */ }
+  try { cache.closeAll(); } catch { /* ignore */ }
+  try { server.close(done); } catch { done(); }
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+// 兜底：单次未处理的 rejection / 异常不应把进程打成退出码 1（升级时最常见的假故障）
+process.on('unhandledRejection', (e) => { console.error('[mailnest] unhandledRejection:', e?.message || e); });
+process.on('uncaughtException', (e) => { console.error('[mailnest] uncaughtException:', e?.stack || e); });

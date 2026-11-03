@@ -42,6 +42,15 @@ export async function stopUserWatchers(uid) {
   for (const accountId of watchingAccounts(uid)) await stopWatcher(uid, accountId);
 }
 
+// 进程退出用：把所有监听连接一次性关掉（不逐个 await，退出路径要快）
+export function closeAll() {
+  for (const [key, w] of watchers) {
+    w.running = false;
+    try { w.client?.close(); } catch { /* ignore */ }
+    watchers.delete(key);
+  }
+}
+
 // 按需整夹重同步（刷新按钮 / 缓存未命中兜底）。
 // 刻意不复用 watcher 的连接：它被 INBOX 的选中状态占用，切走会破坏 IDLE 监听 —— 临时开一条最稳
 export async function resyncFolder(uid, accountId, folderPath) {

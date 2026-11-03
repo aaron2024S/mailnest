@@ -50,6 +50,11 @@ export function closeDb(uid) {
   if (db) { try { db.close(); } catch { /* ignore */ } dbs.delete(uid); }
 }
 
+// 进程退出用：把打开的所有用户库都关掉（WAL 需要正常 close 才干净）
+export function closeAll() {
+  for (const uid of [...dbs.keys()]) closeDb(uid);
+}
+
 // ---------- 文件夹登记 ----------
 export function setUidvalidity(uid, accountId, folderPath, uidvalidity) {
   getDb(uid).prepare(`
