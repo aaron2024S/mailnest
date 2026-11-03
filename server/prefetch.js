@@ -98,6 +98,7 @@ async function run(uid, accountId, w) {
       w.client = client;
       await fillFolder(uid, accountId, client, job.folder, job.pending, w);
       backoff = 10_000;
+      await sleep(GAP_MS, w); // 夹与夹之间也歇一下：别让换夹的连接操作连成串
     } catch (e) {
       if (!w.running) break;
       console.error(`[prefetch] ${accountId} 预热中断（${Math.round(backoff / 1000)}s 后重试）: ${e?.message || e}`);
@@ -143,9 +144,13 @@ export async function fillFolder(uid, accountId, client, folder, pending, w) {
       // 服务器漏发了整批（uid 已被删/移动）：全部记失败，否则死循环
       if (!progressed) {
         for (const u of uids) cache.failBody(uid, accountId, folder, u);
+        // 整批无进展必须踩一脚刹车：否则任何系统性失败（解析 bug、服务器抽风）
+        // 都会让 worker 毫无间隔地连环换批换夹重建连接，把邮件服务器轰炸到限流，
+        // 连累用户自己的正常操作（0.2.0 切文件夹卡住就是这个）
+        await sleep(Math.max(GAP_MS, 2000), w);
       }
       emit(uid, accountId, { type: 'prefetch', folder, done: w.done, pending: w.pending });
-      await sleep(GAP_MS, w);
+      if (progressed) await sleep(GAP_MS, w);
     }
     emit(uid, accountId, { type: 'prefetch', folder, done: w.done, pending: 0, finished: true });
   } finally {

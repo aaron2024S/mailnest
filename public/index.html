@@ -269,7 +269,13 @@
           </template>
         </nav>
         <div class="rail-foot">
-          {{ accounts.length }} 个邮箱账号
+          <div>{{ accounts.length }} 个邮箱账号</div>
+          <div class="rail-cache" v-if="prefetch" :title="`正在缓存「${prefetch.folder}」`">
+            <span class="spin"></span> 正在缓存到本地 {{ prefetch.done }}/{{ prefetch.pending }} 封
+          </div>
+          <div class="rail-cache is-err" v-else-if="prefetchErr" :title="prefetchErr">
+            ⚠ 缓存中断，自动重试中
+          </div>
         </div>
       </aside>
       <div class="rail-backdrop" v-if="railOpen" @click="railOpen=false"></div>
@@ -303,8 +309,8 @@
           </div>
         </div>
         <div class="idx-bar" v-if="indexing"><span class="spin"></span> 正在建立索引 {{ indexing.done }}/{{ indexing.total }}…完成后所有文件夹秒开</div>
-        <div class="idx-bar" v-if="prefetch"><span class="spin"></span> 正在缓存到本地 {{ prefetch.done }}/{{ prefetch.pending }} 封…缓存过之后切换邮件不需要等待</div>
-        <div class="idx-bar is-err" v-else-if="prefetchErr">⚠ 本地缓存中断：{{ prefetchErr }}（会自动重试，不影响正常收发）</div>
+        <!-- 旧列表还在时也要让用户知道新文件夹正在加载，否则看起来像"切了没反应" -->
+        <div class="idx-bar" v-if="loadingMessages && filteredMessages.length && !indexing"><span class="spin"></span> 正在加载 {{ listTitle }}…</div>
         <div class="rows" :class="{'has-sel': selCount>0}" @scroll="onRowsScroll">
           <div class="row" v-for="m in filteredMessages" :key="m.uid" draggable="true"
                :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
