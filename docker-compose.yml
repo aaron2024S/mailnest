@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   mailnest:
-    image: aaron2024s/mailnest:0.1.5
+    image: aaron2024s/mailnest:0.1.6
     container_name: mailnest
     restart: unless-stopped
     ports:
