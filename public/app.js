@@ -1,10 +1,6 @@
 /* MailNest 前端（无构建 Vue3） */
 const { createApp } = Vue;
 
-// Windows 的中文字体是微软雅黑，字形在 em 框里偏上，需要 CSS 光学补偿；
-// 只在真正会用雅黑的平台上打标，macOS（苹方）/Linux（Noto）保持原样。
-if (/Windows/i.test(navigator.userAgent)) document.documentElement.dataset.fontfix = 'yahei';
-
 const PRESETS = {
   qq:     { label: 'QQ',       imap: ['imap.qq.com', 993],    smtp: ['smtp.qq.com', 465],    hint: 'QQ 邮箱需要在网页端「设置-账号」开启 IMAP/SMTP，并用 16 位授权码（不是 QQ 密码）。' },
   163:    { label: '163',      imap: ['imap.163.com', 993],   smtp: ['smtp.163.com', 465],   hint: '网易需要先在网页端开启 IMAP，并使用「客户端授权密码」；服务器要求客户端 ID，MailNest 已自动处理。' },
@@ -1055,6 +1051,11 @@ const app = createApp({
         this.agent.tokens = d.tokens || [];
         if (d.limit) this.agent.limit = d.limit;
       } catch (e) { this.toast(e.message, 'error'); }
+    },
+    toggleScope(key) {
+      const i = this.agent.scopes.indexOf(key);
+      if (i >= 0) this.agent.scopes.splice(i, 1);
+      else this.agent.scopes.push(key);
     },
     async createAgentToken() {
       if (this.agent.busy) return;

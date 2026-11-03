@@ -685,9 +685,9 @@
               <div class="form-row">
                 <label>权限</label>
                 <div class="scope-row">
-                  <label class="scope-chip" v-for="s in scopeOptions" :key="s.key" :class="{on: agent.scopes.includes(s.key)}">
-                    <input type="checkbox" :value="s.key" v-model="agent.scopes"><span>{{ s.label }}</span>
-                  </label>
+                  <button type="button" class="scope-chip" v-for="s in scopeOptions" :key="s.key"
+                          :class="{on: agent.scopes.includes(s.key)}" :aria-pressed="agent.scopes.includes(s.key)"
+                          @click="toggleScope(s.key)"><span>{{ s.label }}</span></button>
                 </div>
                 <p class="hint">只读足够让 AI 查邮件；「整理」可以标记已读、移动、删除到垃圾箱；「发信」建议需要时再单独开。</p>
               </div>
