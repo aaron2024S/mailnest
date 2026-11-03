@@ -85,6 +85,31 @@ function syncSentCache(uid, accountId) {
   } catch { /* 缓存回写失败不影响发信结果 */ }
 }
 
+// 搜索前保证索引可用：只补「从没同步过」的文件夹，已有索引的不重复拉。
+// 冷启动大邮箱可能很久，给 20 秒预算，超了就返回 partial，让 agent 提示用户稍后再搜
+const INDEX_BUDGET_MS = 20000;
+
+async function ensureIndexed(uid, acc, onlyFolder = null) {
+  if (cache.hasAccountData(uid, acc.id)) {
+    // 已有索引：只在指定了文件夹且该夹从没同步过时补一次
+    if (!onlyFolder) return 'ok';
+    if (cache.getPage(uid, acc.id, onlyFolder, { page: 1, pageSize: 1 })) return 'ok';
+    try { await idle.resyncFolder(uid, acc.id, onlyFolder); return 'ok'; } catch { return 'partial'; }
+  }
+  let folders = await listFolders(uid, acc.id);
+  if (onlyFolder) folders = folders.filter((f) => f.path === onlyFolder);
+  const started = Date.now();
+  let partial = false;
+  for (const f of folders) {
+    if (cache.getPage(uid, acc.id, f.path, { page: 1, pageSize: 1 })) continue;
+    if (Date.now() - started > INDEX_BUDGET_MS) { partial = true; break; }
+    try {
+      await idle.resyncFolder(uid, acc.id, f.path);
+    } catch { partial = true; }
+  }
+  return partial ? 'partial' : 'ok';
+}
+
 // 统一包装：scope 拦截 → 执行 → 异常转人话。任何工具都不允许绕过这一层。
 function define(server, ctx, def) {
   server.registerTool(
@@ -184,6 +209,61 @@ export function registerTools(server, ctx) {
           hasAttachment: m.hasAttachment,
         })),
       });
+    },
+  });
+
+  define(server, ctx, {
+    name: 'search_messages',
+    scope: 'read',
+    title: '搜索邮件',
+    description: '按关键词搜索邮件（主题、发件人、收件人、以及已读过的正文）。比逐页翻 list_messages 快得多；'
+      + '搜索走 MailNest 的本地索引，首次搜索会先建索引（大邮箱可能要几秒）。不传 account 时搜索所有账号。',
+    annotations: { readOnlyHint: true },
+    schema: {
+      query: z.string().min(1).max(200).describe('关键词，例如「发票」或「noreply@github.com」'),
+      account: z.string().optional().describe('账号 id 或邮箱地址；省略则搜索全部账号'),
+      folder: z.string().optional().describe('只搜某个文件夹（路径从 list_folders 拿）；省略则搜所有文件夹'),
+      limit: z.coerce.number().int().min(1).max(50).optional().describe('最多返回多少封，默认 20'),
+    },
+    run: async ({ query, account, folder, limit }) => {
+      const q = String(query).trim();
+      const all = listAccounts(uid);
+      if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
+      const targets = account ? [resolveAccount(uid, account)] : all;
+      const dir = folder ? String(folder).trim() : null;
+      const cap = Math.min(Math.max(1, limit || 20), 50);
+
+      const hits = [];
+      let indexing = false;
+      for (const acc of targets) {
+        if (dir) {
+          const folders = await listFolders(uid, acc.id);
+          if (!folders.some((f) => f.path === dir)) {
+            throw new Error(`「${acc.email}」没有名为「${dir}」的文件夹，可用：${folders.slice(0, 12).map((f) => f.path).join('、')}`);
+          }
+        }
+        if (await ensureIndexed(uid, acc, dir) === 'partial') indexing = true;
+        for (const m of cache.searchMessages(uid, acc.id, q, { folder: dir, limit: cap })) {
+          hits.push({ acc, ...m });
+        }
+      }
+      hits.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+      const shown = hits.slice(0, cap);
+
+      if (!shown.length) {
+        const hint = indexing ? '\n提示：该账号正在首次建立索引，等几秒后再搜一次可能会有结果。'
+          : '\n提示：正文只搜索已打开过（已缓存）的邮件；也可以换更短的关键词，或用 list_messages 逐页查看。';
+        return text(`没搜到和「${q}」相关的邮件${dir ? `（范围：${dir}）` : ''}。${hint}`);
+      }
+      const lines = shown.map((m, i) => {
+        const from = m.from?.name ? `${m.from.name} <${m.from.address}>` : (m.from?.address || '未知');
+        const who = targets.length > 1 ? `${m.acc.email} / ` : '';
+        const head = `${i + 1}. [${who}${m.folder}] ${m.subject} — ${from} · ${m.date || '未知时间'} · uid=${m.uid}`
+          + `${m.flags.includes('\\Seen') ? '' : ' · 未读'}${m.hasAttachment ? ' · 有附件' : ''}`;
+        return m.snippet ? `${head}\n   命中正文：${m.snippet}` : head;
+      });
+      const tail = shown.length >= cap ? `\n\n（只显示前 ${cap} 封，可用 limit 或 folder 缩小范围）` : '';
+      return text(`搜到 ${shown.length} 封和「${q}」相关的邮件：\n\n${lines.join('\n')}${tail}`);
     },
   });
 

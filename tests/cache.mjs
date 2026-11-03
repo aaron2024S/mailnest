@@ -158,6 +158,35 @@ test('多用户隔离：不同 uid 各自的库', () => {
   fs.rmSync(path.join(tmp, 'u_other'), { recursive: true, force: true });
 });
 
+test('搜索：主题 / 发件人 / 收件人 / 正文', () => {
+  cache.syncFolderFull(uid, acc, 'Search', 1, [
+    { ...mkMsg(1, '三月份发票汇总', '2026-11-01T00:00:00.000Z'), from: { name: '财务小张', address: 'zhang@corp.example' } },
+    { ...mkMsg(2, '周末聚餐', '2026-11-02T00:00:00.000Z'), to: [{ name: '', address: 'team@corp.example' }] },
+    mkMsg(3, '无关邮件', '2026-11-03T00:00:00.000Z'),
+  ]);
+  // 正文命中（模拟已打开过、正文已缓存）
+  cache.putBody(uid, acc, 'Search', 3, { text: '这里是聊到报销流程的一段文字，含发票两个字', html: '' });
+
+  assert.equal(cache.searchMessages(uid, acc, '发票', { folder: 'Search' }).length, 2, '主题 + 正文都应命中');
+  const byFrom = cache.searchMessages(uid, acc, '财务小张', { folder: 'Search' });
+  assert.equal(byFrom.length, 1);
+  assert.deepEqual(byFrom[0].matched, ['from']);
+  assert.equal(cache.searchMessages(uid, acc, 'team@corp', { folder: 'Search' })[0].uid, 2, '收件人也能搜');
+  const bodyHit = cache.searchMessages(uid, acc, '报销流程', { folder: 'Search' })[0];
+  assert.deepEqual(bodyHit.matched, ['body']);
+  assert.ok(bodyHit.snippet.includes('报销流程'), bodyHit.snippet);
+
+  // 通配符按字面量处理，不会把整库都搜出来
+  assert.equal(cache.searchMessages(uid, acc, '%', { folder: 'Search' }).length, 0);
+  assert.equal(cache.searchMessages(uid, acc, '_', { folder: 'Search' }).length, 0);
+});
+
+test('搜索：未同步的文件夹不会误报命中', () => {
+  assert.equal(cache.searchMessages(uid, acc, '发票', { folder: 'NeverSynced' }).length, 0);
+  assert.equal(cache.hasAccountData(uid, acc), true);
+  assert.equal(cache.hasAccountData(uid, 'a_no_such'), false);
+});
+
 after(() => {
   cache.closeDb(uid);
   cache.closeDb('u_other');

@@ -179,6 +179,68 @@ export function folderCounts(uid) {
   return getDb(uid).prepare('SELECT account_id, path, total, unseen FROM folders').all();
 }
 
+// ---------- 搜索（Agent 用） ----------
+// 只在本地缓存里找：信封（主题/发件人/收件人）+ 已缓存过的正文。
+// 缓存空的时候调用方应先同步，这里只负责检索，不做网络动作。
+function likeEscape(s) {
+  return String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
+}
+
+export function searchMessages(uid, accountId, query, { folder = null, limit = 20 } = {}) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  limit = Math.min(Math.max(1, limit | 0), 50);
+  const pat = `%${likeEscape(q.toLowerCase())}%`;
+  const db = getDb(uid);
+  const rows = db.prepare(`
+    SELECT folder, uid, envelope, flags,
+           lower(json_extract(envelope, '$.subject'))                                   AS s,
+           lower(json_extract(envelope, '$.from.name'))                                 AS fn,
+           lower(json_extract(envelope, '$.from.address'))                              AS fa,
+           lower(json_extract(envelope, '$.to'))                                        AS t,
+           lower(coalesce(json_extract(body, '$.text'), ''))                             AS b
+    FROM messages
+    WHERE account_id = ?
+      AND (? IS NULL OR folder = ?)
+      AND ( lower(json_extract(envelope, '$.subject')) LIKE ? ESCAPE '\\'
+         OR lower(json_extract(envelope, '$.from.name')) LIKE ? ESCAPE '\\'
+         OR lower(json_extract(envelope, '$.from.address')) LIKE ? ESCAPE '\\'
+         OR lower(json_extract(envelope, '$.to')) LIKE ? ESCAPE '\\'
+         OR lower(coalesce(json_extract(body, '$.text'), '')) LIKE ? ESCAPE '\\' )
+    ORDER BY COALESCE(json_extract(envelope, '$.date'), '') DESC, uid DESC
+    LIMIT ?
+  `).all(accountId, folder, folder, pat, pat, pat, pat, pat, limit);
+
+  return rows.map((r) => {
+    const matched = [];
+    if ((r.s || '').includes(q.toLowerCase())) matched.push('subject');
+    if ((r.fn || '').includes(q.toLowerCase()) || (r.fa || '').includes(q.toLowerCase())) matched.push('from');
+    if ((r.t || '').includes(q.toLowerCase())) matched.push('to');
+    if ((r.b || '').includes(q.toLowerCase())) matched.push('body');
+    const out = {
+      folder: r.folder,
+      uid: r.uid,
+      ...JSON.parse(r.envelope),
+      flags: JSON.parse(r.flags),
+      matched,
+    };
+    if (matched.includes('body')) {
+      // 正文命中时给一句上下文摘录，免得 agent 还要逐封打开确认
+      const text = r.b;
+      const i = text.indexOf(q.toLowerCase());
+      const from = Math.max(0, i - 40);
+      out.snippet = `${from > 0 ? '…' : ''}${text.slice(from, i + q.length + 60).replace(/\s+/g, ' ').trim()}`;
+    }
+    return out;
+  });
+}
+
+// 该账号是否已经建过索引（没建过就别告诉用户「没搜到」）
+export function hasAccountData(uid, accountId) {
+  const row = getDb(uid).prepare('SELECT COUNT(*) AS n FROM messages WHERE account_id = ?').get(accountId);
+  return (row?.n || 0) > 0;
+}
+
 // ---------- 正文 ----------
 export function getBody(uid, accountId, folderPath, messageUid) {
   const row = getDb(uid).prepare(

@@ -228,9 +228,9 @@ ok('initialized 通知被接受', r.status >= 200 && r.status < 300, String(r.st
 r = await rpcCall(readToken, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
 const tools = r.data?.result?.tools || [];
 const names = tools.map((t) => t.name).sort();
-ok('工具数量 11', tools.length === 11, `${tools.length}: ${names.join(',')}`);
+ok('工具数量 12', tools.length === 12, `${tools.length}: ${names.join(',')}`);
 const expect = ['create_folder', 'delete_messages', 'list_accounts', 'list_folders', 'list_messages',
-  'move_messages', 'read_message', 'reply_message', 'save_draft', 'send_message', 'set_flags'];
+  'move_messages', 'read_message', 'reply_message', 'save_draft', 'search_messages', 'send_message', 'set_flags'];
 ok('工具名齐全', expect.every((n) => names.includes(n)), names.join(','));
 ok('每个工具有描述', tools.every((t) => t.description && t.description.length > 8), '');
 ok('未越权：没有账号/密码/令牌管理类工具',
@@ -250,6 +250,11 @@ ok('错误里说明原因', /找不到账号|还没有添加/.test(r.data?.resul
 r = await callTool(readToken, 'set_flags', { uids: [1], action: 'read' });
 ok('只读令牌写操作被拒', r.data?.result?.isError === true, '');
 ok('拒绝文案点明缺哪个权限', /整理邮件/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+
+r = await callTool(readToken, 'search_messages', { query: '发票' });
+ok('search_messages 是只读工具，可用', r.status === 200 && !!r.data?.result, JSON.stringify(r.data).slice(0, 120));
+ok('无账号时搜索给可读错误', r.data?.result?.isError === true
+  && /还没有添加任何邮箱账号/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
 
 r = await callTool(readToken, 'send_message', { to: ['a@b.com'], subject: 'x', text: 'y' });
 ok('只读令牌发信被拒', r.data?.result?.isError === true, '');
