@@ -286,8 +286,8 @@
           </template>
           <div class="bulk" v-else>
             <span class="bulk-n">已选 <b>{{ selCount }}</b> 封</span>
-            <button class="bulk-btn" @click="batchRead(true)" title="标记为已读"><svg class="i"><use href="#i-mail"/></svg><span>已读</span></button>
-            <button class="bulk-btn" @click="batchRead(false)" title="标记为未读"><svg class="i" style="fill:currentColor;stroke:none"><use href="#i-unread-dot"/></svg><span>未读</span></button>
+            <!-- 一个按钮做状态反转：选中有未读 → 全部标为已读；全是已读 → 标为未读 -->
+            <button class="bulk-btn" @click="batchRead(selHasUnread)" :title="selHasUnread ? '所选含未读，全部标为已读' : '所选已全部读过，标为未读'"><svg class="i" v-if="selHasUnread"><use href="#i-mail"/></svg><svg class="i" v-else style="fill:currentColor;stroke:none"><use href="#i-unread-dot"/></svg><span>{{ selHasUnread ? '已读' : '未读' }}</span></button>
             <button class="bulk-btn" @click="batchStar(true)" title="加星标"><svg class="i"><use href="#i-star"/></svg><span>标星</span></button>
             <button class="bulk-btn" @click="batchArchive()" title="归档"><svg class="i"><use href="#i-archive"/></svg><span>归档</span></button>
             <button class="bulk-btn danger" @click="batchRemove()" title="删除所选"><svg class="i"><use href="#i-trash"/></svg><span>删除</span></button>
@@ -792,10 +792,10 @@
       <button class="ctx-item" @click="ctxAct(m=>{reply(m,'forward')})">
         <svg class="i"><use href="#i-forward"/></svg><span>转发</span></button>
       <div class="ctx-sep"></div>
-      <button class="ctx-item" @click="ctxAct(()=>batchRead(true))">
-        <svg class="i"><use href="#i-mail"/></svg><span>标记为已读</span></button>
-      <button class="ctx-item" @click="ctxAct(()=>batchRead(false))">
-        <svg class="i" style="fill:currentColor;stroke:none"><use href="#i-unread-dot"/></svg><span>标记为未读</span></button>
+      <button class="ctx-item" @click="ctxAct(()=>batchRead(selHasUnread))">
+        <svg class="i" v-if="selHasUnread"><use href="#i-mail"/></svg>
+        <svg class="i" v-else style="fill:currentColor;stroke:none"><use href="#i-unread-dot"/></svg>
+        <span>{{ selHasUnread ? '标记为已读' : '标记为未读' }}</span></button>
       <button class="ctx-item" @click="ctxAct(()=>batchStar(true))">
         <svg class="i"><use href="#i-star"/></svg><span>标为星标</span></button>
       <div class="ctx-sep"></div>
