@@ -9,6 +9,8 @@ import {
   listFolders, listMessages, getMessage, setFlags, moveMessages,
   createFolder, sendMail, saveDraft, unseenCounts,
 } from './mail.js';
+import * as cache from './cache.js';
+import * as idle from './idle.js';
 
 const BODY_LIMIT = 8000;   // 正文字符上限：再长会一次性灌满模型上下文
 const MAX_UIDS = 200;      // 单次批量操作上限：防止 agent 误传一整页
@@ -69,6 +71,18 @@ function normUids(uids) {
 
 function normFolder(f) {
   return String(f || 'INBOX').trim() || 'INBOX';
+}
+
+// 发信后让「已发送」缓存追上服务器（sendMail 已把原信 APPEND 到 Sent，本地缓存缺这封）
+function syncSentCache(uid, accountId) {
+  try {
+    listFolders(uid, accountId)
+      .then((folders) => {
+        const sent = folders.find((f) => f.special === '\\Sent');
+        if (sent) return idle.resyncFolder(uid, accountId, sent.path);
+      })
+      .catch(() => { /* 下次访问兜底 */ });
+  } catch { /* 缓存回写失败不影响发信结果 */ }
 }
 
 // 统一包装：scope 拦截 → 执行 → 异常转人话。任何工具都不允许绕过这一层。
@@ -230,6 +244,8 @@ export function registerTools(server, ctx) {
         unstar: { remove: ['\\Flagged'] },
       };
       await setFlags(uid, acc.id, dir, list, map[action]);
+      // 缓存回写：MCP 改了旗标，网页端读缓存不能再看到旧状态
+      try { cache.updateFlags(uid, acc.id, dir, list, map[action]); } catch { /* 缓存回写失败不影响主流程 */ }
       const label = { read: '标为已读', unread: '标为未读', star: '加星标', unstar: '取消星标' }[action];
       return text(`已把 ${list.length} 封邮件${label}（${acc.email} / ${dir}）。`);
     },
@@ -253,6 +269,11 @@ export function registerTools(server, ctx) {
       const list = normUids(uids);
       const target = String(dest).trim();
       await moveMessages(uid, acc.id, dir, list, target);
+      // 缓存回写：源夹摘除；目的夹 UID 由服务器重新分配，推算不了，异步重同步
+      try {
+        cache.moveUids(uid, acc.id, dir, list);
+        idle.resyncFolder(uid, acc.id, target).catch(() => { /* 下次访问兜底 */ });
+      } catch { /* 缓存回写失败不影响主流程 */ }
       return text(`已把 ${list.length} 封邮件从「${dir}」移动到「${target}」（${acc.email}）。`);
     },
   });
@@ -279,6 +300,11 @@ export function registerTools(server, ctx) {
         throw new Error('这些邮件已经在「已删除」里了。为避免误删，Agent 不执行永久删除，请让用户到网页端手动清空');
       }
       await moveMessages(uid, acc.id, dir, list, trash.path);
+      // 缓存回写（同 move_messages）：源夹摘除，垃圾箱异步重同步
+      try {
+        cache.moveUids(uid, acc.id, dir, list);
+        idle.resyncFolder(uid, acc.id, trash.path).catch(() => { /* 下次访问兜底 */ });
+      } catch { /* 缓存回写失败不影响主流程 */ }
       return text(`已把 ${list.length} 封邮件移到「${trash.path}」（${acc.email}），可在网页端恢复或清空。`);
     },
   });
@@ -320,6 +346,7 @@ export function registerTools(server, ctx) {
     run: async ({ account, to, cc, subject, text: body }) => {
       const acc = resolveAccount(uid, account);
       const result = await sendMail(uid, acc, { to, cc: cc || [], subject, text: body });
+      syncSentCache(uid, acc.id);
       const rejected = (result.rejected || []).filter(Boolean);
       return text(`已通过「${acc.email}」发送给 ${to.join(', ')}。${rejected.length ? `\n被拒收：${rejected.join(', ')}` : ''}`);
     },
@@ -353,6 +380,7 @@ export function registerTools(server, ctx) {
         inReplyTo: orig.messageId || undefined,
         references: references || undefined,
       });
+      syncSentCache(uid, acc.id);
       return text(`已回复「${orig.subject}」（发给 ${to}${cc.length ? `，抄送 ${cc.join(', ')}` : ''}）。`);
     },
   });
