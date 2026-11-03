@@ -313,8 +313,8 @@
             <div class="mid">
               <div class="l1">
                 <span class="from">{{ m.from.name || m.from.address || '(未知发件人)' }}</span>
-                <!-- 汇总视图里只靠 6px 色点分不清邮件来自哪个账号，改成带账号名的胶囊 -->
-                <span class="acct-tag" v-if="activeAccount==='all'" :title="m.accountEmail || ''"><i :style="{background:m._color}"></i><span>{{ acctTag(m) }}</span></span>
+                <!-- 汇总视图用固定账号色区分来源；鼠标悬停色点可看完整邮箱地址 -->
+                <span class="acct-tag" v-if="activeAccount==='all'" :title="m.accountEmail || ''"><i :style="{background:m._color}"></i></span>
               </div>
               <span class="subj">{{ m.subject }}</span>
               <span class="preview" v-if="m._preview">{{ m._preview }}</span>

@@ -492,10 +492,6 @@ function bulkCtx(messages, opts = {}) {
   };
   ok('全部收件箱：只累加各账号 INBOX 未读', C.allUnread.call(ctx) === 8, String(C.allUnread.call(ctx)));
 
-  ok('来源账号标签：取账号显示名称', M.acctTag.call(ctx, { accountId: 'a2', accountEmail: 'x@qq.com' }) === 'QQ 邮箱');
-  ok('来源账号标签：无显示名称时退回邮箱', M.acctTag.call({ accounts: [] }, { accountId: 'zz', accountEmail: 'x@qq.com' }) === 'x@qq.com');
-  ok('来源账号标签：都没有时给空串', M.acctTag.call({ accounts: [] }, { accountId: 'zz' }) === '');
-
   // 单账号模式下点汇总入口（回归：以前汇总视图没有常驻入口，点进某个账号就回不去）
   const one = { activeAccount: 'a1', allFolder: null, pickAccount(id) { one.jumped = id; }, loadMessages() { one.reloaded = true; } };
   M.pickAllInbox.call(one);
