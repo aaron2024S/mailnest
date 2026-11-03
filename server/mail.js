@@ -140,13 +140,48 @@ async function withClient(uid, accountId, fn) {
   }
 }
 
-async function withMailbox(uid, accountId, folder, fn) {
+// 每个账号只有一条读写连接，所有操作靠 getMailboxLock 排他排队 —— 没有超时的话，
+// 一个慢请求（大文件夹直拉、半死连接）就会把这个账号之后的所有操作永久堵在队列里：
+// 用户看到的就是「切了文件夹没反应」。这两个上限就是那道保险。
+const LOCK_TIMEOUT = Number(process.env.MAILNEST_LOCK_TIMEOUT_MS) || 20000;
+const OP_TIMEOUT = Number(process.env.MAILNEST_OP_TIMEOUT_MS) || 60000;
+
+async function withMailbox(uid, accountId, folder, fn, { lockMs = LOCK_TIMEOUT, opMs = OP_TIMEOUT } = {}) {
   return withClient(uid, accountId, async ({ client }) => {
-    const lock = await client.getMailboxLock(folder);
+    let lock;
+    let timer = null;
     try {
-      return await fn(client, lock);
+      lock = await Promise.race([
+        client.getMailboxLock(folder),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(
+            new Error('邮箱服务器响应太慢，请稍后重试'), { status: 503, code: 'LOCK_TIMEOUT' },
+          )), lockMs);
+        }),
+      ]);
+    } catch (e) {
+      clearTimeout(timer);
+      // 等不到锁说明连接上还有别的操作卡着；弃掉这条连接让下一个请求重建，
+      // 否则排队的请求会继续堵（重连比等待便宜）
+      if (e.code === 'LOCK_TIMEOUT') await dropConnections(uid, accountId);
+      throw e;
+    }
+    clearTimeout(timer);
+    try {
+      const op = fn(client, lock);
+      const guard = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(
+          new Error('邮箱服务器响应超时，请重试（已重置连接）'), { status: 504, code: 'OP_TIMEOUT' },
+        )), opMs);
+      });
+      return await Promise.race([op, guard]);
+    } catch (e) {
+      // 操作超时 = 连接上还挂着一个不返回的命令，内部队列已经不可信，弃掉重建
+      if (e.code === 'OP_TIMEOUT') await dropConnections(uid, accountId);
+      throw e;
     } finally {
-      lock.release();
+      clearTimeout(timer);
+      try { lock.release(); } catch { /* 连接已重置时释放会失败，忽略 */ }
     }
   });
 }
@@ -466,10 +501,11 @@ export async function markAllRead(uid, accountId, folder) {
 // 只允许对垃圾箱类文件夹调用；special 由路由层用 listFolders 校验
 export async function emptyFolder(uid, accountId, folder) {
   try {
+    // 几千封的 EXPUNGE 几十秒很正常，别用默认 60s 上限把它误杀
     return await withMailbox(uid, accountId, folder, async (client) => {
       await client.messageDelete('1:*', { uid: true });
       return { ok: true };
-    });
+    }, { opMs: 10 * 60_000 });
   } catch (e) {
     throw imapError(e);
   }
@@ -549,8 +585,19 @@ export async function sendMail(uid, account, opts) {
     const sent = folders.find((f) => f.specialUse === '\\Sent');
     if (sent) {
       const raw = info.message; // nodemailer 返回原始流缓冲
-      const lock = await client.getMailboxLock(sent.path);
-      try { await client.append(sent.path, raw, ['\\Seen']); } finally { lock.release(); }
+      // 归档只是锦上添花：锁等不到就放弃，绝不能让"信已经发出去了"的请求挂在这里
+      // （挂住 → 用户以为没发出 → 重发 → 对方收到两封）
+      let timer = null;
+      const lock = await Promise.race([
+        client.getMailboxLock(sent.path),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error('归档超时'), { code: 'SKIP_ARCHIVE' })), 5000);
+        }),
+      ]).catch((e) => { if (e.code === 'SKIP_ARCHIVE') return null; throw e; });
+      clearTimeout(timer);
+      if (lock) {
+        try { await client.append(sent.path, raw, ['\\Seen']); } finally { lock.release(); }
+      }
     }
   } catch { /* 已发送归档失败静默处理 */ }
   return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected };

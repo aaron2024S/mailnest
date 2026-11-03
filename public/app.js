@@ -46,6 +46,7 @@ const app = createApp({
       foldersByAccount: {},   // aid -> [folder]
       unreadMap: {},          // `${aid}|${path}` -> count
       loadErrors: [],         // 本次列表加载失败的账号名；非空时空态区显示重试按钮
+      listError: null,        // 单夹列表加载失败的原因；非空时列表顶部显示「下方仍是上次内容」
       indexing: null,         // {done,total} 首次全量建索引进度（SSE 推送）
       prefetch: null,         // {done,pending,folder} 后台把正文缓存到本地的进度（SSE 推送）
       prefetchErr: null,      // 预热中断原因（SSE prefetch-error），恢复后自动清掉
@@ -543,7 +544,7 @@ const app = createApp({
       if (append) this.loadingMore = true; else this.loadingMessages = true;
       // 代际号：快速切换文件夹/账号时，慢的旧响应不允许覆盖新请求的结果
       const gen = (this._loadGen = (this._loadGen || 0) + 1);
-      if (!append) this.loadErrors = [];
+      if (!append) { this.loadErrors = []; this.listError = null; }
       let progressive = false; // 汇总视图自行管理 loading 收尾（分账号到达），跳过统一 finally
       try {
         if (this.activeAccount === 'all' && !this.allFolder) {
@@ -602,10 +603,14 @@ const app = createApp({
           const rows = d.messages.map((m) => ({ ...m, accountId: aid, folder: m.folder || folder, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
           this.messages = append ? this.messages.concat(rows) : rows;
           this.total = d.total;
+          this.listError = null;
         }
         if (!append && !progressive) this.prefetchBodies(); // 后台预取正文：切邮件时秒开（尤其 outlook）
       } catch (e) {
         if (append) this.page--; // 追加失败回退页码，下次滚动还能重试
+        // 非追加失败时旧列表会留在屏幕上 —— 必须明说「没换成」，否则用户只看到
+        // 点了文件夹没反应（切夹卡住最直观的表现就是这个）
+        if (!append && !e.handled) this.listError = e.message || '加载失败';
         if (!e.handled) this.toast(e.message, 'error');
       } finally {
         if (!progressive) this.loadingMessages = false; // 汇总视图在分账号 finally 里收
@@ -616,6 +621,7 @@ const app = createApp({
     // 列表加载失败后的手动重试（自动补试也会走这里）
     retryLoad() {
       this.loadErrors = [];
+      this.listError = null;
       this.page = 1;
       this.loadMessages();
     },

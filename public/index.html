@@ -310,9 +310,14 @@
         </div>
         <div class="idx-bar" v-if="indexing"><span class="spin"></span> 正在建立索引 {{ indexing.done }}/{{ indexing.total }}…完成后所有文件夹秒开</div>
         <!-- 旧列表还在时也要让用户知道新文件夹正在加载，否则看起来像"切了没反应" -->
-        <div class="idx-bar" v-if="loadingMessages && filteredMessages.length && !indexing"><span class="spin"></span> 正在加载 {{ listTitle }}…</div>
+        <div class="idx-bar" v-if="loadingMessages && filteredMessages.length && !indexing && !listError"><span class="spin"></span> 正在加载 {{ listTitle }}…</div>
+        <!-- 加载失败：旧列表还留在屏幕上，必须明确告诉用户"下面这些不是这个文件夹的" -->
+        <div class="idx-bar is-err" v-if="listError && !loadingMessages">
+          ⚠ {{ listError }}　下方仍是上次的内容
+          <button class="mini-btn" style="margin-left:auto" @click="retryLoad" title="重试">重试</button>
+        </div>
         <div class="rows" :class="{'has-sel': selCount>0}" @scroll="onRowsScroll">
-          <div class="row" v-for="m in filteredMessages" :key="m.uid" draggable="true"
+          <div class="row" v-for="m in filteredMessages" :key="m.accountId + '|' + m.folder + '|' + m.uid" draggable="true"
                :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
                         'is-sel': isSel(m),
                         'is-dragging': dragMsg && dragMsg.uid===m.uid && dragMsg.accountId===m.accountId}"
