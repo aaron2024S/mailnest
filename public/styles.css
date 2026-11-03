@@ -540,9 +540,6 @@ body.col-resizing .col-resizer::after{background:var(--accent);}
 .nav-all .count{font-weight:600;}
 
 /* 汇总视图里每行标注来源账号。色点只做识别，文字靠 CSS 截断（列表栏可拖到 300px） */
-/* 来源账号只留一个色点（悬停有 title 显示邮箱）；8px 比原来的 5px 大一圈，肉眼可辨 */
-.acct-tag{display:inline-flex;align-items:center;flex:0 0 auto;width:9px;height:9px;}
-.acct-tag i{width:9px;height:9px;border-radius:50%;flex:none;}
 /* 发件人才是可收缩的那个，否则长发件人会把这个标签挤出列表 */
 .row .from{flex:0 1 auto;min-width:0;}
 
