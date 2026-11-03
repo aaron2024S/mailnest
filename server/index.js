@@ -22,6 +22,8 @@ import { createToken, listTokens, revokeToken, TOKEN_LIMIT } from './tokens.js';
 import { mountMcp } from './mcp.js';
 import * as cache from './cache.js';
 import * as idle from './idle.js';
+import * as prefetch from './prefetch.js';
+import * as attachments from './attachments.js';
 
 // 版本号唯一来源：package.json（登录页、客户端 ID 等处都从这里取，避免多处手改漏掉）
 const APP_VERSION = (() => {
@@ -117,11 +119,28 @@ idle.setEventHandler((ev) => {
     count: ev.count,
     unseen: ev.unseen,
   });
+  // 新邮件正文还在服务器上，立刻叫醒预热队列，别等它那 10 分钟的空闲轮询
+  prefetch.kick(ev.uid, ev.accountId);
+});
+
+// 预热进度 → SSE（前端用它显示「本地已缓存 N 封」，也让用户知道后台在干活）
+prefetch.setEventHandler((ev) => {
+  if (ev.type !== 'prefetch') return;
+  sendToUser(ev.uid, {
+    type: 'prefetch', accountId: ev.accountId, folder: ev.folder, done: ev.done, pending: ev.pending,
+    finished: !!ev.finished,
+  });
 });
 
 function ensureUserWatchers(uid) {
+  // 老库升级：先把已有信封灌进全文索引（只在 fts_keys 为空时做一次）
+  try {
+    const n = cache.rebuildFts(uid);
+    if (n) console.log(`[mailnest] 全文索引回填 ${n} 封`);
+  } catch (e) { console.log(`[mailnest] 全文索引回填失败：${e?.message || e}`); }
   for (const a of listAccounts(uid)) {
     idle.ensureWatcher(uid, a.id).catch(() => { /* runWatcher 内部兜底 */ });
+    prefetch.ensurePrefetch(uid, a.id);
   }
 }
 
@@ -241,6 +260,8 @@ api.post('/logout', guard, (req, res) => {
 
 api.get('/me', guard, (req, res) => {
   const profile = readProfile(req.user.id);
+  // 兜底：容器重启后如果没走到启动恢复，用户打开页面就把监听/预热接上（幂等）
+  ensureUserWatchers(req.user.id);
   res.json({ user: publicUser(req.user), profile });
 });
 
@@ -345,6 +366,7 @@ api.post('/accounts', guard, async (req, res) => {
     saveAccounts(req.user.id, accounts);
     audit(req.user.id, 'account-add', acc.email, clientIp(req));
     idle.ensureWatcher(req.user.id, acc.id).catch(() => { /* 内部兜底 */ });
+    prefetch.ensurePrefetch(req.user.id, acc.id);
     res.json({ accounts: accounts.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
 });
@@ -366,6 +388,7 @@ api.patch('/accounts/:id', guard, async (req, res) => {
     // 授权码可能变了：重启监听连接，用新凭据重连
     await idle.stopWatcher(req.user.id, acc.id);
     idle.ensureWatcher(req.user.id, acc.id).catch(() => { /* 内部兜底 */ });
+    prefetch.ensurePrefetch(req.user.id, acc.id);
     res.json({ accounts: accounts.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
 });
@@ -378,7 +401,9 @@ api.delete('/accounts/:id', guard, async (req, res) => {
     saveAccounts(req.user.id, next);
     await dropConnections(req.user.id, req.params.id);
     await idle.stopWatcher(req.user.id, req.params.id);
+    prefetch.stopPrefetch(req.user.id, req.params.id);
     cache.dropAccount(req.user.id, req.params.id);
+    attachments.dropAccount(req.user.id, req.params.id);
     audit(req.user.id, 'account-remove', req.params.id, clientIp(req));
     res.json({ accounts: next.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
@@ -451,6 +476,7 @@ api.post('/oauth/outlook/poll', guard, async (req, res) => {
     saveAccounts(req.user.id, accounts);
     audit(req.user.id, 'account-add', `outlook:${email}`, clientIp(req));
     idle.ensureWatcher(req.user.id, acc.id).catch(() => { /* 内部兜底 */ });
+    prefetch.ensurePrefetch(req.user.id, acc.id);
     res.json({ done: true, email, accounts: accounts.map(sanitizeAccount) });
   } catch (e) { fail(res, e); }
 });
@@ -536,10 +562,54 @@ api.get('/message', guard, async (req, res) => {
 
 api.get('/attachment', guard, async (req, res) => {
   try {
+    const inline = req.query.inline === '1';
     const att = await getAttachment(req.user.id, String(req.query.account || ''), String(req.query.folder || ''), String(req.query.uid || ''), Number(req.query.idx) | 0);
     res.setHeader('Content-Type', att.contentType);
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(att.filename)}`);
+    // 正文里的内嵌图片必须 inline，否则浏览器会当下载处理、<img> 直接裂图
+    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(att.filename)}`);
+    // 附件内容跟着 uid 走、不会变，让浏览器也存一份
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
     res.send(att.content);
+  } catch (e) { fail(res, e); }
+});
+
+// ---------- 本地缓存概览 / 清理 ----------
+api.get('/cache', guard, (req, res) => {
+  try {
+    const uid = req.user.id;
+    const accounts = cache.stats(uid);
+    const att = attachments.stats(uid);
+    let dbBytes = 0;
+    for (const f of ['cache.db', 'cache.db-wal']) {
+      try { dbBytes += fs.statSync(path.join(userDir(uid), f)).size; } catch { /* 文件不存在 */ }
+    }
+    res.json({
+      accounts,
+      dbBytes,
+      attachments: att,
+      prefetch: prefetch.status(uid),
+      totalBytes: dbBytes + att.bytes,
+    });
+  } catch (e) { fail(res, e); }
+});
+
+api.delete('/cache', guard, (req, res) => {
+  try {
+    const scope = String(req.query.scope || 'bodies');
+    const account = req.query.account ? String(req.query.account) : null;
+    let cleared = 0;
+    if (scope === 'bodies' || scope === 'all') cleared = cache.clearBodies(req.user.id, account);
+    if (scope === 'attachments' || scope === 'all') {
+      if (account) attachments.dropAccount(req.user.id, account); else attachments.clearAll(req.user.id);
+    }
+    if (scope === 'all') {
+      // 清完重新排队：下一次打开或后台预热会重新填，不用重启
+      for (const a of listAccounts(req.user.id)) {
+        if (!account || a.id === account) prefetch.kick(req.user.id, a.id);
+      }
+    }
+    audit(req.user.id, 'cache-clear', `scope=${scope} cleared=${cleared}`, clientIp(req));
+    res.json({ ok: true, cleared });
   } catch (e) { fail(res, e); }
 });
 
@@ -582,6 +652,7 @@ api.post('/delete', guard, async (req, res) => {
     if (!Array.isArray(uids) || !uids.length) return res.status(400).json({ error: '没有选择邮件' });
     const out = await deleteMessages(req.user.id, String(account), String(folder), uids);
     try { cache.removeUids(req.user.id, String(account), String(folder), uids); } catch { /* 缓存回写失败不影响主流程 */ }
+    for (const u of uids) attachments.dropMessage(req.user.id, String(account), String(folder), u);
     res.json(out);
   } catch (e) { fail(res, e); }
 });
@@ -630,6 +701,7 @@ api.post('/folders/empty', guard, async (req, res) => {
     audit(req.user.id, 'folder-empty', `${acc.email}/${folder}`, clientIp(req));
     // 缓存先清、立即响应：界面马上变空，真正的 IMAP 删除在后台跑
     try { cache.clearFolder(req.user.id, acc.id, String(folder)); } catch { /* 缓存回写失败不影响主流程 */ }
+    attachments.dropFolder(req.user.id, acc.id, String(folder));
     res.json({ ok: true, queued: true, count: total });
     emptyInBackground(req.user.id, acc.id, String(folder), total);
   } catch (e) { fail(res, e); }
@@ -644,6 +716,7 @@ api.delete('/folders', guard, async (req, res) => {
     audit(req.user.id, 'folder-delete', `${acc.email}/${folder}`, clientIp(req));
     const out = await deleteFolder(req.user.id, acc.id, String(folder));
     try { cache.dropFolder(req.user.id, acc.id, String(folder)); } catch { /* ignore */ }
+    attachments.dropFolder(req.user.id, acc.id, String(folder));
     try { cache.putFolders(req.user.id, acc.id, await listFolders(req.user.id, acc.id)); } catch { /* 清单刷新失败下次访问再试 */ }
     res.json(out);
   } catch (e) { fail(res, e); }
@@ -799,6 +872,14 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 
 const server = app.listen(PORT, HOST, () => {
   console.log(`[mailnest] listening on http://${HOST}:${PORT}  data=${process.env.MAILNEST_DATA || 'data/'}`);
+  // 重启后自动接上监听与正文预热：session cookie 有 14 天，用户不会因为重启而「重新登录」，
+  // 不主动恢复的话 IDLE 要等下一次打开页面才启动，后台缓存也就一直不跑
+  setTimeout(() => {
+    for (const u of system().users || []) {
+      if (u.disabled) continue;
+      try { ensureUserWatchers(u.id); } catch { /* 单个用户异常不影响其他 */ }
+    }
+  }, 800).unref();
 });
 
 // ---------- 优雅退出 ----------
@@ -817,6 +898,7 @@ function shutdown(signal) {
     sseClients.clear();
   } catch { /* ignore */ }
   try { idle.closeAll(); } catch { /* ignore */ }
+  try { prefetch.closeAll(); } catch { /* ignore */ }
   try { cache.closeAll(); } catch { /* ignore */ }
   try { server.close(done); } catch { done(); }
 }

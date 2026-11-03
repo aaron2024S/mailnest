@@ -5,6 +5,7 @@ import { simpleParser } from 'mailparser';
 import sanitizeHtml from 'sanitize-html';
 import { findAccount, listAccounts, saveAccounts } from './store.js';
 import { refreshAccessToken } from './oauth.js';
+import * as attachments from './attachments.js';
 
 // 版本号唯一来源：package.json。IMAP 握手要把版本报给服务端（网易系会校验客户端 ID），
 // 以前这里硬编码，bump 版本时必漏一处 —— 改成读文件。
@@ -319,6 +320,66 @@ function cleanHtml(html) {
   });
 }
 
+// 把 mime 里的 cid: 引用换成本地附件地址 —— 否则阅读区里的内嵌图片（签名 logo、
+// 表格截图、邮件模板图）全是裂图，而 Outlook 里它们是直接显示的。
+// 解析时替换一次即写进正文缓存，之后每次都命中本地。
+function inlineCid(html, list, ctx) {
+  if (!html || !list || !list.length) return html;
+  const map = new Map();
+  for (const a of list) {
+    const k = attachments.normCid(a.cid);
+    if (k) map.set(k, a.id);
+  }
+  if (!map.size) return html;
+  return html.replace(/cid:([^"'\s>)]+)/gi, (whole, ref) => {
+    let decoded = ref;
+    try { decoded = decodeURIComponent(ref); } catch { /* 保持原样 */ }
+    const idx = map.get(attachments.normCid(ref)) ?? map.get(attachments.normCid(decoded));
+    if (idx == null) return whole;
+    return attachments.attachUrl(ctx.accountId, ctx.folder, ctx.uid, idx, true);
+  });
+}
+
+// 解析结果 → 缓存 / 接口的公共结构。打开邮件与后台预热共用这一份，避免两处写法漂移。
+export function extractMessage(parsed, ctx) {
+  const attachments = (parsed.attachments || []).map((a, i) => ({
+    id: i,
+    filename: a.filename || `attachment-${i + 1}`,
+    contentType: a.contentType || 'application/octet-stream',
+    size: a.size ?? (a.content ? a.content.length : 0),
+    cid: a.cid || null,
+  }));
+  let html = null;
+  if (parsed.html) html = cleanHtml(typeof parsed.html === 'string' ? parsed.html : parsed.html.toString());
+  html = inlineCid(html, attachments, ctx);
+  return {
+    from: parsed.from ? { name: '', address: parsed.from.value?.[0]?.address || '', text: parsed.from?.text || '' } : null,
+    to: (parsed.to?.value || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
+    cc: (parsed.cc?.value || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
+    subject: parsed.subject || '(无主题)',
+    date: parsed.date ? parsed.date.toISOString() : null,
+    messageId: parsed.messageId || '',
+    inReplyTo: parsed.inReplyTo || null,
+    references: parsed.references || null,
+    text: parsed.text || '',
+    html,
+    attachments,
+  };
+}
+
+// 附件本体顺手落盘：源码已经整封下载解析过了，写文件几乎不额外花时间
+export function cacheAttachments(uid, accountId, folder, messageUid, parsed) {
+  const raw = (parsed.attachments || []).map((a, i) => ({
+    id: i,
+    filename: a.filename || `attachment-${i + 1}`,
+    contentType: a.contentType || 'application/octet-stream',
+    size: a.size ?? (a.content ? a.content.length : 0),
+    cid: a.cid || null,
+    content: a.content,
+  }));
+  if (raw.length) attachments.saveAll(uid, accountId, folder, messageUid, raw).catch(() => {});
+}
+
 export async function getMessage(uid, accountId, folder, messageUid) {
   try {
     return await withMailbox(uid, accountId, folder, async (client) => {
@@ -326,32 +387,8 @@ export async function getMessage(uid, accountId, folder, messageUid) {
       const raw = await client.fetchOne(String(messageUid), { uid: true, source: true, flags: true }, { uid: true });
       if (!raw) throw Object.assign(new Error('邮件不存在'), { status: 404 });
       const parsed = await simpleParser(raw.source);
-      const attachments = (parsed.attachments || []).map((a, i) => ({
-        id: i,
-        filename: a.filename || `attachment-${i + 1}`,
-        contentType: a.contentType || 'application/octet-stream',
-        size: a.size ?? (a.content ? a.content.length : 0),
-        cid: a.cid || null,
-      }));
-      let html = null;
-      if (parsed.html) {
-        html = cleanHtml(typeof parsed.html === 'string' ? parsed.html : parsed.html.toString());
-      }
-      return {
-        uid: Number(messageUid),
-        from: parsed.from ? { name: parsed.from.text ? '' : '', address: parsed.from.value?.[0]?.address || '', text: parsed.from?.text || '' } : null,
-        to: (parsed.to?.value || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
-        cc: (parsed.cc?.value || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
-        subject: parsed.subject || '(无主题)',
-        date: parsed.date ? parsed.date.toISOString() : null,
-        messageId: parsed.messageId || '',
-        inReplyTo: parsed.inReplyTo || null,
-        references: parsed.references || null,
-        text: parsed.text || '',
-        html,
-        attachments,
-        flags: [...raw.flags],
-      };
+      cacheAttachments(uid, accountId, folder, messageUid, parsed);
+      return { uid: Number(messageUid), ...extractMessage(parsed, { accountId, folder, uid: messageUid }), flags: [...raw.flags] };
     });
   } catch (e) {
     if (e.status) throw e;
@@ -360,11 +397,15 @@ export async function getMessage(uid, accountId, folder, messageUid) {
 }
 
 export async function getAttachment(uid, accountId, folder, messageUid, attachmentIndex) {
-  // 通过完整源码解析并返回指定附件（数量在百级以内都可接受）
+  // 先看本地：附件跟着正文一起落过盘，绝大多数点开是纯磁盘读
+  const hit = attachments.get(uid, accountId, folder, messageUid, attachmentIndex);
+  if (hit) return hit;
+  // 未命中（缓存被清过 / 只缓存了正文）：整封源码取回解析
   return withMailbox(uid, accountId, folder, async (client) => {
     const raw = await client.fetchOne(String(messageUid), { uid: true, source: true }, { uid: true });
     if (!raw) throw Object.assign(new Error('邮件不存在'), { status: 404 });
     const parsed = await simpleParser(raw.source);
+    cacheAttachments(uid, accountId, folder, messageUid, parsed);
     const att = (parsed.attachments || [])[attachmentIndex];
     if (!att) throw Object.assign(new Error('附件不存在'), { status: 404 });
     return {

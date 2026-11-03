@@ -303,6 +303,7 @@
           </div>
         </div>
         <div class="idx-bar" v-if="indexing"><span class="spin"></span> 正在建立索引 {{ indexing.done }}/{{ indexing.total }}…完成后所有文件夹秒开</div>
+        <div class="idx-bar" v-if="prefetch"><span class="spin"></span> 正在缓存到本地 {{ prefetch.done }}/{{ prefetch.pending }} 封…缓存过之后切换邮件不需要等待</div>
         <div class="rows" :class="{'has-sel': selCount>0}" @scroll="onRowsScroll">
           <div class="row" v-for="m in filteredMessages" :key="m.uid" draggable="true"
                :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
@@ -506,6 +507,7 @@
           <div style="display:flex;gap:8px;margin-bottom:14px">
             <button class="btn-ghost tab-btn" :class="{'is-on':settingsTab==='accounts'}" @click="settingsTab='accounts'">邮箱账号</button>
             <button class="btn-ghost tab-btn" :class="{'is-on':settingsTab==='profile'}" @click="settingsTab='profile'">外观与安全</button>
+            <button class="btn-ghost tab-btn" :class="{'is-on':settingsTab==='cache'}" @click="openCacheTab">本地缓存</button>
             <button class="btn-ghost tab-btn" :class="{'is-on':settingsTab==='agent'}" @click="openAgentTab">Agent 接入</button>
           </div>
 
@@ -638,6 +640,33 @@
                 </div>
                 <p class="hint" v-if="addForm.message" :style="{color: addForm.ok ? 'var(--ok)' : 'var(--err)'}">{{ addForm.message }}</p>
               </template>
+            </template>
+          </template>
+
+          <template v-else-if="settingsTab==='cache'">
+            <p class="hint" style="margin:0 0 14px">
+              邮件正文和附件都保存在本机，打开时直接读本地，与邮箱服务器快慢无关。
+              清理只会删掉本地副本，服务器上的邮件不受影响。
+            </p>
+            <template v-if="cacheInfo">
+              <div class="cache-head">
+                <b>{{ fmtSize(cacheInfo.totalBytes) }}</b>
+                <span>已缓存 {{ cacheBodies }} 封正文 · {{ cacheInfo.attachments.files }} 个附件文件</span>
+              </div>
+              <div class="acct-row" v-for="c in cacheInfo.accounts" :key="c.accountId">
+                <span class="meta">
+                  <b>{{ accountLabel(c.accountId) }}</b>
+                  <span>{{ c.bodies }} / {{ c.total }} 封 · 正文 {{ fmtSize(c.bodyBytes) }}</span>
+                </span>
+              </div>
+              <p class="hint" v-if="!cacheInfo.accounts.length">还没有缓存任何邮件，打开一个文件夹就会开始。</p>
+              <p class="hint" v-if="cacheInfo.prefetch && cacheInfo.prefetch.length">
+                后台正在缓存「{{ cacheInfo.prefetch[0].folder }}」，剩下的会陆续存到本地。
+              </p>
+              <div style="display:flex;gap:8px;margin-top:16px">
+                <button class="btn-ghost" @click="clearCache('bodies')" :disabled="!cacheBodies">清理正文</button>
+                <button class="btn-ghost" @click="clearCache('all')" :disabled="!cacheInfo.totalBytes">清空全部缓存</button>
+              </div>
             </template>
           </template>
 

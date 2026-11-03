@@ -47,6 +47,9 @@ const app = createApp({
       unreadMap: {},          // `${aid}|${path}` -> count
       loadErrors: [],         // 本次列表加载失败的账号名；非空时空态区显示重试按钮
       indexing: null,         // {done,total} 首次全量建索引进度（SSE 推送）
+      prefetch: null,         // {done,pending,folder} 后台把正文缓存到本地的进度（SSE 推送）
+      cacheInfo: null,        // 设置页「本地缓存」概览
+      cacheBodies: 0,
       es: null,               // EventSource（实时推送）
       folders: [],
       activeFolder: 'INBOX',
@@ -315,6 +318,12 @@ const app = createApp({
         if (d.type === 'indexing') {
           // 建索引进度：完成（或全部夹处理完）就收掉进度条
           this.indexing = d.done >= d.total ? null : { done: d.done, total: d.total };
+          return;
+        }
+        if (d.type === 'prefetch') {
+          // 后台正文缓存进度：一批批把新邮件存到本地，完成时收起
+          if (d.finished) { this.prefetch = null; return; }
+          this.prefetch = { done: d.done, pending: d.pending, folder: d.folder };
           return;
         }
         if (d.type === 'empty-done' || d.type === 'empty-error') {
@@ -1159,6 +1168,36 @@ const app = createApp({
       this.modals.settings = true;
       this.loadOutlookConfig();
     },
+    // ---------- 本地缓存 ----------
+    // 邮件正文/附件都落本地（SQLite + 附件目录），这里只是把占用情况摊开给用户看，
+    // 并给一个「空间不够了就清掉」的出口 —— 清理不影响服务器上的邮件。
+    async openCacheTab() {
+      this.settingsTab = 'cache';
+      await this.loadCacheInfo();
+    },
+    async loadCacheInfo() {
+      try {
+        const d = await this.api('/api/cache');
+        this.cacheInfo = d;
+        this.cacheBodies = (d.accounts || []).reduce((n, c) => n + c.bodies, 0);
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    accountLabel(accountId) {
+      const a = this.accounts.find((x) => x.id === accountId);
+      return a ? a.displayName || a.email : '已移除的账号';
+    },
+    async clearCache(scope) {
+      const tip = scope === 'all'
+        ? '清空本地缓存？服务器上的邮件不会被删除，只是下次打开要重新下载。'
+        : '清理已缓存的正文？服务器上的邮件不会被删除，下次打开会重新下载。';
+      if (!confirm(tip)) return;
+      try {
+        const r = await this.api(`/api/cache?scope=${scope}`, { method: 'DELETE' });
+        this.toast(scope === 'all' ? '本地缓存已清空' : `已清理 ${r.cleared} 封正文`, 'ok');
+        await this.loadCacheInfo();
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+
     // ---------- Agent 接入（MCP） ----------
     async openAgentTab() {
       this.settingsTab = 'agent';
