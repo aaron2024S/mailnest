@@ -514,13 +514,6 @@ button.swatch-btn.swatch{width:30px;height:30px;border-radius:9px;padding:0;}
 body.col-resizing{cursor:col-resize;user-select:none;}
 body.col-resizing .col-resizer::after{background:var(--accent);}
 
-/* 列表栏自身放不下时，批量按钮只留图标（容器查询，跟窗口宽度无关） */
-@container (max-width:440px){
-  .bulk-btn span{display:none;}
-  .bulk-btn{padding:0 7px;}
-  .bulk-text span{display:none;}
-}
-
 /* ============ 关闭写信三选确认 ============ */
 .close-ask{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:75;width:min(420px,92vw);
   background:var(--surface);border:1px solid var(--border-strong);border-radius:14px;box-shadow:var(--shadow-lg);
@@ -544,9 +537,11 @@ body.col-resizing .col-resizer::after{background:var(--accent);}
 .row .from{flex:0 1 auto;min-width:0;}
 
 /* ============ 列表头动作（未读筛选 / 全部已读 / 清空）与滚动加载 ============ */
-.list-act{width:auto;height:26px;padding:0 10px;border-radius:7px;border:1px solid var(--border);
-  background:var(--surface);font-size:12px;color:var(--text-2);cursor:pointer;
-  display:inline-flex;align-items:center;flex:none;}
+/* 动作按钮全站统一纯图标（悬停 title 提示），文字只留给导航和右键菜单 */
+.list-act{width:26px;height:26px;padding:0;border-radius:7px;border:1px solid var(--border);
+  background:var(--surface);color:var(--text-2);cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;flex:none;}
+.list-act .i{width:14px;height:14px;}
 .list-act:hover{background:var(--hover);color:var(--text);}
 .list-act.on{background:var(--accent-soft);color:var(--accent);border-color:transparent;font-weight:600;}
 .list-act.danger:hover{background:color-mix(in srgb,var(--err) 10%,transparent);color:var(--err);}
