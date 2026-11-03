@@ -3,7 +3,7 @@
 // 信封由 IDLE 同步建好，正文（body 列）一开始全是 NULL —— 这就是天然的待办队列：
 // 按 uid 由新到旧逐夹填满，随时可中断、重启自动续上，不需要额外的任务表。
 // 独立连接 + 批间小睡，不占用户操作的读写池（否则点开会排在预热后面）。
-import simpleParser from 'mailparser';
+import { simpleParser } from 'mailparser';
 import * as cache from './cache.js';
 import { createListenerClient, extractMessage, cacheAttachments } from './mail.js';
 
@@ -100,6 +100,7 @@ async function run(uid, accountId, w) {
       backoff = 10_000;
     } catch (e) {
       if (!w.running) break;
+      console.error(`[prefetch] ${accountId} 预热中断（${Math.round(backoff / 1000)}s 后重试）: ${e?.message || e}`);
       emit(uid, accountId, { type: 'prefetch-error', message: String(e?.message || e).slice(0, 120) });
       await sleep(backoff, w);
       backoff = Math.min(backoff * 2, 5 * 60_000);
@@ -111,7 +112,7 @@ async function run(uid, accountId, w) {
   }
 }
 
-async function fillFolder(uid, accountId, client, folder, pending, w) {
+export async function fillFolder(uid, accountId, client, folder, pending, w) {
   w.folder = folder;
   w.pending = pending;
   w.done = 0;
@@ -131,8 +132,11 @@ async function fillFolder(uid, accountId, client, folder, pending, w) {
           cacheAttachments(uid, accountId, folder, msg.uid, parsed);
           progressed += 1;
           w.done += 1;
-        } catch {
+          // 每封完成就推：一批 6 封里有大邮件时，整批可能几十秒，按批推会让进度条看起来"卡死"
+          emit(uid, accountId, { type: 'prefetch', folder, done: w.done, pending: w.pending });
+        } catch (e) {
           // 单封解析失败：记一次尝试次数，别让一封坏邮件永远堵住队列
+          console.error(`[prefetch] ${accountId}/${folder} uid=${msg.uid} 处理失败: ${e?.message || e}`);
           cache.failBody(uid, accountId, folder, msg.uid);
         }
       }

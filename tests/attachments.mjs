@@ -148,3 +148,86 @@ test('全文检索：删除邮件后索引同步移除', () => {
   const left = cache.getDb(uid).prepare('SELECT COUNT(*) AS n FROM fts_keys').get().n;
   assert.equal(left, 2); // 只剩 uid 1、3
 });
+
+// ---------- 预热循环端到端（0.2.0 血案回归：默认导入 simpleParser 一直是 undefined 调用） ----------
+// mock client + 真实 cache/simpleParser/extractMessage/cacheAttachments 全链路，
+// 断言 done 与落库数一致 —— 这类"导入级"错误只有真正跑一遍 fillFolder 才会暴露。
+const { fillFolder } = await import('../server/prefetch.js');
+
+test('预热端到端：fillFolder 把 mock 邮件全部落库（导入/解析/落盘全链路）', async () => {
+  const accPf = 'a_pf';
+  const mkMime = (i) => Buffer.from([
+    `From: S${i} <s${i}@example.com>`, 'To: me@example.com', `Subject: 预热 ${i}`,
+    `Date: Mon, 02 Nov 2026 1${i}:00:00 +0800`, `Message-ID: <pf${i}@x>`, 'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=utf-8', '', `<p>预热正文 ${i}</p>`,
+  ].join('\r\n'));
+
+  const sources = [1, 2, 3].map((i) => ({ uid: i, source: mkMime(i) }));
+  cache.syncFolderFull(uid, accPf, 'INBOX', 7, sources.map(({ uid: u }) => ({
+    uid: u, from: { name: `S${u}`, address: `s${u}@example.com` }, to: [],
+    subject: `预热 ${u}`, date: `2026-11-02T1${u}:00:00+08:00`, flags: [], size: 100,
+  })));
+
+  const client = {
+    async getMailboxLock() { return { release() {} }; },
+    async *fetch() { for (const s of sources) yield { uid: s.uid, source: s.source }; },
+  };
+  const w = { running: true, done: 0, pending: 3 };
+  await fillFolder(uid, accPf, client, 'INBOX', 3, w);
+
+  assert.equal(w.done, 3, '三封都应成功，done 不应停在 0');
+  assert.equal(cache.pendingBodies(uid, accPf, 'INBOX', 10).length, 0, '队列应排空');
+  for (let i = 1; i <= 3; i++) {
+    const body = cache.getBody(uid, accPf, 'INBOX', i);
+    assert.ok(body, `uid ${i} 正文应落库`);
+    assert.ok(String(body.html || '').includes(`预热正文 ${i}`));
+  }
+});
+
+test('预热端到端：mailparser 对非 MIME 内容宽容解析，全部正常入库', async () => {
+  const accPf2 = 'a_pf2';
+  const sources = [
+    { uid: 1, source: Buffer.from('not a mime at all') },
+    { uid: 2, source: Buffer.from('From: a@x\r\nSubject: ok\r\n\r\n正文') },
+  ];
+  cache.syncFolderFull(uid, accPf2, 'INBOX', 8, [
+    { uid: 1, from: { name: '', address: 'a@x' }, to: [], subject: '一', date: '2026-11-02T01:00:00+08:00', flags: [], size: 10 },
+    { uid: 2, from: { name: '', address: 'a@x' }, to: [], subject: '二', date: '2026-11-02T02:00:00+08:00', flags: [], size: 10 },
+  ]);
+  const client = {
+    async getMailboxLock() { return { release() {} }; },
+    async *fetch() { for (const s of sources) yield s; },
+  };
+  const w = { running: true, done: 0, pending: 2 };
+  await fillFolder(uid, accPf2, client, 'INBOX', 2, w);
+  // mailparser 把纯文本也当邮件解析成功 —— done 应等于 yield 数，不能悄悄丢
+  assert.equal(w.done, 2);
+  assert.ok(cache.getBody(uid, accPf2, 'INBOX', 1));
+  assert.ok(cache.getBody(uid, accPf2, 'INBOX', 2));
+});
+
+test('预热端到端：服务器整批漏发时全部记失败，不留下死循环', async () => {
+  const accPf3 = 'a_pf3';
+  cache.syncFolderFull(uid, accPf3, 'INBOX', 9, [
+    { uid: 1, from: { name: '', address: 'a@x' }, to: [], subject: 'x', date: '2026-11-02T01:00:00+08:00', flags: [], size: 10 },
+    { uid: 2, from: { name: '', address: 'a@x' }, to: [], subject: 'y', date: '2026-11-02T02:00:00+08:00', flags: [], size: 10 },
+  ]);
+  const client = {
+    async getMailboxLock() { return { release() {} }; },
+    async *fetch() { /* 服务器对这批 uid 一个都不回（已删除/移动） */ },
+  };
+  const w = { running: true, done: 0, pending: 2 };
+  await fillFolder(uid, accPf3, client, 'INBOX', 2, w);
+  assert.equal(w.done, 0);
+  const tries = (u) => cache.getDb(uid).prepare(
+    'SELECT body_tries t FROM messages WHERE account_id=? AND folder=? AND uid=?'
+  ).get(accPf3, 'INBOX', u).t;
+  assert.ok(tries(1) >= 1 && tries(2) >= 1, '漏发的 uid 必须记失败计数，否则队列死循环');
+});
+
+test('预热收尾：resetBodyTries 清零失败计数，让耗尽的邮件重新排队', () => {
+  // a_pf3 的 uid 1、2 刚因漏发记了 tries；清零后必须重新出现在待办队列
+  cache.resetBodyTries(uid);
+  const pending = cache.pendingBodies(uid, 'a_pf3', 'INBOX', 10);
+  assert.ok(pending.includes(1) && pending.includes(2), '重置后漏发邮件应重新排队（body 仍为 NULL）');
+});

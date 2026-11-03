@@ -521,11 +521,16 @@ export function failBody(uid, accountId, folderPath, messageUid) {
   } catch { /* ignore */ }
 }
 
-// 清空缓存后允许重新尝试（把失败计数归零）
+// 清空缓存后允许重新尝试（把失败计数归零）。
+// 启动时也用它（index.js ensureUserWatchers）：tries 防的是"单次运行里坏邮件堵队列"，
+// 不是永久拉黑 —— 否则一次版本 bug（如 0.2.0 的解析错误）会让整批邮件 tries 耗尽，
+// 修复发布后也再无人重试。
 export function resetBodyTries(uid, accountId = null) {
   const db = getDb(uid);
-  if (accountId) db.prepare('UPDATE messages SET body_tries = 0 WHERE account_id = ?').run(accountId);
-  else db.exec('UPDATE messages SET body_tries = 0');
+  if (accountId) {
+    return db.prepare('UPDATE messages SET body_tries = 0 WHERE account_id = ?').run(accountId).changes;
+  }
+  return db.prepare('UPDATE messages SET body_tries = 0').run().changes;
 }
 
 // 缓存概览（设置页展示 + 空间焦虑的解药）

@@ -554,6 +554,7 @@ body.col-resizing .col-resizer::after{background:var(--accent);}
   background:var(--surface-2);border-bottom:1px solid var(--border);}
 .idx-bar .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--border);
   border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex:none;}
+.idx-bar.is-err{color:var(--warn,#b7791f);}
 .load-more{padding:14px;text-align:center;font-size:12px;color:var(--text-3);}
 .load-more .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--border);
   border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;}

@@ -48,6 +48,7 @@ const app = createApp({
       loadErrors: [],         // 本次列表加载失败的账号名；非空时空态区显示重试按钮
       indexing: null,         // {done,total} 首次全量建索引进度（SSE 推送）
       prefetch: null,         // {done,pending,folder} 后台把正文缓存到本地的进度（SSE 推送）
+      prefetchErr: null,      // 预热中断原因（SSE prefetch-error），恢复后自动清掉
       cacheInfo: null,        // 设置页「本地缓存」概览
       cacheBodies: 0,
       es: null,               // EventSource（实时推送）
@@ -322,8 +323,14 @@ const app = createApp({
         }
         if (d.type === 'prefetch') {
           // 后台正文缓存进度：一批批把新邮件存到本地，完成时收起
+          this.prefetchErr = null;
           if (d.finished) { this.prefetch = null; return; }
           this.prefetch = { done: d.done, pending: d.pending, folder: d.folder };
+          return;
+        }
+        if (d.type === 'prefetch-error') {
+          // 缓存中断：进度条位置显示原因（连接失败/网络问题等），恢复后自动变回进度
+          this.prefetchErr = d.message || '未知错误';
           return;
         }
         if (d.type === 'empty-done' || d.type === 'empty-error') {

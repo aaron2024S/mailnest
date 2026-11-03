@@ -125,11 +125,15 @@ idle.setEventHandler((ev) => {
 
 // 预热进度 → SSE（前端用它显示「本地已缓存 N 封」，也让用户知道后台在干活）
 prefetch.setEventHandler((ev) => {
-  if (ev.type !== 'prefetch') return;
-  sendToUser(ev.uid, {
-    type: 'prefetch', accountId: ev.accountId, folder: ev.folder, done: ev.done, pending: ev.pending,
-    finished: !!ev.finished,
-  });
+  if (ev.type === 'prefetch') {
+    sendToUser(ev.uid, {
+      type: 'prefetch', accountId: ev.accountId, folder: ev.folder, done: ev.done, pending: ev.pending,
+      finished: !!ev.finished,
+    });
+  } else if (ev.type === 'prefetch-error') {
+    // 失败也要让前端知道（进度条位置显示原因），否则出错时进度条就永远停在原地
+    sendToUser(ev.uid, { type: 'prefetch-error', accountId: ev.accountId, message: ev.message });
+  }
 });
 
 function ensureUserWatchers(uid) {
@@ -138,6 +142,12 @@ function ensureUserWatchers(uid) {
     const n = cache.rebuildFts(uid);
     if (n) console.log(`[mailnest] 全文索引回填 ${n} 封`);
   } catch (e) { console.log(`[mailnest] 全文索引回填失败：${e?.message || e}`); }
+  // 失败计数随重启重置：tries 的用途是"别让一封坏邮件堵死队列"，不是永久拉黑。
+  // 版本修复（比如 0.2.0 的解析 bug）发布后，之前被误记失败的邮件要能自动补上。
+  try {
+    const n = cache.resetBodyTries(uid);
+    if (n) console.log(`[mailnest] 重置 ${n} 封邮件的预热失败计数`);
+  } catch { /* ignore */ }
   for (const a of listAccounts(uid)) {
     idle.ensureWatcher(uid, a.id).catch(() => { /* runWatcher 内部兜底 */ });
     prefetch.ensurePrefetch(uid, a.id);
