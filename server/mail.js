@@ -203,8 +203,8 @@ export async function createListenerClient(uid, accountId) {
 }
 
 function imapError(e) {
-  // 已经是翻译过的、给用户看的中文错误（例如 OAuth 失效），别再套一层
-  if (e?.oauth) return e;
+  // 已经是翻译过的、给用户看的中文错误（例如 OAuth 失效、超时类 503/504），别再套一层
+  if (e?.oauth || e?.status) return e;
   const msg = String(e?.responseText || e?.message || e || '未知错误');
   if (/AUTHENTICATIONFAILED|AUTHORIZATIONFAILED|Invalid credentials|LOGIN/i.test(msg)) {
     return Object.assign(new Error('登录失败：请检查邮箱地址与授权码（不是网页登录密码）'), { status: 401 });
@@ -291,6 +291,11 @@ function bodyHasAttachment(bodyStructure) {
   return walk(bodyStructure);
 }
 
+// 列表页是「点一下就等结果」的交互，不该跟批量操作共用 60 秒上限：
+// 真卡住时用户盯着空白列表一分钟，比直接报错重试难受得多。
+// 20 秒对冷连接 + SELECT + 一页信封已经足够宽裕（实测 outlook 最慢十几秒）。
+const LIST_TIMEOUT = Number(process.env.MAILNEST_LIST_TIMEOUT_MS) || 20000;
+
 export async function listMessages(uid, accountId, folder, { page = 1, pageSize = 50 } = {}) {
   pageSize = Math.min(Math.max(1, pageSize | 0), PAGE_MAX);
   page = Math.max(1, page | 0);
@@ -324,7 +329,7 @@ export async function listMessages(uid, accountId, folder, { page = 1, pageSize 
       }
       out.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
       return { total, page, pageSize, uidvalidity, messages: out };
-    });
+    }, { opMs: LIST_TIMEOUT });
   } catch (e) {
     throw imapError(e);
   }
@@ -513,19 +518,38 @@ export async function emptyFolder(uid, accountId, folder) {
 
 // 后台清空专用：不碰读写池（一个账号只有一条池连接，几千封 EXPUNGE 可能跑几十秒，
 // 复用池会让这期间所有请求排队）。后台任务不怕多一次握手开销。
+// 后台清空专用：绝不与读写池抢锁（一条几十秒的 EXPUNGE 会把整账号堵死）。
+// 但独立连接同样需要上限：服务器半死时没有兜底，连接和 emptyJobs 里的登记会永远挂着，
+// 之后这个夹再也清不了、也永远显示「正在清空」。
+const EMPTY_TIMEOUT = Number(process.env.MAILNEST_EMPTY_TIMEOUT_MS) || 10 * 60_000;
+
 export async function emptyFolderIsolated(uid, accountId, folder) {
   const { client } = await createListenerClient(uid, accountId);
+  let timer;
   try {
-    const lock = await client.getMailboxLock(folder);
-    try {
-      await client.messageDelete('1:*', { uid: true });
-    } finally {
-      lock.release();
-    }
+    const op = (async () => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        await client.messageDelete('1:*', { uid: true });
+      } finally {
+        lock.release();
+      }
+    })();
+    op.catch(() => { /* 超时后成为孤儿，别冒成 unhandledRejection */ });
+    await Promise.race([
+      op,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(
+          new Error('清空超时：服务器长时间没有响应，已中断（可能已删除一部分，重新打开文件夹会刷新）'),
+          { code: 'EMPTY_TIMEOUT', status: 504 },
+        )), EMPTY_TIMEOUT);
+      }),
+    ]);
     return { ok: true };
   } catch (e) {
     throw imapError(e);
   } finally {
+    clearTimeout(timer);
     try { client.close(); } catch { /* ignore */ }
   }
 }

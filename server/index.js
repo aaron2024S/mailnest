@@ -109,6 +109,25 @@ function sendToUser(uid, obj) {
 
 // IDLE 事件 → SSE：只转发前端用得上的新邮件事件
 idle.setEventHandler((ev) => {
+  // 早期这里只有 new-mail 一个分支，其余事件被直接 return 丢掉 ——
+  // 结果 watchOnce 里 emit 的 indexing 从来没到过前端，「正在建立索引 N/M」进度条形同虚设。
+  if (ev.type === 'indexing') {
+    sendToUser(ev.uid, {
+      type: 'indexing', accountId: ev.accountId, folder: ev.folder,
+      done: ev.done, total: ev.total, ok: ev.ok !== false,
+    });
+    return;
+  }
+  if (ev.type === 'watch-error') {
+    console.log(`[mailnest] 监听中断(${ev.accountId})：${ev.message} —— 自动重连中`);
+    sendToUser(ev.uid, { type: 'watch-error', accountId: ev.accountId, message: ev.message });
+    return;
+  }
+  if (ev.type === 'folder-synced') {
+    // 后台整夹同步完成：前端若正停在这个夹，静默重载一次（sync=1 超时先回旧缓存的那条路）
+    sendToUser(ev.uid, { type: 'folder-synced', accountId: ev.accountId, folder: ev.folder });
+    return;
+  }
   if (ev.type !== 'new-mail') return;
   const acc = findAccount(ev.uid, ev.accountId);
   sendToUser(ev.uid, {
@@ -411,6 +430,7 @@ api.delete('/accounts/:id', guard, async (req, res) => {
     saveAccounts(req.user.id, next);
     await dropConnections(req.user.id, req.params.id);
     await idle.stopWatcher(req.user.id, req.params.id);
+    idle.cancelResync(req.user.id, req.params.id); // 正在跑的整夹同步要在数据删除前掐掉
     prefetch.stopPrefetch(req.user.id, req.params.id);
     cache.dropAccount(req.user.id, req.params.id);
     attachments.dropAccount(req.user.id, req.params.id);
@@ -530,14 +550,21 @@ api.get('/messages', guard, async (req, res) => {
     const accountId = String(req.query.account || '');
     const folder = String(req.query.folder || 'INBOX');
     const opts = { page: Number(req.query.page) || 1, pageSize: Number(req.query.pageSize) || 50 };
-    // sync=1（手动刷新）：整夹快照重同步后回缓存，保证与服务器强一致
+    // sync=1（手动刷新）：整夹快照重同步后回缓存，保证与服务器强一致。
+    // 只等 8 秒 —— 大归档夹几万封要几十秒到几分钟，把 HTTP 请求挂在那里挂着
+    // 正是「点了刷新没反应」的来源；超时先回缓存，同步在后台继续，完成后 SSE 通知前端静默重载
+    let backgroundSync = false;
+    let syncError = null;
     if (req.query.sync) {
       try {
-        await idle.resyncFolder(req.user.id, accountId, folder);
-      } catch { /* 快照失败则退回直拉单页 */ }
+        await idle.resyncFolder(req.user.id, accountId, folder, { waitMs: 8000 });
+      } catch (e) {
+        if (e.code === 'SYNC_PENDING') backgroundSync = true;
+        else syncError = e.message || '同步失败';
+      }
     }
     const cached = cache.getPage(req.user.id, accountId, folder, opts);
-    if (cached) return res.json(cached);
+    if (cached) return res.json(backgroundSync || syncError ? { ...cached, backgroundSync, syncError } : cached);
     // 该文件夹从未同步过：直拉兜底并把这一页写进缓存，同时后台把整夹补齐——
     // 不然这个夹只有 50 封索引，之后的翻页/搜索都不完整
     const fresh = await listMessages(req.user.id, accountId, folder, opts);
@@ -572,11 +599,16 @@ api.get('/message', guard, async (req, res) => {
 
 api.get('/attachment', guard, async (req, res) => {
   try {
-    const inline = req.query.inline === '1';
+    const wantInline = req.query.inline === '1';
     const att = await getAttachment(req.user.id, String(req.query.account || ''), String(req.query.folder || ''), String(req.query.uid || ''), Number(req.query.idx) | 0);
-    res.setHeader('Content-Type', att.contentType);
-    // 正文里的内嵌图片必须 inline，否则浏览器会当下载处理、<img> 直接裂图
-    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(att.filename)}`);
+    // 非图片一律降级成下载：inline 请求也拿不到可执行的渲染上下文
+    const inline = wantInline && attachments.inlineSafe(att.contentType);
+    const type = inline ? att.contentType : 'application/octet-stream';
+    const name = encodeURIComponent(att.filename);
+    res.setHeader('Content-Type', type);
+    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${name}`);
+    // 纵深防御：即使某天漏了类型判定，sandbox 也让文档以唯一源渲染、不执行脚本
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
     // 附件内容跟着 uid 走、不会变，让浏览器也存一份
     res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
     res.send(att.content);
@@ -664,6 +696,30 @@ api.post('/delete', guard, async (req, res) => {
     try { cache.removeUids(req.user.id, String(account), String(folder), uids); } catch { /* 缓存回写失败不影响主流程 */ }
     for (const u of uids) attachments.dropMessage(req.user.id, String(account), String(folder), u);
     res.json(out);
+  } catch (e) { fail(res, e); }
+});
+
+// 跨账号全文搜索（网页端用）。FTS5 索引建好后是毫秒级，
+// 之前只有 Agent 能用，界面搜索框只能过滤已加载的当前页 —— 搜旧邮件基本搜不到。
+api.get('/search', guard, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json({ hits: [], query: '' });
+    const limit = Math.min(Math.max(1, Number(req.query.limit) | 0 || 30), 50);
+    const accountId = String(req.query.account || '');
+    const folder = String(req.query.folder || '') || null;
+    const targets = listAccounts(req.user.id).filter((a) => !accountId || a.id === accountId);
+    const hits = [];
+    let indexing = false;
+    for (const a of targets) {
+      // 从没同步过的账号搜不到东西，得告诉前端「正在建索引」而不是让用户以为"没有这封信"
+      if (!cache.hasAccountData(req.user.id, a.id)) indexing = true;
+      for (const r of cache.searchMessages(req.user.id, a.id, q, { folder, limit })) {
+        hits.push({ ...r, accountId: a.id, accountEmail: a.email, color: a.color });
+      }
+    }
+    hits.sort((x, y) => String(y.date || '').localeCompare(String(x.date || '')));
+    res.json({ hits: hits.slice(0, limit), query: q, indexing });
   } catch (e) { fail(res, e); }
 });
 

@@ -168,7 +168,8 @@
 
       <div class="search">
         <svg class="i" style="width:15px;height:15px"><use href="#i-inbox"/></svg>
-        <input v-model.trim="searchQ" placeholder="搜索当前列表的主题、发件人">
+        <input v-model.trim="searchQ" @input="onSearchInput" @keyup.enter="searchAll" @keyup.esc="exitSearch"
+               placeholder="搜索全部邮箱（回车）" autocomplete="off" spellcheck="false">
       </div>
 
       <div class="topbar-right">
@@ -308,9 +309,15 @@
             <button class="bulk-text" @click="clearSel">取消选择</button>
           </div>
         </div>
+        <div class="idx-bar" v-if="searching || searchMode">
+          <span class="spin" v-if="searching"></span>
+          <template v-if="searching">正在搜索全部邮箱…</template>
+          <template v-else>「{{ searchQ }}」在全部邮箱找到 {{ searchHits.length }} 封<span v-if="searchInfo"> · {{ searchInfo }}</span></template>
+          <button class="mini-btn" style="margin-left:auto" @click="exitSearch">退出搜索</button>
+        </div>
         <div class="idx-bar" v-if="indexing"><span class="spin"></span> 正在建立索引 {{ indexing.done }}/{{ indexing.total }}…完成后所有文件夹秒开</div>
         <!-- 旧列表还在时也要让用户知道新文件夹正在加载，否则看起来像"切了没反应" -->
-        <div class="idx-bar" v-if="loadingMessages && filteredMessages.length && !indexing && !listError"><span class="spin"></span> 正在加载 {{ listTitle }}…</div>
+        <div class="idx-bar" v-if="loadingMessages && filteredMessages.length && !indexing && !listError && !searchMode"><span class="spin"></span> 正在加载 {{ listTitle }}…</div>
         <!-- 加载失败：旧列表还留在屏幕上，必须明确告诉用户"下面这些不是这个文件夹的" -->
         <div class="idx-bar is-err" v-if="listError && !loadingMessages">
           ⚠ {{ listError }}　下方仍是上次的内容
@@ -332,6 +339,7 @@
             <div class="mid">
               <div class="l1">
                 <span class="from">{{ m.from.name || m.from.address || '(未知发件人)' }}</span>
+                <span class="srch-where" v-if="searchMode">{{ m.accountEmail }} · {{ m.folder }}</span>
               </div>
               <span class="subj">{{ m.subject }}</span>
               <span class="preview" v-if="m._preview">{{ m._preview }}</span>
@@ -351,13 +359,18 @@
               <div>{{ loadErrors.join('、') }} 暂时没连上，其余邮箱已显示</div>
               <button class="btn-ghost" style="margin-top:10px" @click="retryLoad">重试</button>
             </template>
+            <template v-else-if="searchMode">
+              <svg class="i"><use href="#i-inbox"/></svg>
+              <div>全部邮箱里没有找到「{{ searchQ }}」</div>
+              <div class="muted" style="margin-top:6px;font-size:12px">只搜索已缓存到本地的邮件；新加的账号要等索引建完</div>
+            </template>
             <template v-else>
               <svg class="i"><use href="#i-inbox"/></svg>
               <div>{{ searchQ || unreadOnly ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
             </template>
           </div>
           <div class="empty" v-if="loadingMessages && !filteredMessages.length"><span class="spin"></span> 正在从服务器读取…</div>
-          <div class="load-more" v-if="messages.length < total">
+          <div class="load-more" v-if="!searchMode && messages.length < total">
             <span v-if="loadingMore"><span class="spin"></span> 正在加载更多…</span>
             <span v-else>向上滚动加载更多（已加载 {{ messages.length }} / {{ total }}）</span>
           </div>

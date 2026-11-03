@@ -51,15 +51,77 @@ export function closeAll() {
   }
 }
 
-// 按需整夹重同步（刷新按钮 / 缓存未命中兜底）。
-// 刻意不复用 watcher 的连接：它被 INBOX 的选中状态占用，切走会破坏 IDLE 监听 —— 临时开一条最稳
-export async function resyncFolder(uid, accountId, folderPath) {
+// 整夹同步是重活（几万封要几十秒到几分钟），必须防两件事：
+// ① 用户连点刷新 / 多标签页同时请求 → 同一夹只允许一条连接在跑，否则重复拉全量把服务器打满；
+// ② 服务器半死不回 → 没有上限就会永远挂着一条连接和一次同步。
+// 注意：调用方超时返回后同步仍在后台跑完，这里刻意保留 map 里的登记，避免「超时 → 又开一条」。
+const RESYNC_TIMEOUT = Number(process.env.MAILNEST_RESYNC_TIMEOUT_MS) || 5 * 60_000;
+const resyncing = new Map(); // `${uid}\0${accountId}\0${folder}` -> Promise
+
+function resyncKey(uid, accountId, folderPath) {
+  return `${uid}\u0000${accountId}\u0000${folderPath}`;
+}
+
+// 进行中的同步连接：删账号 / 退出时要把它们掐掉，
+// 否则同步会在数据删完之后继续往 SQLite 里写回已经删掉的账号
+const resyncClients = new Map(); // key -> client
+
+async function runResync(uid, accountId, folderPath) {
+  const key = resyncKey(uid, accountId, folderPath);
   const { client } = await createListenerClient(uid, accountId);
+  resyncClients.set(key, client);
+  let timer;
   try {
-    await syncFolderSnapshot(uid, accountId, client, folderPath);
+    const op = syncFolderSnapshot(uid, accountId, client, folderPath);
+    op.catch(() => { /* 超时后成为孤儿，别冒成 unhandledRejection */ });
+    await Promise.race([
+      op,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(
+          new Error('同步超时，稍后会自动重试'), { code: 'SYNC_TIMEOUT' },
+        )), RESYNC_TIMEOUT);
+      }),
+    ]);
   } finally {
+    clearTimeout(timer);
+    resyncClients.delete(key);
     try { client.close(); } catch { /* ignore */ }
   }
+  // 成功才通知：请求可能早就超时返回旧缓存了，前端要靠这条事件补上真正的结果
+  emit(uid, accountId, { type: 'folder-synced', folder: folderPath });
+}
+
+// 掐掉某账号（或某账号某夹）正在跑的同步：关闭连接即可，run 的 finally 会清理登记
+export function cancelResync(uid, accountId = null) {
+  const prefix = accountId ? `${uid}\u0000${accountId}\u0000` : `${uid}\u0000`;
+  for (const [key, client] of resyncClients) {
+    if (!key.startsWith(prefix)) continue;
+    try { client.close(); } catch { /* ignore */ }
+    resyncClients.delete(key);
+  }
+}
+
+// waitMs > 0：调用方最多等这么久；超时抛出 code=SYNC_PENDING，但同步在后台继续
+export function resyncFolder(uid, accountId, folderPath, { waitMs = 0 } = {}) {
+  const key = resyncKey(uid, accountId, folderPath);
+  let op = resyncing.get(key);
+  if (!op) {
+    op = runResync(uid, accountId, folderPath);
+    op.then(
+      () => resyncing.delete(key),
+      () => resyncing.delete(key),
+    );
+    op.catch(() => { /* 无人 await 时不冒未处理拒绝 */ });
+    resyncing.set(key, op);
+  }
+  if (!waitMs) return op;
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(
+      new Error('正在后台同步'), { code: 'SYNC_PENDING' },
+    )), waitMs);
+  });
+  return Promise.race([op, guard]).finally(() => clearTimeout(timer));
 }
 
 async function runWatcher(uid, accountId, w) {

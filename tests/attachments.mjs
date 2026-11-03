@@ -231,3 +231,26 @@ test('预热收尾：resetBodyTries 清零失败计数，让耗尽的邮件重�
   const pending = cache.pendingBodies(uid, 'a_pf3', 'INBOX', 10);
   assert.ok(pending.includes(1) && pending.includes(2), '重置后漏发邮件应重新排队（body 仍为 NULL）');
 });
+
+// ---------- 附件 inline 白名单（安全回归：外部邮件不得在应用同源下执行脚本） ----------
+// 附件内容完全由发件人控制。若 /api/attachment?inline=1 原样回 text/html 或 svg，
+// 用户在新标签页打开该 URL 就等于在应用同源执行对方脚本 —— 可读全部邮件、以用户身份发信。
+test('inline 白名单：图片类放行，html/svg/octet-stream 一律不放行', () => {
+  for (const ok of ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif']) {
+    assert.equal(attachments.inlineSafe(ok), true, `${ok} 应允许 inline`);
+  }
+  for (const bad of [
+    'text/html', 'text/plain', 'application/pdf', 'application/octet-stream',
+    'image/svg+xml', 'IMAGE/SVG+XML', 'text/xml', 'application/xhtml+xml',
+    'image/svg+xml; charset=utf-8', '', null, undefined,
+  ]) {
+    assert.equal(attachments.inlineSafe(bad), false, `${bad} 不应允许 inline`);
+  }
+});
+
+test('inline 白名单：带参数与大小写的图片类型仍识别为图片', () => {
+  assert.equal(attachments.inlineSafe('IMAGE/PNG; charset=binary'), true);
+  assert.equal(attachments.inlineSafe('  image/jpeg ; q=1'), true);
+  // 前面带空格的 svg 依旧要被挡住（不能被"看起来像图片"骗过）
+  assert.equal(attachments.inlineSafe(' image/svg+xml'), false);
+});

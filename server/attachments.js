@@ -32,6 +32,18 @@ export function normCid(cid) {
   return s.toLowerCase();
 }
 
+// 只有这些类型允许 inline 渲染 —— 附件内容完全由发件人控制，
+// 把 text/html、image/svg+xml 当页面回给浏览器等于让外部邮件在应用同源下执行脚本。
+const INLINE_SAFE = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp',
+  'image/avif', 'image/tiff', 'image/x-icon', 'image/vnd.microsoft.icon',
+]);
+
+// 注意 svg 故意不在白名单：它既能当图片又能带 <script>，直接打开就是同源 XSS
+export function inlineSafe(contentType) {
+  return INLINE_SAFE.has(String(contentType || '').split(';')[0].trim().toLowerCase());
+}
+
 export function attachUrl(accountId, folder, uid, idx, inline = false) {
   const q = `account=${encodeURIComponent(accountId)}&folder=${encodeURIComponent(folder)}&uid=${uid}&idx=${idx}`;
   return `/api/attachment?${q}${inline ? '&inline=1' : ''}`;
@@ -59,7 +71,11 @@ export async function saveAll(uid, accountId, folder, messageUid, items) {
       }
       meta.items.push(entry);
     }
-    await fsp.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta));
+    // 先写临时文件再 rename：进程在写 meta 时被杀（容器升级、OOM）会留下半截 JSON，
+    // readMeta 直接返回 null，这份附件就永远读不到、也不会自动重存
+    const tmp = path.join(dir, 'meta.json.tmp');
+    await fsp.writeFile(tmp, JSON.stringify(meta));
+    await fsp.rename(tmp, path.join(dir, 'meta.json'));
   } catch { /* 缓存写失败不影响读信 */ } finally {
     pending.delete(key);
   }

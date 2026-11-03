@@ -65,6 +65,11 @@ const app = createApp({
       unreadOnly: false,
       selected: null,
       searchQ: '',
+      // 全邮箱搜索：回车触发，结果直接铺在列表区（FTS5 索引，跨账号跨文件夹）
+      searchMode: false,
+      searchHits: [],
+      searching: false,
+      searchInfo: '',
       syncing: false,
 
       compose: { open: false, accountId: '', to: '', cc: '', subject: '', text: '', attachments: [], sending: false, showCc: false, mode: 'new', replyTo: null, draftId: null, error: '' },
@@ -165,6 +170,8 @@ const app = createApp({
       return this.messages.some((m) => this.selection.includes(this.msgKey(m)) && !m.flags.includes('\\Seen'));
     },
     filteredMessages() {
+      // 搜索结果已由服务端按关键词过滤（命中正文也算），不能再被本地主题/发件人过滤掉一遍
+      if (this.searchMode) return this.searchHits;
       let rows = this.messages;
       if (this.searchQ) rows = rows.filter((m) => this.msgMatch(m));
       if (this.unreadOnly) rows = rows.filter((m) => !m.flags.includes('\\Seen'));
@@ -189,6 +196,7 @@ const app = createApp({
     // 已删除/垃圾/已发送/草稿没有未读语义，「未读」筛选和「全部已读」不该出现（汇总视图 curFolderNode 为 null → 正常显示）
     showReadTools() { return !['\\Trash', '\\Junk', '\\Sent', '\\Drafts'].includes(this.curFolderNode?.special); },
     listTitle() {
+      if (this.searchMode) return `搜索「${this.searchQ}」`;
       if (this.activeAccount === 'all') {
         // 汇总视图：没选具体文件夹时是跨账号的「全部收件箱」；点了某账号的某文件夹要如实显示
         if (!this.allFolder) return '全部收件箱';
@@ -334,6 +342,25 @@ const app = createApp({
           this.prefetchErr = d.message || '未知错误';
           return;
         }
+        if (d.type === 'folder-synced') {
+          // sync=1 请求等不及先回了缓存，后台同步完成后补一次静默重载
+          const ref = this.curFolderRef;
+          const isCur = ref && ref.account === d.accountId && ref.folder === d.folder;
+          const isSummaryInbox = this.activeAccount === 'all' && !this.allFolder && d.folder === 'INBOX';
+          if (isCur || isSummaryInbox) {
+            this.page = 1;
+            this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+          }
+          return;
+        }
+        if (d.type === 'watch-error') {
+          // 监听断了会自动重连，只提示一次，别每次重试都弹
+          if (!this._watchErrAt || Date.now() - this._watchErrAt > 5 * 60_000) {
+            this._watchErrAt = Date.now();
+            this.toast('实时收信暂时中断，正在自动重连', 'warn');
+          }
+          return;
+        }
         if (d.type === 'empty-done' || d.type === 'empty-error') {
           if (d.type === 'empty-done') {
             this.toast(d.count ? `已彻底删除 ${d.count} 封邮件` : '文件夹已清空', 'ok');
@@ -362,8 +389,13 @@ const app = createApp({
           this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
         }
       };
-      // 断线 EventSource 原生自动重连，无需手动处理
-      es.onerror = () => { /* ignore */ };
+      // 普通断网由 EventSource 原生重连；CLOSED 表示服务端明确拒绝（如会话过期），
+      // 浏览器不会再试，此时必须告诉用户，否则实时收信静默失效、毫无感知
+      es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) {
+          this.toast('实时推送已断开，刷新页面可恢复（邮件仍可正常加载）', 'warn');
+        }
+      };
     },
     disconnectEvents() {
       if (this.es) { this.es.close(); this.es = null; }
@@ -529,6 +561,7 @@ const app = createApp({
 
     // 滚动加载：接近底部时拉下一页并追加。切文件夹/账号时 page 已被重置为 1
     async loadMore() {
+      if (this.searchMode) return; // 搜索结果是一次性全量返回，没有下一页
       if (this.loadingMessages || this.loadingMore) return;
       if (!this.total || this.messages.length >= this.total) return;
       this.page++;
@@ -554,6 +587,7 @@ const app = createApp({
           // 单账号失败只记名字（列表头下方给重试按钮），不再假装「文件夹是空的」
           const parts = new Map(); // aid -> {total, messages}
           const failed = [];
+          let syncNotified = false; // 多账号同时后台同步只提示一次，别刷屏
           let settled = 0;
           const apply = () => {
             if (gen !== this._loadGen) return; // 已被新请求取代
@@ -577,6 +611,11 @@ const app = createApp({
           for (const a of this.accounts) {
             this.api(`/api/messages?account=${a.id}&folder=INBOX&page=${this.page}&pageSize=${this.pageSize}${sync ? '&sync=1' : ''}`)
               .then((d) => {
+                if (sync && !syncNotified && (d.backgroundSync || d.syncError)) {
+                  syncNotified = true;
+                  if (d.syncError) this.toast(`同步失败：${d.syncError}`, 'error');
+                  else this.toast('邮件较多，正在后台同步，完成后会自动刷新', 'ok');
+                }
                 // folder 必须显式带上：汇总视图里的星标/删除/归档都靠它定位邮件
                 parts.set(a.id, { total: d.total || 0,
                   messages: (d.messages || []).map((m) => ({ ...m, accountId: a.id, folder: 'INBOX', accountEmail: a.email, _color: a.color })) });
@@ -599,6 +638,9 @@ const app = createApp({
           }
           const d = await this.api(`/api/messages?account=${aid}&folder=${encodeURIComponent(folder)}&page=${this.page}&pageSize=${this.pageSize}${sync ? '&sync=1' : ''}`);
           if (gen !== this._loadGen) return;
+          // 服务端最多等 8 秒，大夹先回旧缓存、同步在后台继续 —— 必须告知，否则「点了刷新没变化」又是无头案
+          if (sync && d.syncError) this.toast(`同步失败：${d.syncError}`, 'error');
+          else if (sync && d.backgroundSync) this.toast('邮件较多，正在后台同步，完成后会自动刷新', 'ok');
           const acc = this.accounts.find((a) => a.id === aid);
           const rows = d.messages.map((m) => ({ ...m, accountId: aid, folder: m.folder || folder, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
           this.messages = append ? this.messages.concat(rows) : rows;
@@ -625,6 +667,37 @@ const app = createApp({
       this.page = 1;
       this.loadMessages();
     },
+    // ---------- 全邮箱搜索 ----------
+    onSearchInput() {
+      // 清空输入即退出搜索，回到原来的文件夹列表
+      if (!this.searchQ && this.searchMode) this.exitSearch();
+    },
+    async searchAll() {
+      const q = this.searchQ.trim();
+      if (!q) { this.exitSearch(); return; }
+      if (this.searching) return;
+      this.searching = true;
+      try {
+        const d = await this.api(`/api/search?q=${encodeURIComponent(q)}&limit=50`);
+        this.searchHits = (d.hits || []).map((h) => ({ ...h, _color: h.color || '#2d6cf6' }));
+        this.searchMode = true;
+        this.searchInfo = d.indexing ? '部分账号还没建完索引，稍后再搜可能有更多结果' : '';
+        this.selected = null;
+        this.readerOpen = false;
+        this.clearSel();
+      } catch (e) {
+        this.toast(e.message, 'error');
+      } finally {
+        this.searching = false;
+      }
+    },
+    exitSearch() {
+      this.searchMode = false;
+      this.searchHits = [];
+      this.searchInfo = '';
+      this.searchQ = '';
+    },
+
     // 后台预取当前列表前 15 封的正文（write-through 进缓存）：
     // 第一次点开会慢（一个 IMAP 来回），预取过后切换邮件就是纯本地速度。
     // 顺序慢慢来（不并发打爆 outlook），换夹即停
@@ -724,7 +797,7 @@ const app = createApp({
     // 只改其中一份 ⇒ 列表的星标一直亮着、再点又变回星标。所以统一在这里改，且原地增删。
     flagTargets(m) {
       const same = (x) => x && x.uid === m.uid && x.accountId === m.accountId;
-      const list = this.messages.filter(same);
+      const list = this.messages.concat(this.searchHits).filter(same);
       if (same(this.selected)) list.push(this.selected);
       list.push(m);
       return [...new Set(list)];
