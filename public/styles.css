@@ -231,6 +231,7 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .tool-btn.primary{background:var(--accent);color:#fff;}
 .tool-btn.primary:hover{background:var(--accent-hi);}
 .tool-btn svg{width:15px;height:15px;}
+.tool-btn span{white-space:nowrap;}
 .tool-sep{width:1px;height:18px;background:var(--border);margin:0 6px;}
 .m-back{display:none;}
 .reader-body{flex:1;min-height:0;overflow-y:auto;padding:26px 34px 40px;}

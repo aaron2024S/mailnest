@@ -350,14 +350,14 @@
         <div class="reader-toolbar">
           <button class="tool-btn m-back" @click="readerOpen=false"><svg class="i"><use href="#i-back"/></svg></button>
           <template v-if="selected">
-            <button class="tool-btn primary" @click="reply(selected,'reply')" title="回复"><svg class="i"><use href="#i-reply"/></svg></button>
+            <button class="tool-btn primary" @click="reply(selected,'reply')" title="回复"><svg class="i"><use href="#i-reply"/></svg><span>回复</span></button>
             <button class="tool-btn" v-if="(selected.to?.length||0) + (selected.cc?.length||0) > 1" @click="replyAll(selected)" title="回复全部">
-              <svg class="i"><use href="#i-reply-all"/></svg></button>
-            <button class="tool-btn" @click="reply(selected,'forward')" title="转发"><svg class="i"><use href="#i-forward"/></svg></button>
+              <svg class="i"><use href="#i-reply-all"/></svg><span>回复全部</span></button>
+            <button class="tool-btn" @click="reply(selected,'forward')" title="转发"><svg class="i"><use href="#i-forward"/></svg><span>转发</span></button>
             <span class="tool-sep"></span>
             <div class="move-wrap">
               <button class="tool-btn" @click.stop="readerMoveOpen=!readerMoveOpen" title="移动到文件夹">
-                <svg class="i"><use href="#i-folder"/></svg></button>
+                <svg class="i"><use href="#i-folder"/></svg><span>移动</span></button>
               <div class="move-menu" v-if="readerMoveOpen" @click.stop>
                 <div class="move-title">移动到</div>
                 <button class="move-item" v-for="f in foldersOf(selected.accountId)" :key="f.path"
@@ -369,19 +369,20 @@
             </div>
             <button class="tool-btn" @click="toggleStar(selected)" :title="selected.flags.includes('\\Flagged')?'取消星标':'星标'">
               <svg class="i" :style="selected.flags.includes('\\Flagged')?'fill:#d8a72a;color:#d8a72a':''"><use href="#i-star"/></svg>
+              <span>{{ selected.flags.includes('\\Flagged') ? '取消星标' : '星标' }}</span>
             </button>
             <!-- 信封语义全站统一：打开的信封 = 已读，闭合的信封 = 未读 -->
-            <button class="tool-btn" @click="markRead(selected,true)" v-if="!selected.flags.includes('\\Seen')" title="标记已读">
-              <svg class="i"><use href="#i-mail-open"/></svg>
+            <button class="tool-btn" @click="markRead(selected,true)" v-if="!selected.flags.includes('\\Seen')" title="标为已读">
+              <svg class="i"><use href="#i-mail-open"/></svg><span>标为已读</span>
             </button>
-            <button class="tool-btn" @click="markRead(selected,false)" v-else title="标记未读">
-              <svg class="i"><use href="#i-mail"/></svg>
+            <button class="tool-btn" @click="markRead(selected,false)" v-else title="标为未读">
+              <svg class="i"><use href="#i-mail"/></svg><span>标为未读</span>
             </button>
             <span class="tool-sep"></span>
-            <button class="tool-btn" @click="archive(selected)" title="归档"><svg class="i"><use href="#i-archive"/></svg></button>
-            <button class="tool-btn" @click="remove(selected)" title="删除"><svg class="i"><use href="#i-trash"/></svg></button>
+            <button class="tool-btn" @click="archive(selected)" title="归档"><svg class="i"><use href="#i-archive"/></svg><span>归档</span></button>
+            <button class="tool-btn" @click="remove(selected)" title="删除"><svg class="i"><use href="#i-trash"/></svg><span>删除</span></button>
           </template>
-          <span class="muted" style="margin-left:auto;font-size:12px" v-if="selected">{{ selected.accountEmail }}</span>
+          <span class="muted" style="margin-left:auto;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" v-if="selected">{{ selected.accountEmail }}</span>
         </div>
 
         <div class="reader-body" v-if="selected">
