@@ -659,18 +659,19 @@ const app = createApp({
       }
     },
     async remove(m) {
-      if (!confirm('把这封邮件移到已删除？')) return;
+      const trash = (this.foldersByAccount[m.accountId] || []).find((f) => f.special === '\\Trash');
+      const inTrash = trash && m.folder === trash.path;
+      // 已在垃圾箱里 = 真删除（IMAP \Deleted + EXPUNGE），不可恢复；文案要跟实际动作一致
+      if (!confirm(inTrash ? '永久删除这封邮件？此操作不可恢复！' : '把这封邮件移到已删除？')) return;
       try {
-        const acc = this.accounts.find((a) => a.id === m.accountId);
-        const trash = (this.foldersByAccount[m.accountId] || []).find((f) => f.special === '\\Trash');
-        if (trash && m.folder !== trash.path) {
+        if (!inTrash) {
           await this.api('/api/move', { method: 'POST', body: { account: m.accountId, folder: m.folder, uids: [m.uid], dest: trash.path } });
         } else {
           await this.api('/api/delete', { method: 'POST', body: { account: m.accountId, folder: m.folder, uids: [m.uid] } });
         }
         this.dropRows([m]);
         this.loadAllFoldersAndUnread();
-        this.toast(acc ? `已删除（${acc.displayName}）` : '已删除', 'ok');
+        this.toast(inTrash ? '已永久删除' : '已删除', 'ok');
       } catch (e) { this.toast(e.message, 'error'); }
     },
     async archive(m) {
@@ -780,7 +781,14 @@ const app = createApp({
     async batchRemove() {
       const msgs = this.selectedMessages();
       if (!msgs.length) return;
-      if (!confirm(`把选中的 ${msgs.length} 封邮件移到已删除？`)) return;
+      // 混选时提示要按实际动作拆开：移进垃圾箱 vs 真删除（不可恢复）
+      const inTrash = msgs.filter((m) => this.trashOf(m.accountId)?.path === m.folder).length;
+      const outTrash = msgs.length - inTrash;
+      let tip;
+      if (!inTrash) tip = `把选中的 ${msgs.length} 封邮件移到已删除？`;
+      else if (!outTrash) tip = `永久删除选中的 ${msgs.length} 封邮件？此操作不可恢复！`;
+      else tip = `把选中的 ${outTrash} 封邮件移到已删除，另外 ${inTrash} 封已在已删除里、将被永久删除（不可恢复）。确定？`;
+      if (!confirm(tip)) return;
       try {
         await Promise.all(this.groupSelection().map((g) => {
           const trash = this.trashOf(g.accountId);
@@ -793,7 +801,7 @@ const app = createApp({
         const n = msgs.length;
         this.dropRows(msgs);
         this.loadAllFoldersAndUnread();
-        this.toast(`已删除 ${n} 封`, 'ok');
+        this.toast(inTrash ? `已永久删除 ${n} 封` : `已删除 ${n} 封`, 'ok');
       } catch (e) { this.toast(e.message, 'error'); }
     },
     async batchArchive() {
