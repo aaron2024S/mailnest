@@ -272,19 +272,17 @@
       <!-- 列表 -->
       <section class="list">
         <div class="list-head">
-          <label class="list-cb" :class="{on:allSelected, part: selCount && !allSelected}" :title="allSelected?'取消全选':'全选本页'">
+          <label class="list-cb" :class="{on:allSelected, part: selCount && !allSelected}" :title="allSelected?'取消全选':'全选已加载的邮件'">
             <input type="checkbox" :checked="allSelected" @change="toggleSelectAll">
             <span class="cb"><svg class="i"><use href="#i-check"/></svg></span>
           </label>
           <template v-if="!selCount">
             <h3>{{ listTitle }}</h3>
-            <span class="n" v-if="total">{{ total }} 封</span>
+            <span class="n" v-if="total">{{ total }} 封<template v-if="messages.length<total"> · 已加载 {{ messages.length }}</template></span>
             <span class="sp"></span>
-            <div class="pager" v-if="total>pageSize">
-              <button class="icon-btn" style="width:26px;height:26px" :disabled="page<=1" @click="gotoPage(page-1)"><svg class="i" style="width:14px;height:14px"><use href="#i-back"/></svg></button>
-              {{ page }} / {{ Math.ceil(total/pageSize) }}
-              <button class="icon-btn" style="width:26px;height:26px" :disabled="page>=Math.ceil(total/pageSize)" @click="gotoPage(page+1)"><svg class="i" style="width:14px;height:14px"><use href="#i-next"/></svg></button>
-            </div>
+            <label class="list-act" :class="{on: unreadOnly}" @click="unreadOnly=!unreadOnly" title="只显示未读邮件">未读</label>
+            <button class="list-act" v-if="total" @click="readAllFolder" title="整个文件夹全部标为已读，服务端一次完成">全部已读</button>
+            <button class="list-act danger" v-if="canEmpty" @click="emptyTrash" title="永久删除此文件夹的全部邮件">清空</button>
           </template>
           <div class="bulk" v-else>
             <span class="bulk-n">已选 <b>{{ selCount }}</b> 封</span>
@@ -297,7 +295,7 @@
             <button class="bulk-text" @click="clearSel">取消选择</button>
           </div>
         </div>
-        <div class="rows" :class="{'has-sel': selCount>0}">
+        <div class="rows" :class="{'has-sel': selCount>0}" @scroll="onRowsScroll">
           <div class="row" v-for="m in filteredMessages" :key="m.uid" draggable="true"
                :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
                         'is-sel': isSel(m),
@@ -328,9 +326,13 @@
           </div>
           <div class="empty" v-if="!loadingMessages && !filteredMessages.length">
             <svg class="i"><use href="#i-inbox"/></svg>
-            <div>{{ searchQ ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
+            <div>{{ searchQ || unreadOnly ? '没有匹配的邮件' : '这个文件夹暂时是空的' }}</div>
           </div>
           <div class="empty" v-if="loadingMessages && !filteredMessages.length"><span class="spin"></span> 正在从服务器读取…</div>
+          <div class="load-more" v-if="messages.length < total">
+            <span v-if="loadingMore"><span class="spin"></span> 正在加载更多…</span>
+            <span v-else>向上滚动加载更多（已加载 {{ messages.length }} / {{ total }}）</span>
+          </div>
         </div>
         <div class="col-resizer" :class="{on:resizing}" title="拖动调节列表宽度"
              @mousedown.prevent="startListResize" @dblclick="resetListWidth"></div>

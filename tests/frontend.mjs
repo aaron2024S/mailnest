@@ -447,25 +447,45 @@ function bulkCtx(messages, opts = {}) {
   ok('只剩 1 封时删掉 → 总数归零', ctx.total === 0);
 }
 
-// 15) 当前页被删空时退回上一页（否则停在空白页）
+// 15) 已加载的行被删空但文件夹还有邮件 → 回第一页重拉（滚动加载没有「上一页」）
 {
   const rows = [msg({ uid: 5, folder: 'INBOX' })];
   const ctx = bulkCtx(rows, { selection: ['a1|INBOX|5'] });
   ctx.total = 21; ctx.page = 2;
-  let wentTo = null;
-  ctx.gotoPage = (p) => { wentTo = p; };
+  let reloaded = false;
+  ctx.loadMessages = () => { reloaded = true; };
   M.dropRows.call(ctx, rows);
-  ok('删空当前页 → 退回上一页', wentTo === 1, String(wentTo));
+  ok('删空已加载行且还有剩余 → 回第一页重拉', reloaded && ctx.page === 1, `page=${ctx.page}`);
   ok('删空当前页 → 总数也减了', ctx.total === 20, String(ctx.total));
 }
 {
   const rows = [msg({ uid: 5 })];
   const ctx = bulkCtx(rows, { selection: ['a1|INBOX|5'] });
-  ctx.total = 3; ctx.page = 1;
+  ctx.total = 1; ctx.page = 1; // 文件夹里只有这一封：删光后 total=0，不应该再重拉
   let called = false;
-  ctx.gotoPage = () => { called = true; };
+  ctx.loadMessages = () => { called = true; };
   M.dropRows.call(ctx, rows);
-  ok('第一页删空不往回跳（没上一页）', called === false);
+  ok('删光（total=0）不重拉', called === false && ctx.total === 0);
+}
+
+// 15b) 只看未读筛选：真实调用 computed，与搜索叠加
+{
+  const rows = [
+    msg({ uid: 1, flags: ['\\Seen'], subject: '已读甲' }),
+    msg({ uid: 2, flags: [], subject: '未读乙' }),
+    msg({ uid: 3, flags: ['\\Flagged'], subject: '未读丙' }),
+  ];
+  const mkCtx = (over = {}) => ({
+    messages: rows, searchQ: '', unreadOnly: false,
+    msgMatch(m) { return !this.searchQ || m.subject.includes(this.searchQ); },
+    ...over,
+  });
+  ok('未读筛选 → 只剩 2 封未读', C.filteredMessages.call(mkCtx({ unreadOnly: true })).length === 2, String(C.filteredMessages.call(mkCtx({ unreadOnly: true })).length));
+  ok('只搜索「乙」 → 1 封', C.filteredMessages.call(mkCtx({ searchQ: '乙' })).length === 1);
+  ok('未读 + 「乙」 → 1 封（乙是未读）', C.filteredMessages.call(mkCtx({ unreadOnly: true, searchQ: '乙' })).length === 1);
+  ok('未读 + 「甲」 → 0 封（甲是已读，被筛掉）', C.filteredMessages.call(mkCtx({ unreadOnly: true, searchQ: '甲' })).length === 0);
+  ok('visibleRows 直接复用 filteredMessages（全选口径跟随筛选）',
+     C.visibleRows.call({ filteredMessages: [1, 2, 3] }).length === 3);
 }
 
 // 16) 单封删除走同一条路径：总数也要减

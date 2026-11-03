@@ -374,6 +374,32 @@ export async function moveMessages(uid, accountId, folder, messageUids, dest) {
   }
 }
 
+// 整夹标记已读：STORE 1:* +FLAGS (\Seen)，服务端一次完成 —— 不依赖前端翻页，
+// 「只看未读」筛出几百封时也无需先全部加载
+export async function markAllRead(uid, accountId, folder) {
+  try {
+    return await withMailbox(uid, accountId, folder, async (client) => {
+      await client.messageFlagsAdd('1:*', ['\\Seen'], { uid: true });
+      return { ok: true };
+    });
+  } catch (e) {
+    throw imapError(e);
+  }
+}
+
+// 清空文件夹：STORE \Deleted + EXPUNGE，真删（区别于删进垃圾箱）。
+// 只允许对垃圾箱类文件夹调用；special 由路由层用 listFolders 校验
+export async function emptyFolder(uid, accountId, folder) {
+  try {
+    return await withMailbox(uid, accountId, folder, async (client) => {
+      await client.messageDelete('1:*', { uid: true });
+      return { ok: true };
+    });
+  } catch (e) {
+    throw imapError(e);
+  }
+}
+
 export async function deleteMessages(uid, accountId, folder, messageUids) {
   try {
     return await withMailbox(uid, accountId, folder, async (client) => {

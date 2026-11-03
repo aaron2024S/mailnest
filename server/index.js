@@ -11,7 +11,7 @@ import {
 } from './store.js';
 import {
   listFolders, createFolder, listMessages, getMessage, getAttachment, setFlags,
-  moveMessages, deleteMessages, sendMail, testAccount,
+  moveMessages, deleteMessages, markAllRead, emptyFolder, sendMail, testAccount,
   listDrafts, saveDraft, deleteDraft, dropConnections, unseenCounts,
 } from './mail.js';
 import {
@@ -451,6 +451,34 @@ api.post('/delete', guard, async (req, res) => {
 api.get('/unread', guard, async (req, res) => {
   try {
     res.json({ counts: await unseenCounts(req.user.id, String(req.query.account || '')) });
+  } catch (e) { fail(res, e); }
+});
+
+// 整夹全部已读 / 清空垃圾箱类文件夹 —— 作用于服务端全集，不依赖前端分页加载
+api.post('/folders/read-all', guard, async (req, res) => {
+  try {
+    const { account, folder } = req.body || {};
+    if (!account || !folder) return res.status(400).json({ error: '缺少账号或文件夹' });
+    const acc = findAccount(req.user.id, String(account));
+    if (!acc) return res.status(404).json({ error: '邮箱账号不存在' });
+    audit(req.user.id, 'folder-read-all', `${acc.email}/${folder}`, clientIp(req));
+    res.json(await markAllRead(req.user.id, acc.id, String(folder)));
+  } catch (e) { fail(res, e); }
+});
+
+api.post('/folders/empty', guard, async (req, res) => {
+  try {
+    const { account, folder } = req.body || {};
+    if (!account || !folder) return res.status(400).json({ error: '缺少账号或文件夹' });
+    const acc = findAccount(req.user.id, String(account));
+    if (!acc) return res.status(404).json({ error: '邮箱账号不存在' });
+    // 真删除不可恢复：只允许已删除/垃圾邮件两类文件夹，其余一律拒绝
+    const node = (await listFolders(req.user.id, acc.id)).find((f) => f.path === String(folder));
+    if (!node || !['\\Trash', '\\Junk'].includes(node.special)) {
+      return res.status(400).json({ error: '只能清空「已删除」或「垃圾邮件」文件夹' });
+    }
+    audit(req.user.id, 'folder-empty', `${acc.email}/${folder}`, clientIp(req));
+    res.json(await emptyFolder(req.user.id, acc.id, String(folder)));
   } catch (e) { fail(res, e); }
 });
 

@@ -17,6 +17,8 @@ function envelope(i) {
 }
 
 let sawXoauth2 = false;
+const storeLog = [];
+let expungeCount = 0;
 
 const server = net.createServer((sock) => {
   sock.setEncoding('utf8');
@@ -99,6 +101,13 @@ const server = net.createServer((sock) => {
           sock.write(`* ${i} FETCH (UID ${100 + i} FLAGS (\\Seen) INTERNALDATE "02-Nov-2026 09:00:00 +0800" RFC822.SIZE 1234 ${envelope(i)} ${SENT_BODY})\r\n`);
         }
         sock.write(`${tag2} OK fetch done\r\n`);
+      } else if (C === 'STORE') {
+        // 记录整夹操作发出的 STORE（全部已读 / 清空），供后面断言
+        storeLog.push(rest);
+        sock.write(`${tag2} OK store done\r\n`);
+      } else if (C === 'EXPUNGE') {
+        expungeCount++;
+        sock.write(`${tag2} OK expunge done\r\n`);
       } else if (C === 'LOGOUT') {
         sock.write(`* BYE bye\r\n${tag2} OK done\r\n`);
         sock.end();
@@ -187,6 +196,15 @@ check('正文发件人地址', msg.from.address === 'zhangsan@qq.com', JSON.stri
 const oauthPage = await listMessages(user.id, 'a_oauth', 'INBOX', { page: 1, pageSize: 50 });
 check('OAuth 账号能收信', oauthPage.total === 14 && oauthPage.messages.length === 14, `total=${oauthPage.total} len=${oauthPage.messages.length}`);
 check('OAuth 认证走 XOAUTH2 而非密码', sawXoauth2 === true);
+
+// ---------- 整夹操作：全部已读 / 清空（都应发 UID STORE，清空还要 EXPUNGE） ----------
+const { markAllRead, emptyFolder } = await import('../server/mail.js');
+await markAllRead(user.id, 'a_test', 'INBOX');
+check('全部已读发出 STORE 1:* +\\Seen', storeLog.some((l) => /^1:\*\s+\+FLAGS/.test(l) && /\\Seen/.test(l)),
+  JSON.stringify(storeLog));
+await emptyFolder(user.id, 'a_test', 'Trash');
+check('清空发出 STORE \\Deleted', storeLog.some((l) => /\\Deleted/.test(l)), JSON.stringify(storeLog));
+check('清空触发 EXPUNGE（真删，不是再进垃圾箱）', expungeCount >= 1, String(expungeCount));
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'HAS FAILURES'}  pass=${pass} fail=${fail}`);
 server.close();

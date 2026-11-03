@@ -57,6 +57,8 @@ const app = createApp({
       page: 1,
       pageSize: 50,
       loadingMessages: false,
+      loadingMore: false,
+      unreadOnly: false,
       selected: null,
       searchQ: '',
       syncing: false,
@@ -147,10 +149,8 @@ const app = createApp({
     agentBrief() {
       return `添加一个 MCP 服务器：名称 mailnest，类型 HTTP，地址 ${this.mcpUrl}，请求头 Authorization: Bearer ${this.agent.created}`;
     },
-    // 当前列表里能被选中的行（搜索过滤后的可见行）
-    visibleRows() {
-      return this.messages.filter((m) => !this.searchQ || this.msgMatch(m));
-    },
+    // 当前列表里能被选中的行（搜索 + 只看未读过滤后的可见行）
+    visibleRows() { return this.filteredMessages; },
     selCount() { return this.selection.length; },
     allSelected() {
       const rows = this.visibleRows;
@@ -160,9 +160,27 @@ const app = createApp({
       return this.messages.some((m) => this.selection.includes(this.msgKey(m)) && !m.flags.includes('\\Seen'));
     },
     filteredMessages() {
-      if (!this.searchQ) return this.messages;
-      return this.messages.filter((m) => this.msgMatch(m));
+      let rows = this.messages;
+      if (this.searchQ) rows = rows.filter((m) => this.msgMatch(m));
+      if (this.unreadOnly) rows = rows.filter((m) => !m.flags.includes('\\Seen'));
+      return rows;
     },
+    // 当前视图对应的账号+文件夹（滚动加载、全部已读、清空共用）
+    curFolderRef() {
+      if (this.activeAccount === 'all') {
+        if (!this.allFolder) return null;
+        const sep = this.allFolder.indexOf('|');
+        return { account: this.allFolder.slice(0, sep), folder: this.allFolder.slice(sep + 1) };
+      }
+      return { account: this.activeAccount, folder: this.activeFolder };
+    },
+    curFolderNode() {
+      const ref = this.curFolderRef;
+      if (!ref) return null;
+      return this.foldersOf(ref.account).find((f) => f.path === ref.folder) || null;
+    },
+    // 清空只对真删除的垃圾箱类文件夹开放（服务端同样校验）
+    canEmpty() { return ['\\Trash', '\\Junk'].includes(this.curFolderNode?.special); },
     listTitle() {
       if (this.activeAccount === 'all') {
         // 汇总视图：没选具体文件夹时是跨账号的「全部收件箱」；点了某账号的某文件夹要如实显示
@@ -440,8 +458,21 @@ const app = createApp({
     },
     gotoPage(p) { this.page = p; this.clearSel(); this.loadMessages(); },
 
-    async loadMessages() {
-      this.loadingMessages = true;
+    // 滚动加载：接近底部时拉下一页并追加。切文件夹/账号时 page 已被重置为 1
+    async loadMore() {
+      if (this.loadingMessages || this.loadingMore) return;
+      if (!this.total || this.messages.length >= this.total) return;
+      this.page++;
+      await this.loadMessages(true);
+    },
+    onRowsScroll(e) {
+      const el = e.target;
+      if (el.scrollTop + el.clientHeight < el.scrollHeight - 400) return;
+      this.loadMore();
+    },
+
+    async loadMessages(append = false) {
+      if (append) this.loadingMore = true; else this.loadingMessages = true;
       try {
         if (this.activeAccount === 'all' && !this.allFolder) {
           // 汇总视图：各账号 INBOX 各取当前页，按时间归并；总数 = 各账号真实总数之和
@@ -459,8 +490,10 @@ const app = createApp({
           });
           const parts = await Promise.all(jobs);
           this.total = parts.reduce((sum, p) => sum + p.total, 0);
-          this.messages = parts.flatMap((p) => p.messages)
-            .sort((x, y) => new Date(y.date || 0) - new Date(x.date || 0)).slice(0, this.pageSize);
+          const merged = parts.flatMap((p) => p.messages)
+            .sort((x, y) => new Date(y.date || 0) - new Date(x.date || 0));
+          // 追加时不截断：跨账号归并翻页本来就有交错误差，再截断会把行永远弄丢
+          this.messages = append ? this.messages.concat(merged) : merged;
         } else {
           let aid, folder;
           if (this.activeAccount === 'all') {
@@ -470,13 +503,16 @@ const app = createApp({
           }
           const d = await this.api(`/api/messages?account=${aid}&folder=${encodeURIComponent(folder)}&page=${this.page}&pageSize=${this.pageSize}`);
           const acc = this.accounts.find((a) => a.id === aid);
-          this.messages = d.messages.map((m) => ({ ...m, accountId: aid, folder: m.folder || folder, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
+          const rows = d.messages.map((m) => ({ ...m, accountId: aid, folder: m.folder || folder, accountEmail: acc?.email || '', _color: acc?.color || '#2d6cf6' }));
+          this.messages = append ? this.messages.concat(rows) : rows;
           this.total = d.total;
         }
       } catch (e) {
+        if (append) this.page--; // 追加失败回退页码，下次滚动还能重试
         if (!e.handled) this.toast(e.message, 'error');
       } finally {
         this.loadingMessages = false;
+        this.loadingMore = false;
       }
     },
     async refreshAll() {
@@ -486,6 +522,42 @@ const app = createApp({
         await this.loadAllFoldersAndUnread();
         await this.loadMessages();
       } finally { this.syncing = false; }
+    },
+
+    // ---------- 整夹操作（服务端全集，不依赖已加载多少行） ----------
+    // 全部标为已读：汇总视图 = 各账号 INBOX 一起；服务端 STORE 1:* 一次完成
+    async readAllFolder() {
+      const jobs = (this.activeAccount === 'all' && !this.allFolder)
+        ? this.accounts.map((a) => ({ account: a.id, folder: 'INBOX' }))
+        : [this.curFolderRef];
+      try {
+        await Promise.all(jobs.map((j) => this.api('/api/folders/read-all', { method: 'POST', body: j })));
+        // 本地同步：已加载行原地补 \Seen（flags 是共享数组，阅读区同步变化），
+        // 未读数清零，左栏角标立即归零
+        const keys = new Set(jobs.map((j) => `${j.account}|${j.folder}`));
+        for (const m of this.messages) {
+          if (keys.has(`${m.accountId}|${m.folder}`) && !m.flags.includes('\\Seen')) m.flags.push('\\Seen');
+        }
+        for (const j of jobs) this.unreadMap[`${j.account}|${j.folder}`] = 0;
+        this.toast('已全部标为已读', 'ok');
+      } catch (e) {
+        this.toast(e.message, 'error');
+        this.loadAllFoldersAndUnread(); // 部分成功时以服务器状态为准刷新角标
+      }
+    },
+    // 清空：只对已删除/垃圾邮件开放，服务端二次校验 special
+    async emptyTrash() {
+      const ref = this.curFolderRef;
+      if (!ref) return;
+      const n = this.total;
+      if (!confirm(`清空「${this.listTitle}」？其中全部 ${n} 封邮件将被永久删除，无法恢复。`)) return;
+      try {
+        await this.api('/api/folders/empty', { method: 'POST', body: ref });
+        this.unreadMap[`${ref.account}|${ref.folder}`] = 0;
+        this.page = 1;
+        await this.loadMessages();
+        this.toast('已清空', 'ok');
+      } catch (e) { this.toast(e.message, 'error'); }
     },
 
     // ---------- 阅读 ----------
@@ -639,8 +711,8 @@ const app = createApp({
       this.selection = this.selection.filter((k) => !keys.has(k));
       if (this.selected && keys.has(this.msgKey(this.selected))) { this.selected = null; this.readerOpen = false; }
       if (this.selection.length) this.selAnchor = -1;
-      // 当前页被删空了：退回上一页补数据，别留一个空白页
-      if (removed > 0 && !this.messages.length && this.page > 1) this.gotoPage(this.page - 1);
+      // 已加载的行被删空但文件夹里还有邮件：回第一页重拉（滚动加载没有「上一页」概念）
+      if (removed > 0 && !this.messages.length && this.total > 0) { this.page = 1; this.loadMessages(); }
     },
     // 批量已读 / 未读（乐观更新，失败整体回滚）
     async batchRead(read) {
