@@ -464,11 +464,13 @@ api.get('/messages', guard, async (req, res) => {
     }
     const cached = cache.getPage(req.user.id, accountId, folder, opts);
     if (cached) return res.json(cached);
-    // 该文件夹从未同步过：直拉兜底并把这一页写进缓存
+    // 该文件夹从未同步过：直拉兜底并把这一页写进缓存，同时后台把整夹补齐——
+    // 不然这个夹只有 50 封索引，之后的翻页/搜索都不完整
     const fresh = await listMessages(req.user.id, accountId, folder, opts);
     if (fresh.uidvalidity) {
       cache.setUidvalidity(req.user.id, accountId, folder, fresh.uidvalidity);
       cache.upsertEnvelopes(req.user.id, accountId, folder, fresh.messages, fresh.uidvalidity);
+      idle.resyncFolder(req.user.id, accountId, folder).catch(() => { /* 失败靠 watcher 重连或下次访问兜底 */ });
     }
     res.json(fresh);
   } catch (e) { fail(res, e); }

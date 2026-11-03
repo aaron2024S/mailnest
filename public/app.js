@@ -45,6 +45,7 @@ const app = createApp({
       activeAccount: 'all',
       foldersByAccount: {},   // aid -> [folder]
       unreadMap: {},          // `${aid}|${path}` -> count
+      indexing: null,         // {done,total} 首次全量建索引进度（SSE 推送）
       es: null,               // EventSource（实时推送）
       folders: [],
       activeFolder: 'INBOX',
@@ -310,6 +311,11 @@ const app = createApp({
       es.onmessage = (e) => {
         let d;
         try { d = JSON.parse(e.data); } catch { return; }
+        if (d.type === 'indexing') {
+          // 建索引进度：完成（或全部夹处理完）就收掉进度条
+          this.indexing = d.done >= d.total ? null : { done: d.done, total: d.total };
+          return;
+        }
         if (d.type !== 'new-mail') return;
         // 角标直接采用推送的该夹未读数（服务端缓存里算好的）
         if (typeof d.unseen === 'number') this.unreadMap[`${d.accountId}|${d.folder}`] = d.unseen;
@@ -539,6 +545,7 @@ const app = createApp({
           this.messages = append ? this.messages.concat(rows) : rows;
           this.total = d.total;
         }
+        if (!append) this.prefetchBodies(); // 后台预取正文：切邮件时秒开（尤其 outlook）
       } catch (e) {
         if (append) this.page--; // 追加失败回退页码，下次滚动还能重试
         if (!e.handled) this.toast(e.message, 'error');
@@ -547,8 +554,20 @@ const app = createApp({
         this.loadingMore = false;
       }
     },
-    async refreshAll() {
-      if (this.syncing) return;
+    // 后台预取当前列表前 15 封的正文（write-through 进缓存）：
+    // 第一次点开会慢（一个 IMAP 来回），预取过后切换邮件就是纯本地速度。
+    // 顺序慢慢来（不并发打爆 outlook），换夹即停
+    async prefetchBodies() {
+      const gen = (this._prefetchGen = (this._prefetchGen || 0) + 1);
+      for (const m of this.messages.slice(0, 15)) {
+        if (gen !== this._prefetchGen) return;
+        try {
+          await this.api(`/api/message?account=${m.accountId}&folder=${encodeURIComponent(m.folder)}&uid=${m.uid}`);
+        } catch { /* 预取失败无所谓，用户点开时再拉 */ }
+      }
+    },
+
+    async refreshAll() {      if (this.syncing) return;
       this.syncing = true;
       try {
         await this.loadAllFoldersAndUnread();

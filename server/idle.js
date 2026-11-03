@@ -80,11 +80,33 @@ async function watchOnce(uid, accountId, w) {
   const { client } = await createListenerClient(uid, accountId);
   w.client = client;
 
-  // 全量同步所有文件夹的信封（首次/重连）。大邮箱也就几千条 FETCH 摘要，NAS 上一两分钟内完成
+  // 全量同步所有文件夹的信封（首次/重连）。
+  // 逐夹容错：某个夹（尤其 outlook 的大归档）超时/出错，只跳过它，不能让整个快照循环作废——
+  // 否则重连后从头再拉，排在后面的夹永远建不上索引，前端点一次夹就直拉一次服务器
   const folders = await listFolders(uid, accountId);
+  const failed = [];
+  let done = 0;
   for (const f of folders) {
     if (!w.running) { try { client.close(); } catch { /* ignore */ } return; }
-    await syncFolderSnapshot(uid, accountId, client, f.path);
+    try {
+      await syncFolderSnapshot(uid, accountId, client, f.path);
+      emit(uid, accountId, { type: 'indexing', folder: f.path, ok: true, done: ++done, total: folders.length });
+    } catch (e) {
+      failed.push(f.path);
+      emit(uid, accountId, { type: 'indexing', folder: f.path, ok: false, done: ++done, total: folders.length });
+    }
+  }
+  // IDLE 起来之后用独立临时连接补刚才失败的夹，不阻塞监听、不打断 INBOX 选中状态
+  if (failed.length && w.running) {
+    (async () => {
+      for (const p of failed) {
+        if (!w.running) return;
+        try {
+          await resyncFolder(uid, accountId, p);
+          emit(uid, accountId, { type: 'indexing', folder: p, ok: true, done: folders.length, total: folders.length });
+        } catch { /* 下次重连快照再试 */ }
+      }
+    })();
   }
 
   const inbox = folders.find((f) => f.path === 'INBOX' || f.special === '\\Inbox') || folders[0];
@@ -193,16 +215,31 @@ function hasAttachment(node) {
 }
 
 // 整夹快照：status 拿 uidvalidity → fetch 全部信封 → 全量替换缓存。
-// 每个文件夹独立选锁，互不影响
+// 每 500 封 flush 一次：大夹子（outlook 归档几万封）同步到一半就有部分索引可用，内存也不积压
+const SNAPSHOT_BATCH = 500;
+
 async function syncFolderSnapshot(uid, accountId, client, folderPath) {
   const lock = await client.getMailboxLock(folderPath);
   try {
     const uidvalidity = client.mailbox?.uidValidity != null ? Number(client.mailbox.uidValidity) : null;
-    const old = cache.getUidvalidity(uid, accountId, folderPath);
-    const messages = [];
-    for await (const msg of client.fetch('1:*', fetchQuery)) messages.push(toEnvelope(msg));
-    if (old !== uidvalidity) cache.syncFolderFull(uid, accountId, folderPath, uidvalidity, messages);
-    else cache.upsertEnvelopes(uid, accountId, folderPath, messages, uidvalidity);
+    const replaceAll = cache.getUidvalidity(uid, accountId, folderPath) !== uidvalidity;
+    let flushed = false;
+    let batch = [];
+    const flush = (rows) => {
+      // uidvalidity 变了（或首次）→ 整夹重建；之后的部分批次直接追加
+      if (replaceAll && !flushed) {
+        cache.syncFolderFull(uid, accountId, folderPath, uidvalidity, rows);
+        flushed = true;
+      } else if (rows.length) {
+        cache.upsertEnvelopes(uid, accountId, folderPath, rows, uidvalidity);
+      }
+    };
+    for await (const msg of client.fetch('1:*', fetchQuery)) {
+      batch.push(toEnvelope(msg));
+      if (batch.length >= SNAPSHOT_BATCH) { flush(batch); batch = []; }
+    }
+    flush(batch);
+    if (!flushed) flush([]); // 空夹也要落一行 folders 记录，标记「已同步过」
   } finally {
     lock.release();
   }

@@ -302,6 +302,7 @@
             <button class="bulk-text" @click="clearSel">取消选择</button>
           </div>
         </div>
+        <div class="idx-bar" v-if="indexing"><span class="spin"></span> 正在建立索引 {{ indexing.done }}/{{ indexing.total }}…完成后所有文件夹秒开</div>
         <div class="rows" :class="{'has-sel': selCount>0}" @scroll="onRowsScroll">
           <div class="row" v-for="m in filteredMessages" :key="m.uid" draggable="true"
                :class="{'is-active': selected && selected.accountId===m.accountId && selected.uid===m.uid, 'is-unread': !m.flags.includes('\\Seen'),
