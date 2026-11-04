@@ -465,12 +465,18 @@ export function hasAccountData(uid, accountId) {
 }
 
 // ---------- 正文 ----------
+// 正文净化规则的版本：规则一变（如 0.2.1 放开邮件模板样式），旧缓存里按老规则
+// 洗过的 HTML 是残缺的（深色底/背景图被剥掉），必须让它失效重新拉取。
+const BODY_V = 2;
+
 export function getBody(uid, accountId, folderPath, messageUid) {
   const row = getDb(uid).prepare(
     'SELECT body, flags FROM messages WHERE account_id = ? AND folder = ? AND uid = ?'
   ).get(accountId, folderPath, messageUid);
   if (!row || row.body == null) return null;
-  return { ...JSON.parse(row.body), flags: JSON.parse(row.flags) };
+  const parsed = JSON.parse(row.body);
+  if (parsed.v !== BODY_V) return null; // 旧版本缓存当作未拉取，接口会重拉并覆盖
+  return { ...parsed, flags: JSON.parse(row.flags) };
 }
 
 // write-through：正文首次拉取后落库（body 对象不含 flags，flags 单独维护）
@@ -479,7 +485,7 @@ export function putBody(uid, accountId, folderPath, messageUid, body) {
   db.prepare(`
     UPDATE messages SET body = ?, fetched_at = ?, body_tries = 0
     WHERE account_id = ? AND folder = ? AND uid = ?
-  `).run(JSON.stringify(body), Date.now(), accountId, folderPath, messageUid);
+  `).run(JSON.stringify({ ...body, v: BODY_V }), Date.now(), accountId, folderPath, messageUid);
   // 正文进库同时进全文索引（主题/收发人沿用信封里已有的）
   try {
     const row = db.prepare('SELECT envelope FROM messages WHERE account_id = ? AND folder = ? AND uid = ?')

@@ -336,26 +336,60 @@ export async function listMessages(uid, accountId, folder, { page = 1, pageSize 
 }
 
 // ---------- 邮件正文 ----------
+// 邮件模板（Steam / Outlook 通知 / 营销邮件）靠大量内联 CSS + bgcolor/background 属性撑布局。
+// 样式白名单开小了会把深色底、背景图整块剥掉 —— 白底上浅字几乎不可读（0.2.1 用户实测 Steam 邮件）。
+// 所以 CSS 属性按"属性族"全放行；安全由标签与 URL scheme 白名单兜底（script/事件属性本就不在名单里）。
+const cssProps = new Set([
+  // 背景族
+  'background', 'background-color', 'background-image', 'background-repeat', 'background-position',
+  'background-position-x', 'background-position-y', 'background-size', 'background-clip', 'background-origin', 'background-attachment',
+  // 边框族
+  'border', 'border-top', 'border-right', 'border-bottom', 'border-left',
+  'border-width', 'border-style', 'border-color', 'border-radius',
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
+  'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+  'border-top-left-radius', 'border-top-right-radius', 'border-bottom-left-radius', 'border-bottom-right-radius',
+  'border-collapse', 'border-spacing',
+  // 盒模型
+  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'width', 'min-width', 'max-width', 'height', 'min-height', 'max-height',
+  'box-shadow', 'box-sizing', 'outline', 'outline-width', 'outline-style', 'outline-color', 'outline-offset',
+  // 布局
+  'display', 'visibility', 'overflow', 'overflow-x', 'overflow-y', 'float', 'clear', 'vertical-align',
+  'table-layout', 'caption-side', 'empty-cells',
+  'flex', 'flex-grow', 'flex-shrink', 'flex-basis', 'flex-direction', 'flex-wrap',
+  'align-items', 'align-self', 'justify-content', 'gap',
+  // 文字
+  'color', 'opacity', 'cursor', 'direction', 'unicode-bidi',
+  'font', 'font-family', 'font-size', 'font-style', 'font-weight', 'font-variant', 'font-stretch',
+  'line-height', 'letter-spacing', 'word-spacing', 'word-break', 'word-wrap', 'overflow-wrap', 'white-space',
+  'text-indent', 'text-align', 'text-decoration', 'text-decoration-line', 'text-decoration-color', 'text-decoration-style',
+  'text-transform', 'text-shadow', 'text-overflow', 'hyphens',
+  'list-style', 'list-style-type', 'list-style-position', 'list-style-image',
+  'transform', 'zoom', 'object-fit', 'object-position',
+]);
+const allowedStyles = { '*': Object.fromEntries([...cssProps].map((p) => [p, [/.*/]])) };
+
 function cleanHtml(html) {
   return sanitizeHtml(html, {
-    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'h1', 'h2', 'style', 'table', 'thead', 'tbody', 'tr', 'td', 'th']),
+    // <style> 块是邮件模板布局的一部分（类选择器 + 媒体查询），sanitize-html 对它默认告警
+    allowVulnerableTags: true,
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'style', 'center', 'font', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'col', 'colgroup']),
     allowedAttributes: {
-      '*': ['style', 'class', 'align', 'width', 'height', 'colspan', 'rowspan', 'dir'],
+      '*': ['style', 'class', 'align', 'valign', 'width', 'height', 'colspan', 'rowspan', 'dir', 'bgcolor', 'background', 'title', 'lang', 'role'],
       a: ['href', 'name', 'target', 'rel'],
-      img: ['src', 'alt', 'width', 'height'],
-      table: ['border', 'cellpadding', 'cellspacing'],
+      img: ['src', 'alt', 'width', 'height', 'srcset', 'sizes', 'border', 'hspace', 'vspace'],
+      table: ['border', 'cellpadding', 'cellspacing', 'summary'],
     },
     allowedSchemes: ['http', 'https', 'mailto', 'cid', 'data'],
-    allowedStyles: {
-      '*': {
-        color: [/.*/], 'background-color': [/.*/], 'text-align': [/.*/], 'font-size': [/.*/],
-        'font-weight': [/.*/], 'font-family': [/.*/], border: [/.*/], padding: [/.*/],
-        margin: [/.*/], width: [/.*/], 'line-height': [/.*/], 'text-decoration': [/.*/],
-        'vertical-align': [/.*/], 'white-space': [/.*/],
-      },
-    },
+    allowedStyles,
     transformTags: {
       a: sanitizeHtml.simpleTransform('a', { target: '_blank', rel: 'noopener noreferrer nofollow' }),
+      // <body> 不在标签白名单里会被连皮剥掉 —— 邮件普遍把背景色写在 body 上。
+      // 转成 div 保住属性（bgcolor/style 再走属性白名单过滤）。
+      body: sanitizeHtml.simpleTransform('div'),
     },
   });
 }

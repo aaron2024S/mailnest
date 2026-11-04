@@ -254,3 +254,68 @@ test('inline 白名单：带参数与大小写的图片类型仍识别为图片'
   // 前面带空格的 svg 依旧要被挡住（不能被"看起来像图片"骗过）
   assert.equal(attachments.inlineSafe(' image/svg+xml'), false);
 });
+
+// ---------- 邮件模板净化（0.2.1 Steam 邮件白底白字事故） ----------
+// 邮件模板靠内联 CSS + bgcolor/background 属性撑布局，白名单开小了会把深色底
+// 整块剥掉。这组用例锁住：body 转 div、背景族/圆角/尺寸等属性不再被滤。
+const STEAM_LIKE = `
+<body bgcolor="#1b2838" style="background-color:#1b2838;margin:0;padding:20px;">
+<div style="background:#171a21;border-radius:4px;max-width:600px;">
+  <table width="100%" bgcolor="#1b2838">
+    <tr><td style="color:#c6d4df;padding:20px;">zjncu，您好！</td></tr>
+    <tr><td background="https://store.example.com/hero.png" style="background-image:url('https://store.example.com/hero.png');height:120px;">&nbsp;</td></tr>
+    <tr><td style="padding:20px;"><img src="https://store.example.com/capsule.jpg" width="196" height="92" alt="商品" style="display:block;"></td></tr>
+  </table>
+</div>
+</body>`;
+
+test('正文净化：邮件模板的深色底与背景图不再被剥掉', () => {
+  const out = mail.extractMessage({ html: STEAM_LIKE, attachments: [] }, { accountId: acc, folder: 'INBOX', uid: 9001 });
+  const h = out.html;
+  // body 上写的背景必须活下来（转成 div），否则深色邮件变白底浅字
+  assert.match(h, /bgcolor="#1b2838"/i, 'body bgcolor 应保留');
+  assert.match(h, /background-color:\s*#1b2838/i, 'body 内联背景色应保留');
+  assert.doesNotMatch(h, /<body/i, 'body 标签应转成 div（属性保留）');
+  assert.match(h, /background-image/i, 'td 背景图应保留');
+  assert.match(h, /background="https/i, 'td background 属性应保留');
+  assert.match(h, /border-radius/i, '圆角应保留');
+  assert.match(h, /max-width/i, 'max-width 应保留');
+  assert.match(h, /display:\s*block/i, 'img display:block 应保留');
+  assert.match(h, /capsule\.jpg/, 'img src 应保留');
+  // 深色主题杀器：这些是 Steam 深色包装的关键色，丢了 = 白字白底
+  assert.match(h, /#171a21/i, 'background 简写应保留');
+});
+
+test('正文净化：style 块与 class 保留（模板布局依赖它）', () => {
+  const html = '<style>.hero{background-color:#2a475e;color:#fff}</style><div class="hero">hi</div>';
+  const out = mail.extractMessage({ html, attachments: [] }, { accountId: acc, folder: 'INBOX', uid: 9002 });
+  assert.match(out.html, /\.hero\{background-color:#2a475e/, '<style> 块内容应保留');
+  assert.match(out.html, /class="hero"/, 'class 应保留');
+});
+
+test('正文净化：安全底线不松动（script/onclick/javascript: 仍被挡）', () => {
+  const html = '<p onclick="alert(1)">x</p><script>alert(2)</script>' +
+    '<a href="javascript:alert(3)">l</a><img src="javascript:alert(4)" onerror="alert(5)">' +
+    '<iframe src="https://evil.example"></iframe><form action="https://evil.example"></form>';
+  const out = mail.extractMessage({ html, attachments: [] }, { accountId: acc, folder: 'INBOX', uid: 9003 });
+  const h = out.html;
+  assert.doesNotMatch(h, /script/i, 'script 标签不应出现');
+  assert.doesNotMatch(h, /onclick|onerror/i, '事件属性不应出现');
+  assert.doesNotMatch(h, /javascript:/i, 'javascript: 链接不应出现');
+  assert.doesNotMatch(h, /<iframe|<form/i, 'iframe/form 不应出现');
+  assert.match(h, /l</, '文本应保留');
+});
+
+test('正文缓存：BODY_V 变更后旧缓存按未拉取处理（重拉覆盖）', async () => {
+  // 直接写一条不带 v 的旧格式 body，读响应为 null（等于未缓存 → 接口会重拉）
+  cache.upsertEnvelopes(uid, acc, 'INBOX', [{ uid: 9100, subject: 'v', date: '2026-11-04' }], 77);
+  const db = cache.getDb(uid);
+  db.prepare('UPDATE messages SET body = ? WHERE account_id = ? AND uid = ?')
+    .run(JSON.stringify({ html: '<p>old</p>' }), acc, 9100);
+  assert.equal(cache.getBody(uid, acc, 'INBOX', 9100), null, '无版本号的旧缓存应失效');
+  // 新格式写入后能读回
+  cache.putBody(uid, acc, 'INBOX', 9100, { html: '<p>new</p>', text: 'new' });
+  const hit = cache.getBody(uid, acc, 'INBOX', 9100);
+  assert.equal(hit.html, '<p>new</p>');
+  // upsertEnvelopes 会清 body？如果 envelope 重写把 body 清了，这里上面 putBody 之前就 fail 了
+});

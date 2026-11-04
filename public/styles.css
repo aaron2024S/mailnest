@@ -277,12 +277,18 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .att:hover{border-color:var(--accent);color:var(--accent);}
 .att svg{width:15px;height:15px;}
 .att .sz{color:var(--text-3);font-size:11px;}
-.r-html{font-size:14px;line-height:1.75;word-break:break-word;}
+/* 邮件正文：白纸卡片渲染。绝大多数邮件假定白底（深色字），在深色主题下直接铺
+   会白字白底不可读；自带深色底的邮件（如 Steam）会自己铺满，白纸只留边距。
+   颜色用固定值，不跟主题变量 —— 正文色彩是邮件自己的事。 */
+.r-html{font-size:14px;line-height:1.75;word-break:break-word;background:#fff;color:#24292f;
+  padding:22px 26px;border-radius:12px;}
 .r-html img{max-width:100%;height:auto;}
-.r-html table{border-collapse:collapse;width:100%;margin:10px 0;}
-.r-html td,.r-html th{border:1px solid var(--border);padding:6px 10px;font-size:13px;}
-.r-html th{background:var(--surface-2);}
-.r-html blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid var(--border-strong);color:var(--text-2);}
+/* 带 style/bgcolor 的模板表格不碰（它们的布局靠自己的内联样式）；
+   只有"裸"表格（纯文本布局、无任何样式）才补网格边框，保证可读性 */
+.r-html table:not([style]){border-collapse:collapse;width:100%;margin:10px 0;}
+.r-html td:not([style]),.r-html th:not([style]){border:1px solid #e3e6ea;padding:6px 10px;font-size:13px;}
+.r-html th:not([style]){background:#f5f6f8;}
+.r-html blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a;}
 .r-text{white-space:pre-wrap;font-size:14px;line-height:1.75;}
 
 /* 快速回复 */
