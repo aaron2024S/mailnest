@@ -212,8 +212,13 @@ async function watchOnce(uid, accountId, w) {
       client.on('flags', async (data) => {
         try {
           if (data?.uid) {
-            cache.updateFlags(uid, accountId, inbox.path, [data.uid], { set: [...(data.flags || [])] });
-            emit(uid, accountId, { type: 'flags', folder: inbox.path, uids: [data.uid] });
+            const flags = [...(data.flags || [])];
+            cache.updateFlags(uid, accountId, inbox.path, [data.uid], { set: flags });
+            // 带上新的旗标集合与未读数：前端据此就地改行，不必为一条已读变动重载整个列表
+            emit(uid, accountId, {
+              type: 'flags', folder: inbox.path, uids: [data.uid], flags,
+              unseen: unseenCount(uid, accountId, inbox.path),
+            });
           }
         } catch { /* ignore */ }
       });
@@ -224,7 +229,11 @@ async function watchOnce(uid, accountId, w) {
           // ⚠ 必须走不取锁的 pollInboxInline —— 本连接的 INBOX 锁正被 watcher 持着，
           //   syncFolderSnapshot 再去 getMailboxLock 会排在锁队列里永远等不到（死锁）
           const r = await pollInboxInline(uid, accountId, client, inbox.path);
-          emit(uid, accountId, { type: 'expunge', folder: inbox.path });
+          // 带上未读数：别的客户端删信/标已读后，左栏角标要跟着动，否则一直停在旧数字
+          emit(uid, accountId, {
+            type: 'expunge', folder: inbox.path,
+            unseen: unseenCount(uid, accountId, inbox.path),
+          });
           if (r && r.fetched > 0) {
             emit(uid, accountId, { type: 'new-mail', folder: inbox.path, count: r.fetched, unseen: unseenCount(uid, accountId, inbox.path) });
           }
@@ -249,6 +258,12 @@ async function watchOnce(uid, accountId, w) {
             if (r && r.fetched > 0) {
               console.log(`[mailnest] IDLE 静默（QQ/163 等常见），轮询对账补上 ${accountId} ${inbox.path} 新增 ${r.fetched} 封`);
               emit(uid, accountId, { type: 'new-mail', folder: inbox.path, count: r.fetched, unseen: unseenCount(uid, accountId, inbox.path) });
+            } else if (r && r.pruned > 0) {
+              // 别的客户端删了信：缓存已经 prune 掉，得让前端把行也收掉
+              emit(uid, accountId, {
+                type: 'expunge', folder: inbox.path,
+                unseen: unseenCount(uid, accountId, inbox.path),
+              });
             }
           } catch (e) {
             if (++pollFails >= 3) throw new Error('轮询对账连续失败，重开连接'); // runWatcher 退避重连

@@ -545,6 +545,40 @@ api.post('/folders', guard, async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// 打开（或翻页）一个夹时，如果本地索引已经陈旧，后台对账一次。
+// 为什么需要：常驻监听（IDLE）只挂在 INBOX 上，别的客户端在「已归档 / 自定义文件夹」里
+// 删除或标已读，本地缓存永远不知道；只有用户主动点刷新才会整夹重同步。
+// 这里不阻塞列表：立刻回缓存，同步完成后 SSE folder-synced 让前端静默重载。
+const FOLDER_STALE_MS = Number(process.env.MAILNEST_FOLDER_STALE_MS) || 5 * 60_000;
+// 「已发送 / 草稿 / 已删除 / 垃圾」是网页端、手机端也会频繁写入的夹：刚从别处发完信、
+// 删完信切过来，5 分钟的对账窗口太钝，压到 1 分钟（没变化时对账只花一条 STATUS，很便宜）
+const HOT_FOLDER_STALE_MS = Number(process.env.MAILNEST_HOT_FOLDER_STALE_MS) || 60_000;
+const autoSyncs = new Map(); // `${uid}\0${accountId}` → 正在跑的自动对账条数
+function syncIfStale(uid, accountId, folderPath) {
+  try {
+    const meta = cache.getFolderSync(uid, accountId, folderPath);
+    if (!meta || !meta.fullIndex) return; // 没建过完整索引的走直拉兜底那条路
+    let staleMs = FOLDER_STALE_MS;
+    try {
+      const f = (cache.getFolders(uid, accountId) || []).find((x) => x.path === folderPath);
+      if (f && ['\\Sent', '\\Drafts', '\\Trash', '\\Junk'].includes(f.special)) staleMs = HOT_FOLDER_STALE_MS;
+    } catch { /* 文件夹清单读不到就按普通夹处理 */ }
+    if (meta.syncedAt && Date.now() - meta.syncedAt < staleMs) return;
+    // 每条对账会新开一条 IMAP 连接：快速连点多个文件夹时别把服务器并发配额打满
+    // （outlook 之类会直接拒连，反而让别的请求失败）
+    const key = `${uid}\u0000${accountId}`;
+    const running = autoSyncs.get(key) || 0;
+    if (running >= 2) return;
+    autoSyncs.set(key, running + 1);
+    idle.resyncFolder(uid, accountId, folderPath)
+      .catch(() => { /* 失败等下次访问或手动刷新 */ })
+      .finally(() => {
+        const left = (autoSyncs.get(key) || 1) - 1;
+        if (left <= 0) autoSyncs.delete(key); else autoSyncs.set(key, left);
+      });
+  } catch { /* 缓存查询失败不影响列表返回 */ }
+}
+
 api.get('/messages', guard, async (req, res) => {
   try {
     const accountId = String(req.query.account || '');
@@ -564,7 +598,11 @@ api.get('/messages', guard, async (req, res) => {
       }
     }
     const cached = cache.getPage(req.user.id, accountId, folder, opts);
-    if (cached) return res.json(backgroundSync || syncError ? { ...cached, backgroundSync, syncError } : cached);
+    if (cached) {
+      // 没主动刷新时也顺手对账（后台、节流到 5 分钟一次）：网页端/手机端改过的信能自己追上来
+      if (!req.query.sync) syncIfStale(req.user.id, accountId, folder);
+      return res.json(backgroundSync || syncError ? { ...cached, backgroundSync, syncError } : cached);
+    }
     // 该文件夹从未同步过：直拉兜底并把这一页写进缓存，同时后台把整夹补齐——
     // 不然这个夹只有 50 封索引，之后的翻页/搜索都不完整
     const fresh = await listMessages(req.user.id, accountId, folder, opts);
@@ -796,10 +834,13 @@ api.post('/send', guard, async (req, res) => {
     const { to, cc, bcc, subject, text, html, inReplyTo, references, attachments } = req.body || {};
     if (!to || (Array.isArray(to) && !to.length)) return res.status(400).json({ error: '请填写收件人' });
     if (!text && !html) return res.status(400).json({ error: '邮件内容不能为空' });
-    const result = await sendMail(req.user.id, acc, { to, cc, bcc, subject, text, html, inReplyTo, references, attachments });
+    const { sentPath, ...result } = await sendMail(req.user.id, acc, { to, cc, bcc, subject, text, html, inReplyTo, references, attachments });
     if (req.body?.draftId) deleteDraft(req.user.id, String(req.body.draftId));
     audit(req.user.id, 'send', `${acc.email} -> ${Array.isArray(to) ? to.join(',') : to}`, clientIp(req));
     res.json(result);
+    // sendMail 只把原件 APPEND 到服务器，本地「已发送」索引里没有这封 —— 后台补一次，
+    // 否则发完点进已发送看不到自己刚发的信，得手动刷新（MCP 路径一直有这步，HTTP 漏了）
+    if (sentPath) idle.resyncFolder(req.user.id, acc.id, sentPath).catch(() => { /* 下次访问兜底 */ });
   } catch (e) {
     const msg = String(e?.response || e?.message || e);
     if (/535|auth/i.test(msg)) {

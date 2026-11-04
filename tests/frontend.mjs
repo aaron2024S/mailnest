@@ -610,4 +610,64 @@ function bulkCtx(messages, opts = {}) {
   ok('归档后阅读区关闭', ctx.readerOpen === false && ctx.selected === null);
 }
 
+// ---------- SSE 事件分发（别的客户端删信/标已读后的同步） ----------
+function sseCtx(over = {}) {
+  const ctx = {
+    messages: [], selected: null, unreadMap: {}, accounts: [{ id: 'a1', displayName: 'QQ' }],
+    activeAccount: 'a1', activeFolder: 'INBOX', allFolder: null, page: 1, searchMode: false,
+    curFolderRef: { account: 'a1', folder: 'INBOX' },
+    loads: 0,
+    loadMessages() { ctx.loads++; return Promise.resolve(); },
+    toast() {},
+    ...over,
+  };
+  ctx.onServerEvent = M.onServerEvent;
+  return ctx;
+}
+
+// 21) 别的客户端删了 INBOX 里的信：缓存已 prune，列表必须跟着重载，否则留下点开报错的幽灵行
+{
+  const ctx = sseCtx();
+  await ctx.onServerEvent({ type: 'expunge', accountId: 'a1', folder: 'INBOX', unseen: 4 });
+  ok('删除事件触发当前夹重载', ctx.loads === 1, String(ctx.loads));
+  ok('删除事件同步未读数', ctx.unreadMap['a1|INBOX'] === 4, String(ctx.unreadMap['a1|INBOX']));
+}
+
+// 22) 别的夹被删：不动当前列表（别为无关文件夹整表闪一下）
+{
+  const ctx = sseCtx();
+  await ctx.onServerEvent({ type: 'expunge', accountId: 'a1', folder: 'Archive', unseen: 0 });
+  ok('非当前夹的删除事件不重载列表', ctx.loads === 0, String(ctx.loads));
+}
+
+// 23) 已读/星标变动：就地改行，不重载；阅读区那份副本也要一起改
+{
+  const row = msg({ uid: 11, flags: [] });
+  const selected = { ...msg({ uid: 11, flags: [] }) };
+  const ctx = sseCtx({ messages: [row], selected });
+  await ctx.onServerEvent({ type: 'flags', accountId: 'a1', folder: 'INBOX', uids: [11], flags: ['\\Seen', '\\Flagged'], unseen: 2 });
+  ok('旗标事件不重载列表', ctx.loads === 0, String(ctx.loads));
+  ok('旗标事件更新行', row.flags.includes('\\Seen') && row.flags.includes('\\Flagged'));
+  ok('旗标事件更新阅读区副本', selected.flags.includes('\\Seen'));
+  ok('旗标事件更新未读数', ctx.unreadMap['a1|INBOX'] === 2, String(ctx.unreadMap['a1|INBOX']));
+}
+
+// 24) 后台对账完成：第 1 页静默重载，第 2 页不把用户弹回第一页
+{
+  const p1 = sseCtx();
+  await p1.onServerEvent({ type: 'folder-synced', accountId: 'a1', folder: 'INBOX' });
+  ok('后台同步完成时第 1 页会重载', p1.loads === 1, String(p1.loads));
+  const p2 = sseCtx({ page: 3 });
+  await p2.onServerEvent({ type: 'folder-synced', accountId: 'a1', folder: 'INBOX' });
+  ok('后台同步不会把翻页中的用户弹回第一页', p2.loads === 0 && p2.page === 3, String(p2.loads));
+}
+
+// 25) 汇总视图（全部收件箱）里 INBOX 的变动也要重载
+{
+  const ctx = sseCtx({ activeAccount: 'all', allFolder: null, curFolderRef: null });
+  await ctx.onServerEvent({ type: 'new-mail', accountId: 'a1', folder: 'INBOX', count: 1, unseen: 9 });
+  ok('汇总视图收新信会重载', ctx.loads === 1, String(ctx.loads));
+  ok('汇总视图不重置为单账号视图', ctx.activeAccount === 'all');
+}
+
 console.log(`\n全部通过：${pass} 项断言`);

@@ -637,11 +637,13 @@ export async function sendMail(uid, account, opts) {
   };
   const info = await trans.sendMail(mail);
   // 发送后归档到「已发送」（服务器支持 APPEND 才能落，失败不影响发信结果）
+  let sentPath = null;
   try {
     const { client } = await getClient(uid, account.id);
     const folders = await client.list();
     const sent = folders.find((f) => f.specialUse === '\\Sent');
     if (sent) {
+      sentPath = sent.path;
       const raw = info.message; // nodemailer 返回原始流缓冲
       // 归档只是锦上添花：锁等不到就放弃，绝不能让"信已经发出去了"的请求挂在这里
       // （挂住 → 用户以为没发出 → 重发 → 对方收到两封）
@@ -658,7 +660,8 @@ export async function sendMail(uid, account, opts) {
       }
     }
   } catch { /* 已发送归档失败静默处理 */ }
-  return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected };
+  // sentPath 给调用方用来把「已发送」缓存追上服务器（APPEND 只落服务器，本地索引还是旧的）
+  return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, sentPath };
 }
 
 // ---------- 连通性测试（添加账号前调用） ----------

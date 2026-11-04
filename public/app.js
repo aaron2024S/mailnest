@@ -333,69 +333,7 @@ const app = createApp({
       es.onmessage = (e) => {
         let d;
         try { d = JSON.parse(e.data); } catch { return; }
-        if (d.type === 'indexing') {
-          // 建索引进度：完成（或全部夹处理完）就收掉进度条
-          this.indexing = d.done >= d.total ? null : { done: d.done, total: d.total };
-          return;
-        }
-        if (d.type === 'prefetch') {
-          // 后台正文缓存进度：一批批把新邮件存到本地，完成时收起
-          this.prefetchErr = null;
-          if (d.finished) { this.prefetch = null; return; }
-          this.prefetch = { done: d.done, pending: d.pending, folder: d.folder };
-          return;
-        }
-        if (d.type === 'prefetch-error') {
-          // 缓存中断：进度条位置显示原因（连接失败/网络问题等），恢复后自动变回进度
-          this.prefetchErr = d.message || '未知错误';
-          return;
-        }
-        if (d.type === 'folder-synced') {
-          // sync=1 请求等不及先回了缓存，后台同步完成后补一次静默重载
-          const ref = this.curFolderRef;
-          const isCur = ref && ref.account === d.accountId && ref.folder === d.folder;
-          const isSummaryInbox = this.activeAccount === 'all' && !this.allFolder && d.folder === 'INBOX';
-          if (isCur || isSummaryInbox) {
-            this.page = 1;
-            this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
-          }
-          return;
-        }
-        if (d.type === 'watch-error') {
-          // 监听断了会自动重连，只提示一次，别每次重试都弹
-          if (!this._watchErrAt || Date.now() - this._watchErrAt > 5 * 60_000) {
-            this._watchErrAt = Date.now();
-            this.toast('实时收信暂时中断，正在自动重连', 'warn');
-          }
-          return;
-        }
-        if (d.type === 'empty-done' || d.type === 'empty-error') {
-          if (d.type === 'empty-done') {
-            this.toast(d.count ? `已彻底删除 ${d.count} 封邮件` : '文件夹已清空', 'ok');
-          } else {
-            this.toast(`清空失败：${d.message}`, 'error');
-            const cur = this.curFolderRef;
-            if (cur && cur.account === d.accountId && cur.folder === d.folder) {
-              this.page = 1;
-              this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
-            }
-          }
-          return;
-        }
-        if (d.type !== 'new-mail') return;
-        // 角标直接采用推送的该夹未读数（服务端缓存里算好的）
-        if (typeof d.unseen === 'number') this.unreadMap[`${d.accountId}|${d.folder}`] = d.unseen;
-        const acc = this.accounts.find((a) => a.id === d.accountId);
-        const name = acc?.displayName || d.email || '邮箱';
-        this.toast(`${name} 收到 ${d.count} 封新邮件`, 'ok');
-        // 正开着这个文件夹就静默重载第一页（缓存已由监听器更新，这次拉取是纯本地库查询）
-        const ref = this.curFolderRef;
-        const isCur = ref && ref.account === d.accountId && ref.folder === d.folder;
-        const isSummaryInbox = this.activeAccount === 'all' && !this.allFolder && d.folder === 'INBOX';
-        if (isCur || isSummaryInbox) {
-          this.page = 1;
-          this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
-        }
+        this.onServerEvent(d);
       };
       // 普通断网由 EventSource 原生重连；CLOSED 表示服务端明确拒绝（如会话过期），
       // 浏览器不会再试，此时必须告诉用户，否则实时收信静默失效、毫无感知
@@ -404,6 +342,90 @@ const app = createApp({
           this.toast('实时推送已断开，刷新页面可恢复（邮件仍可正常加载）', 'warn');
         }
       };
+    },
+    // SSE 事件分发：独立成方法，便于不启浏览器直接喂事件做断言
+    onServerEvent(d) {
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'indexing') {
+        // 建索引进度：完成（或全部夹处理完）就收掉进度条
+        this.indexing = d.done >= d.total ? null : { done: d.done, total: d.total };
+        return;
+      }
+      if (d.type === 'prefetch') {
+        // 后台正文缓存进度：一批批把新邮件存到本地，完成时收起
+        this.prefetchErr = null;
+        if (d.finished) { this.prefetch = null; return; }
+        this.prefetch = { done: d.done, pending: d.pending, folder: d.folder };
+        return;
+      }
+      if (d.type === 'prefetch-error') {
+        // 缓存中断：进度条位置显示原因（连接失败/网络问题等），恢复后自动变回进度
+        this.prefetchErr = d.message || '未知错误';
+        return;
+      }
+      // 事件里的这个文件夹是否正显示在屏幕上（含「全部收件箱」汇总视图里的 INBOX）
+      const ref = this.curFolderRef;
+      const isCur = ref && ref.account === d.accountId && ref.folder === d.folder;
+      const isSummaryInbox = this.activeAccount === 'all' && !this.allFolder && d.folder === 'INBOX';
+      const onScreen = !!(isCur || isSummaryInbox);
+
+      if (d.type === 'flags') {
+        // 别的客户端（网页/手机）把信标成已读或加星：就地改行，不重载列表 ——
+        // 一次已读变动就整表闪一下，比不同步还难受
+        if (typeof d.unseen === 'number') this.unreadMap[`${d.accountId}|${d.folder}`] = d.unseen;
+        if (Array.isArray(d.flags) && Array.isArray(d.uids)) {
+          const set = new Set(d.uids);
+          const hit = (m) => m && m.accountId === d.accountId && (m.folder || d.folder) === d.folder && set.has(m.uid);
+          for (const m of this.messages) if (hit(m)) m.flags = d.flags.slice();
+          if (hit(this.selected)) this.selected.flags = d.flags.slice();
+        }
+        return;
+      }
+      if (d.type === 'expunge') {
+        // 别的客户端把信删了/移走了：本地缓存已 prune，列表那一行必须跟着消失，
+        // 否则点开会报「邮件不存在」，用户以为丢信了
+        if (typeof d.unseen === 'number') this.unreadMap[`${d.accountId}|${d.folder}`] = d.unseen;
+        if (onScreen && !this.searchMode) this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+        return;
+      }
+      if (d.type === 'folder-synced') {
+        // 后台对账完成（手动刷新等不及先回了缓存，或打开文件夹时自动追平）
+        if (!onScreen) return;
+        if (this.page > 1) return; // 用户正翻到第 N 页，别被后台同步弹回第一页
+        this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+        return;
+      }
+      if (d.type === 'watch-error') {
+        // 监听断了会自动重连，只提示一次，别每次重试都弹
+        if (!this._watchErrAt || Date.now() - this._watchErrAt > 5 * 60_000) {
+          this._watchErrAt = Date.now();
+          this.toast('实时收信暂时中断，正在自动重连', 'warn');
+        }
+        return;
+      }
+      if (d.type === 'empty-done' || d.type === 'empty-error') {
+        if (d.type === 'empty-done') {
+          this.toast(d.count ? `已彻底删除 ${d.count} 封邮件` : '文件夹已清空', 'ok');
+        } else {
+          this.toast(`清空失败：${d.message}`, 'error');
+          if (onScreen) {
+            this.page = 1;
+            this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+          }
+        }
+        return;
+      }
+      if (d.type !== 'new-mail') return;
+      // 角标直接采用推送的该夹未读数（服务端缓存里算好的）
+      if (typeof d.unseen === 'number') this.unreadMap[`${d.accountId}|${d.folder}`] = d.unseen;
+      const acc = this.accounts.find((a) => a.id === d.accountId);
+      const name = acc?.displayName || d.email || '邮箱';
+      this.toast(`${name} 收到 ${d.count} 封新邮件`, 'ok');
+      // 正开着这个文件夹就静默重载第一页（缓存已由监听器更新，这次拉取是纯本地库查询）
+      if (onScreen) {
+        this.page = 1;
+        this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+      }
     },
     disconnectEvents() {
       if (this.es) { this.es.close(); this.es = null; }
