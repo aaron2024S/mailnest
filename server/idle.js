@@ -199,7 +199,8 @@ async function watchOnce(uid, accountId, w) {
           }
           if (fresh.length) {
             lastUid = Math.max(lastUid, ...fresh.map((m) => m.uid));
-            cache.upsertEnvelopes(uid, accountId, inbox.path, fresh);
+            cache.upsertEnvelopes(uid, accountId, inbox.path, fresh,
+              client.mailbox?.uidValidity != null ? Number(client.mailbox.uidValidity) : null);
             emit(uid, accountId, {
               type: 'new-mail', folder: inbox.path, count: fresh.length,
               unseen: unseenCount(uid, accountId, inbox.path),
@@ -219,39 +220,59 @@ async function watchOnce(uid, accountId, w) {
 
       client.on('expunge', async (data) => {
         try {
-          // EXPUNGE 只给序号不给 UID，缓存里按信封数量对不上时靠下次全量校准；
-          // 简单可靠的近似：INBOX 整夹快照重拉（一条命令范围查询，代价可接受）
-          await syncFolderSnapshot(uid, accountId, client, inbox.path);
+          // EXPUNGE 只给序号不给 UID：对账一次（decideSync 发现数量对不上会全量校准 + prune）。
+          // ⚠ 必须走不取锁的 pollInboxInline —— 本连接的 INBOX 锁正被 watcher 持着，
+          //   syncFolderSnapshot 再去 getMailboxLock 会排在锁队列里永远等不到（死锁）
+          const r = await pollInboxInline(uid, accountId, client, inbox.path);
           emit(uid, accountId, { type: 'expunge', folder: inbox.path });
+          if (r && r.fetched > 0) {
+            emit(uid, accountId, { type: 'new-mail', folder: inbox.path, count: r.fetched, unseen: unseenCount(uid, accountId, inbox.path) });
+          }
         } catch { /* ignore */ }
       });
 
-      // idle() 在 IDLE 结束时 resolve，循环续期直到 stop；连续失败时退避，避免紧循环
-      let fails = 0;
+      // 主循环：等 IDLE 推送，但最多等 POLL_MS 就主动对账一次。
+      // QQ / 163 等国内服务器会常驻 IDLE 却不推 EXISTS —— 只信推送的话永远收不到新邮件。
+      // 对账走 decideSync：没变化只花一条 STATUS，有变化增量拉取，正常服务器几乎零成本。
+      const POLL_MS = Number(process.env.MAILNEST_IDLE_POLL_MS) || 60_000;
+      let fails = 0;      // idle() 连续失败
+      let pollFails = 0;  // 对账连续失败（连接半死的信号）
+      let idleP = null;   // 未 resolve 的 idle()，跨轮复用避免重复进入 IDLE
       while (w.running) {
-        try {
-          await client.idle();
-          fails = 0;
-        } catch {
-          if (!w.running) break;
-          await sleep(Math.min(1000 * 2 ** fails++, 60_000));
+        if (!idleP) idleP = client.idle().then(() => 'idle', () => 'idle-failed');
+        const why = await Promise.race([idleP, sleep(POLL_MS).then(() => 'poll')]);
+        if (!w.running) break;
+        if (why === 'poll') {
+          try {
+            const r = await pollInboxInline(uid, accountId, client, inbox.path);
+            pollFails = 0;
+            if (r && r.fetched > 0) {
+              console.log(`[mailnest] IDLE 静默（QQ/163 等常见），轮询对账补上 ${accountId} ${inbox.path} 新增 ${r.fetched} 封`);
+              emit(uid, accountId, { type: 'new-mail', folder: inbox.path, count: r.fetched, unseen: unseenCount(uid, accountId, inbox.path) });
+            }
+          } catch (e) {
+            if (++pollFails >= 3) throw new Error('轮询对账连续失败，重开连接'); // runWatcher 退避重连
+            console.log(`[mailnest] 轮询对账失败(${accountId})：${String(e?.message || e).slice(0, 120)}`);
+          }
+          continue; // 对账命令把 IDLE 打断后 idleP 会自行 resolve，下轮直接复用
         }
+        if (why === 'idle-failed') {
+          // 服务器拒绝 IDLE（或连接已死）：退避重试，连续失败就整体重连换条命
+          if (++fails >= 5) throw new Error('IDLE 持续失败，重开连接');
+          await sleep(Math.min(1000 * 2 ** fails, 60_000));
+        } else {
+          fails = 0;
+        }
+        idleP = null;
       }
     } else {
-      // 服务器不支持 IDLE：轻轮询 STATUS（不打断当前会话，也不占带宽）
+      // 服务器不支持 IDLE：轻轮询对账（不打断当前会话，也不占带宽）
       while (w.running) {
         await sleep(5 * 60_000);
         if (!w.running) break;
-        const st = await client.status(inbox.path, { messages: true, unseen: true });
-        const meta = cache.getDb(uid).prepare(
-          'SELECT total, unseen FROM folders WHERE account_id = ? AND path = ?'
-        ).get(accountId, inbox.path);
-        if (meta && (st.messages !== meta.total || st.unseen !== meta.unseen)) {
-          await syncFolderSnapshot(uid, accountId, client, inbox.path);
-          const now = cache.getDb(uid).prepare(
-            'SELECT unseen FROM folders WHERE account_id = ? AND path = ?'
-          ).get(accountId, inbox.path);
-          emit(uid, accountId, { type: 'new-mail', folder: inbox.path, count: Math.max(0, st.messages - meta.total), unseen: now?.unseen ?? st.unseen });
+        const r = await pollInboxInline(uid, accountId, client, inbox.path);
+        if (r && r.fetched > 0) {
+          emit(uid, accountId, { type: 'new-mail', folder: inbox.path, count: r.fetched, unseen: unseenCount(uid, accountId, inbox.path) });
         }
       }
     }
@@ -339,6 +360,32 @@ export async function syncFolderSnapshot(uid, accountId, client, folderPath, { f
   } finally {
     lock.release();
   }
+}
+
+// 不取锁的 INBOX 对账：watcher 自己持有本连接的 INBOX 锁，再调 syncFolderSnapshot 会让
+// 新的 getMailboxLock 排进锁队列、永远等不到释放（imapflow 的锁不重入）→ 死锁。
+// 这里直接用当前连接 STATUS + decideSync，需要拉取就直接 fetch（命令会自动打断 IDLE）。
+// 返回结构与 syncFolderSnapshot 一致：{ mode, fetched }
+export async function pollInboxInline(uid, accountId, client, folderPath) {
+  let st = null;
+  try {
+    st = await client.status(folderPath, { messages: true, uidNext: true, uidValidity: true });
+  } catch { return null; /* 少数服务器对已选中的夹 STATUS 报错，下一轮再试 */ }
+  const plan = decideSync(cache.getFolderSync(uid, accountId, folderPath), st);
+  if (plan.mode === 'skip') return { mode: 'skip', fetched: 0 };
+  const uidvalidity = st?.uidValidity != null ? Number(st.uidValidity) : null;
+  if (plan.mode === 'incremental') {
+    const { count } = await fetchIntoCache(uid, accountId, client, folderPath, {
+      range: plan.range, uidvalidity, minUid: plan.minUid,
+    });
+    if (cache.folderTotal(uid, accountId, folderPath) === st.messages) {
+      cache.markFullIndex(uid, accountId, folderPath, true);
+      return { mode: 'incremental', fetched: count };
+    }
+  }
+  const out = await fullSync(uid, accountId, client, folderPath,
+    uidvalidity ?? (client.mailbox?.uidValidity != null ? Number(client.mailbox.uidValidity) : null));
+  return { mode: 'full', ...out };
 }
 
 // 全量校准：清空（仅 uidvalidity 变了时）→ 分批拉全部信封 → 删掉服务器已不存在的 uid。

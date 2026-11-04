@@ -383,3 +383,61 @@ test('同步流程：首次全量，第二次零 fetch，新增只拉增量，�
   assert.equal(cache.folderTotal(uid, ACC3, 'INBOX'), 1);
   assert.equal(cache.getFolderSync(uid, ACC3, 'INBOX').uidvalidity, 9999);
 });
+
+// ---------- IDLE 兜底轮询（watcher 持锁期间的对账路径） ----------
+// 真实场景：QQ/163 常驻 IDLE 却不推 EXISTS，新邮件永远进不来；轮询是兜底生命线。
+// 红线：watcher 持着 INBOX 锁，对账绝不能再调 getMailboxLock（imapflow 锁不重入 → 死锁）。
+const { pollInboxInline } = await import('../server/idle.js');
+
+test('IDLE 兜底轮询：不取锁、零变化零 fetch、增量与全量与 syncFolderSnapshot 同判定', async () => {
+  const state = { uidValidity: 4242, messages: 3, maxUid: 3, uidNext: 4, uidSet: [1, 2, 3] };
+  const ACC4 = 'a_poll';
+  const tracker = fakeClient(state);
+  const client = {
+    mailbox: tracker.mailbox,
+    status: tracker.status,
+    fetch: tracker.fetch,
+    calls: tracker.calls,
+    locks: 0,
+    // 红线断言载体：这个假客户端的 getMailboxLock 一被调用就记数（真实现会死锁）
+    async getMailboxLock() { this.locks++; return { release() { /* noop */ } }; },
+  };
+
+  // ⓪ 首次对账 = 全量建索引（和 watcher 首连同构）
+  let r = await pollInboxInline(uid, ACC4, client, 'INBOX');
+  assert.equal(r.mode, 'full');
+  assert.equal(cache.folderTotal(uid, ACC4, 'INBOX'), 3);
+  client.calls.length = 0; // 上一步的 '1:*' 是全量该发的，后面单独断言
+
+  // ① 零变化：一条 fetch 都不发
+  r = await pollInboxInline(uid, ACC4, client, 'INBOX');
+  assert.equal(r.mode, 'skip');
+  assert.equal(r.fetched, 0);
+  assert.deepEqual(client.calls, []);
+  assert.equal(client.locks, 0, '对账绝不允许再取锁（watcher 自己持着，会死锁）');
+
+  // ② 新增 2 封：增量拉取
+  state.messages = 5; state.maxUid = 5; state.uidNext = 6; state.uidSet = [1, 2, 3, 4, 5];
+  r = await pollInboxInline(uid, ACC4, client, 'INBOX');
+  assert.equal(r.mode, 'incremental');
+  assert.equal(r.fetched, 2);
+  assert.deepEqual(client.calls, ['4:*']);
+  assert.equal(cache.folderTotal(uid, ACC4, 'INBOX'), 5);
+  assert.equal(client.locks, 0);
+
+  // ③ 删掉 2 封：全量校准 + prune，不留幽灵邮件
+  client.calls.length = 0; // ② 的 '4:*' 是增量该发的，③ 只断言校准那次
+  state.messages = 3; state.uidSet = [1, 3, 5];
+  r = await pollInboxInline(uid, ACC4, client, 'INBOX');
+  assert.equal(r.mode, 'full');
+  assert.deepEqual(client.calls, ['1:*']);
+  assert.equal(cache.folderTotal(uid, ACC4, 'INBOX'), 3);
+  const uids = cache.getPage(uid, ACC4, 'INBOX', { page: 1, pageSize: 10 }).messages.map((m) => m.uid).sort();
+  assert.deepEqual(uids, [1, 3, 5]);
+  assert.equal(client.locks, 0, '全程零取锁');
+
+  // ④ STATUS 报错（少数服务器对已选中的夹不给 STATUS）：安静返回 null，交给下一轮
+  const badClient = { async status() { throw new Error('NO'); }, mailbox: null };
+  r = await pollInboxInline(uid, ACC4, badClient, 'INBOX');
+  assert.equal(r, null);
+});
