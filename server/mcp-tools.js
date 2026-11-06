@@ -48,24 +48,45 @@ function htmlToText(html) {
     .trim();
 }
 
-// 账号参数允许三种写法：id、邮箱地址、显示名。只有一个账号时可以完全省略。
+// 账号参数允许多种写法：id、邮箱地址、显示名，且对显示名/地址做宽松匹配
+//（用户嘴里的「QQ邮箱」「163」这种称呼不一定和备注一字不差）。只有一个账号时可以完全省略。
+function accountLabel(a) {
+  return a.displayName && a.displayName !== a.email
+    ? `${a.displayName}（${a.email}，id ${a.id}）`
+    : `${a.email}（id ${a.id}）`;
+}
+
 function resolveAccount(uid, ref) {
   const all = listAccounts(uid);
   if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
-  const key = String(ref || '').trim();
+  // 剥掉 agent 可能原样转述的引号
+  const key = String(ref || '').trim().replace(/^["'「『『]+|["'」』』]+$/g, '').trim();
   if (!key) {
     if (all.length === 1) return all[0];
-    throw new Error(`有 ${all.length} 个账号，请用 account 指定其中一个：${all.map((a) => `${a.email}（id ${a.id}）`).join('、')}`);
+    throw new Error(`有 ${all.length} 个账号，请用 account 指定其中一个（显示名、邮箱地址或 id 都行）：${all.map(accountLabel).join('、')}`);
   }
   const lower = key.toLowerCase();
+  const squeeze = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
+  const ks = squeeze(key);
   const hit = all.find((a) => a.id === key)
     || all.find((a) => a.email.toLowerCase() === lower)
     || all.find((a) => (a.displayName || '').toLowerCase() === lower);
-  if (!hit) {
-    throw new Error(`找不到账号「${key}」。可用账号：${all.map((a) => `${a.email}（id ${a.id}）`).join('、')}`);
+  if (hit) return hit;
+  // 宽松匹配：显示名/地址去掉空格后互相包含（如备注「QQ 邮箱」对上「QQ邮箱」），唯一命中才放行
+  const fuzzy = all.filter((a) => {
+    const dn = squeeze(a.displayName);
+    const em = squeeze(a.email);
+    return (dn && dn.length > 1 && (dn.includes(ks) || ks.includes(dn)))
+      || em.includes(ks);
+  });
+  if (fuzzy.length === 1) return fuzzy[0];
+  if (fuzzy.length > 1) {
+    throw new Error(`「${key}」能对上 ${fuzzy.length} 个账号，请说得更具体些（或用邮箱地址/id）：${fuzzy.map(accountLabel).join('、')}`);
   }
-  return hit;
+  throw new Error(`找不到账号「${key}」。account 可以填显示名、邮箱地址或 id，拿不准可先调 list_accounts。可用账号：${all.map(accountLabel).join('、')}`);
 }
+
+export { resolveAccount };
 
 function normUids(uids) {
   const list = (Array.isArray(uids) ? uids : [uids]).map((x) => Number(x)).filter((n) => Number.isInteger(n) && n > 0);
@@ -169,7 +190,8 @@ export function registerTools(server, ctx) {
     name: 'list_accounts',
     scope: 'read',
     title: '列出邮箱账号',
-    description: '列出当前账号下已配置的邮箱（含各文件夹未读数）。其它工具里的 account 参数可以填这里的 id、邮箱地址或显示名。',
+    description: '列出当前账号下已配置的邮箱（含各文件夹未读数）。其它工具里的 account 参数可填显示名、邮箱地址或 id；'
+      + '用户说「QQ邮箱」「163邮箱」这类称呼时，先在这里核对显示名再传过去。',
     annotations: { readOnlyHint: true },
     schema: {},
     run: async () => {
@@ -197,7 +219,7 @@ export function registerTools(server, ctx) {
     title: '列出文件夹',
     description: '列出某个邮箱账号的文件夹（收件箱、已发送、垃圾箱、自定义文件夹），带各文件夹未读数。',
     annotations: { readOnlyHint: true },
-    schema: { account: z.string().optional().describe('账号 id 或邮箱地址；只有一个账号时可省略') },
+    schema: { account: z.string().optional().describe('账号显示名、邮箱地址或 id；只有一个账号时可省略') },
     run: async ({ account }) => {
       const acc = resolveAccount(uid, account);
       const folders = await listFolders(uid, acc.id);
@@ -218,7 +240,7 @@ export function registerTools(server, ctx) {
       + '只关心未读时传 unreadOnly=true，不用翻整夹去找。',
     annotations: { readOnlyHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('文件夹路径，默认 INBOX'),
       page: z.coerce.number().int().min(1).optional().describe('页码，从 1 开始'),
       pageSize: z.coerce.number().int().min(1).max(PAGE_MAX).optional().describe(`每页条数，最多 ${PAGE_MAX}，默认 20`),
@@ -256,7 +278,7 @@ export function registerTools(server, ctx) {
     annotations: { readOnlyHint: true },
     schema: {
       query: z.string().min(1).max(200).describe('关键词，例如「发票」或「noreply@github.com」'),
-      account: z.string().optional().describe('账号 id 或邮箱地址；省略则搜索全部账号'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id；省略则搜索全部账号'),
       folder: z.string().optional().describe('只搜某个文件夹（路径从 list_folders 拿）；省略则搜所有文件夹'),
       limit: z.coerce.number().int().min(1).max(50).optional().describe('最多返回多少封，默认 20'),
     },
@@ -310,7 +332,7 @@ export function registerTools(server, ctx) {
       + '附件只列清单（带编号），要看附件内容用 read_attachment。信头里的认证结果可用于判断钓鱼邮件。',
     annotations: { readOnlyHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('邮件的 uid，从 list_messages 拿'),
     },
@@ -350,7 +372,7 @@ export function registerTools(server, ctx) {
       + '小体积二进制（如 PDF）返回 base64；过大的二进制只报大小，请让用户到网页端下载。',
     annotations: { readOnlyHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('邮件的 uid'),
       index: z.coerce.number().int().min(1).max(50).describe('第几个附件（从 1 开始，编号见 read_message 的附件清单）'),
@@ -383,7 +405,7 @@ export function registerTools(server, ctx) {
     description: '批量设置邮件的已读、未读、星标状态。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
       uids: z.array(z.coerce.number().int().positive()).min(1).describe('邮件 uid 列表'),
       action: z.enum(['read', 'unread', 'star', 'unstar']).describe('read=标为已读，unread=标为未读，star=加星标，unstar=取消星标'),
@@ -413,7 +435,7 @@ export function registerTools(server, ctx) {
     description: '把邮件移动到同账号的另一个文件夹。目标文件夹路径可从 list_folders 获取。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('邮件当前所在文件夹，默认 INBOX'),
       uids: z.array(z.coerce.number().int().positive()).min(1).describe('邮件 uid 列表'),
       dest: z.string().min(1).describe('目标文件夹路径，例如 Archive 或 项目/2026'),
@@ -440,7 +462,7 @@ export function registerTools(server, ctx) {
     description: '把邮件移到「已删除」文件夹。已在「已删除」里的邮件不会被永久删除 —— 这一步只能由用户在网页端手动执行。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('邮件当前所在文件夹，默认 INBOX'),
       uids: z.array(z.coerce.number().int().positive()).min(1).describe('邮件 uid 列表'),
     },
@@ -471,7 +493,7 @@ export function registerTools(server, ctx) {
     description: '把整个文件夹的所有邮件一次性标为已读（服务端一条命令完成，几千封也很快）。单个/少量邮件请用 set_flags。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('文件夹路径，默认 INBOX'),
     },
     run: async ({ account, folder }) => {
@@ -491,7 +513,7 @@ export function registerTools(server, ctx) {
       + '只允许对垃圾箱/垃圾邮件类文件夹执行；普通文件夹请用 delete_messages 先移入垃圾箱。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().min(1).describe('要清空的文件夹路径（须为垃圾箱/垃圾邮件类）'),
     },
     run: async ({ account, folder }) => {
@@ -521,7 +543,7 @@ export function registerTools(server, ctx) {
     description: '删除一个自定义文件夹及其中的全部邮件（不可恢复）。收件箱和系统文件夹（已发送/垃圾箱等）不允许删除。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       path: z.string().min(1).max(100).describe('要删除的文件夹路径'),
     },
     run: async ({ account, path }) => {
@@ -540,7 +562,7 @@ export function registerTools(server, ctx) {
     description: '在某个账号下新建文件夹。多级文件夹用该账号的分隔符（通常「/」）连接，例如「项目/2026」。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       path: z.string().min(1).max(100).describe('文件夹路径，例如 待办 或 项目/2026'),
     },
     run: async ({ account, path }) => {
@@ -561,7 +583,7 @@ export function registerTools(server, ctx) {
     description: '用指定账号发送一封新邮件，可带附件。发送前请把收件人、主题、正文（和附件清单）完整展示给用户确认。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('用哪个账号发；只有一个账号时可省略'),
+      account: z.string().optional().describe('用哪个账号发（显示名/邮箱地址/id）；只有一个账号时可省略'),
       to: z.array(z.string()).min(1).describe('收件人邮箱地址列表'),
       cc: z.array(z.string()).optional().describe('抄送地址列表'),
       bcc: z.array(z.string()).optional().describe('密送地址列表'),
@@ -587,7 +609,7 @@ export function registerTools(server, ctx) {
     description: '把一封已有邮件（含全部附件）转发给别人。原邮件以引用块形式附在正文前。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('原邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('原邮件的 uid'),
       to: z.array(z.string()).min(1).describe('转发给谁（邮箱地址列表）'),
@@ -632,7 +654,7 @@ export function registerTools(server, ctx) {
     description: '回复一封已有邮件，自动带上原邮件的主题、In-Reply-To 和 References，保证邮件客户端里能正确归档到同一会话。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('原邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('原邮件的 uid'),
       text: z.string().min(1).describe('回复正文（纯文本）'),
@@ -667,7 +689,7 @@ export function registerTools(server, ctx) {
     description: '把一封没写完的邮件存成草稿，用户可在网页端继续编辑或直接发送。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('用哪个账号保存'),
+      account: z.string().optional().describe('用哪个账号保存（显示名/邮箱地址/id）'),
       to: z.array(z.string()).optional().describe('收件人'),
       subject: z.string().optional().describe('主题'),
       text: z.string().min(1).describe('正文'),

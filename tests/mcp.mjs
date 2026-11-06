@@ -101,6 +101,35 @@ const user = store.createUser({ username: 'unit', password: 'password123', role:
   ok('超过 20 个令牌被拒', hitLimit && tok.listTokens(u3.id).length === 20, String(tok.listTokens(u3.id).length));
 }
 
+{
+  // 账号解析：显示名/邮箱地址/id 都能用，对「QQ邮箱」这种口头称呼做宽松匹配
+  const { resolveAccount } = await import('../server/mcp-tools.js');
+  store.saveAccounts(user.id, [
+    { id: 'acc_qq', email: '1234567@qq.com', displayName: 'QQ 邮箱' },
+    { id: 'acc_163', email: 'wanger@163.com', displayName: '163邮箱' },
+    { id: 'acc_work', email: 'work@company.com', displayName: '公司邮箱' },
+  ]);
+  ok('按 id 解析', resolveAccount(user.id, 'acc_qq').id === 'acc_qq');
+  ok('按邮箱地址解析', resolveAccount(user.id, 'wanger@163.com').id === 'acc_163');
+  ok('按显示名精确解析', resolveAccount(user.id, 'QQ 邮箱').id === 'acc_qq');
+  ok('称呼去空格也能对上（用户说「QQ邮箱」）', resolveAccount(user.id, 'QQ邮箱').id === 'acc_qq');
+  ok('带引号的称呼也能解析', resolveAccount(user.id, '「QQ邮箱」').id === 'acc_qq');
+  ok('域名片段能对上（用户说「163」）', resolveAccount(user.id, '163').id === 'acc_163');
+  let ambiguous = '';
+  try { resolveAccount(user.id, '邮箱'); } catch (e) { ambiguous = e.message; }
+  ok('多个账号都能对上时报歧义并列出候选',
+    /能对上 3 个账号/.test(ambiguous) && /QQ 邮箱/.test(ambiguous) && /163邮箱/.test(ambiguous), ambiguous);
+  let missing = '';
+  try { resolveAccount(user.id, 'gmail'); } catch (e) { missing = e.message; }
+  ok('找不到时提示三种写法并列出可用账号（带显示名）',
+    /显示名、邮箱地址或 id/.test(missing) && /公司邮箱/.test(missing), missing);
+  ok('只有一个账号时可省略', (() => {
+    store.saveAccounts(user.id, [{ id: 'acc_solo', email: 'solo@a.com', displayName: '唯一' }]);
+    return resolveAccount(user.id, '').id === 'acc_solo';
+  })());
+  store.saveAccounts(user.id, []); // 还原，避免影响该目录里其他断言
+}
+
 fs.rmSync(UNIT_DIR, { recursive: true, force: true });
 
 // ============ B. HTTP 端到端 ============
