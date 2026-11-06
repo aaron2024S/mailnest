@@ -215,6 +215,49 @@ export function registerTools(server, ctx) {
   });
 
   define(server, ctx, {
+    name: 'unread_count',
+    scope: 'read',
+    title: '查询未读数量',
+    description: '查有多少封未读邮件。用户问「有几封未读」「XX邮箱有没有未读/新邮件」时用这个。'
+      + '不指定 account 且有多个账号时，返回每个账号的未读汇总；指定 account 时返回该账号的文件夹明细。'
+      + '要看未读邮件的清单和内容，接着用 list_messages（unreadOnly=true）和 read_message。',
+    annotations: { readOnlyHint: true },
+    schema: { account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；不填则汇总所有账号') },
+    run: async ({ account }) => {
+      const all = listAccounts(uid);
+      if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
+      const totalOf = async (a) => {
+        try {
+          const counts = await unseenCounts(uid, a.id);
+          const folders = Object.entries(counts)
+            .filter(([, n]) => Number(n) > 0)
+            .map(([p, n]) => `${p} ${n} 封`);
+          return { total: Object.values(counts).reduce((s, n) => s + (Number(n) || 0), 0), folders };
+        } catch (e) {
+          return { total: 0, folders: [], error: humanError(e) };
+        }
+      };
+      const label = (a) => `${a.displayName && a.displayName !== a.email ? `${a.displayName}（${a.email}）` : a.email}`;
+      if (!account && all.length > 1) {
+        const lines = [];
+        let grand = 0;
+        for (const a of all) {
+          const r = await totalOf(a);
+          grand += r.total;
+          lines.push(`- ${label(a)}：${r.total} 封未读${r.folders.length ? `（${r.folders.join('、')}）` : ''}${r.error ? `（查询失败：${r.error}）` : ''}`);
+        }
+        return text(`所有账号共 ${grand} 封未读：\n${lines.join('\n')}\n\n要看某个账号的未读邮件清单，用 list_messages（unreadOnly=true）。`);
+      }
+      const acc = resolveAccount(uid, account || (all.length === 1 ? '' : ''));
+      const r = await totalOf(acc);
+      const head = r.error
+        ? `「${label(acc)}」未读数查询失败：${r.error}`
+        : `「${label(acc)}」共有 ${r.total} 封未读${r.folders.length ? `，分布在：${r.folders.join('、')}` : '（没有未读邮件）'}`;
+      return text(`${head}\n\n要看未读邮件清单用 list_messages（unreadOnly=true），看正文用 read_message。`);
+    },
+  });
+
+  define(server, ctx, {
     name: 'list_folders',
     scope: 'read',
     title: '列出文件夹',
@@ -779,4 +822,4 @@ export function registerTools(server, ctx) {
   });
 }
 
-export const TOOL_COUNT = 20;
+export const TOOL_COUNT = 21;

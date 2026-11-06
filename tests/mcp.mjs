@@ -257,11 +257,11 @@ ok('initialized 通知被接受', r.status >= 200 && r.status < 300, String(r.st
 r = await rpcCall(readToken, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
 const tools = r.data?.result?.tools || [];
 const names = tools.map((t) => t.name).sort();
-ok('工具数量 20', tools.length === 20, `${tools.length}: ${names.join(',')}`);
+ok('工具数量 21', tools.length === 21, `${tools.length}: ${names.join(',')}`);
 const expect = ['create_folder', 'delete_folder', 'delete_draft', 'delete_messages', 'empty_folder',
   'forward_message', 'list_accounts', 'list_drafts', 'list_folders', 'list_messages',
   'mark_all_read', 'move_messages', 'read_attachment', 'read_message', 'reply_message',
-  'save_draft', 'search_messages', 'send_draft', 'send_message', 'set_flags'];
+  'save_draft', 'search_messages', 'send_draft', 'send_message', 'set_flags', 'unread_count'];
 ok('工具名齐全', expect.every((n) => names.includes(n)), names.join(','));
 ok('每个工具有描述', tools.every((t) => t.description && t.description.length > 8), '');
 ok('未越权：没有账号/密码/令牌管理类工具',
