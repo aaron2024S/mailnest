@@ -190,8 +190,9 @@ export function registerTools(server, ctx) {
     name: 'list_accounts',
     scope: 'read',
     title: '列出邮箱账号',
-    description: '列出当前账号下已配置的邮箱（含各文件夹未读数）。其它工具里的 account 参数可填显示名、邮箱地址或 id；'
-      + '用户说「QQ邮箱」「163邮箱」这类称呼时，先在这里核对显示名再传过去。',
+    description: '列出当前账号下已配置的邮箱（含各文件夹未读数）。用户问「有几封未读」「有没有新邮件」「哪个邮箱有未读」时，'
+      + '用这一个工具就够（返回值里 unread 就是未读数）；要列出未读邮件的清单用 list_messages 的 unreadOnly=true。'
+      + '其它工具里的 account 参数可填显示名、邮箱地址或 id。',
     annotations: { readOnlyHint: true },
     schema: {},
     run: async () => {
@@ -329,12 +330,14 @@ export function registerTools(server, ctx) {
     scope: 'read',
     title: '读取邮件正文',
     description: `读取一封邮件的正文（纯文本）和基础信头。正文超过 ${BODY_LIMIT} 字会截断并标注；`
-      + '附件只列清单（带编号），要看附件内容用 read_attachment。信头里的认证结果可用于判断钓鱼邮件。',
+      + '附件只列清单（带编号），要看附件内容再调 read_attachment。查未读数/列邮件清单不要用本工具 —— '
+      + '那是 list_accounts（自带未读数）和 list_messages（unreadOnly=true）的事。'
+      + 'uid 自己用 list_messages 查，不要向用户索要。信头里的认证结果可用于判断钓鱼邮件。',
     annotations: { readOnlyHint: true },
     schema: {
       account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
-      uid: z.coerce.number().int().positive().describe('邮件的 uid，从 list_messages 拿'),
+      uid: z.coerce.number().int().positive().describe('邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
     },
     run: async ({ account, folder, uid: msgUid }) => {
       const acc = resolveAccount(uid, account);
@@ -368,13 +371,15 @@ export function registerTools(server, ctx) {
     name: 'read_attachment',
     scope: 'read',
     title: '读取附件内容',
-    description: '读取一封邮件里某个附件的内容。文本类附件（txt/csv/json/html 等）直接返回文本；'
+    description: '读取某封邮件里一个附件的内容（必须先用 read_message 拿到该邮件的附件清单和编号）。'
+      + '⚠ 不要用它查未读、列邮件或读正文 —— 那是 list_accounts / list_messages / read_message 的事。'
+      + 'uid 自己用 list_messages 查，不要向用户索要。文本类附件（txt/csv/json/html 等）直接返回文本；'
       + '小体积二进制（如 PDF）返回 base64；过大的二进制只报大小，请让用户到网页端下载。',
     annotations: { readOnlyHint: true },
     schema: {
       account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
-      uid: z.coerce.number().int().positive().describe('邮件的 uid'),
+      uid: z.coerce.number().int().positive().describe('邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
       index: z.coerce.number().int().min(1).max(50).describe('第几个附件（从 1 开始，编号见 read_message 的附件清单）'),
     },
     run: async ({ account, folder, uid: msgUid, index }) => {
@@ -611,7 +616,7 @@ export function registerTools(server, ctx) {
     schema: {
       account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('原邮件所在文件夹，默认 INBOX'),
-      uid: z.coerce.number().int().positive().describe('原邮件的 uid'),
+      uid: z.coerce.number().int().positive().describe('原邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
       to: z.array(z.string()).min(1).describe('转发给谁（邮箱地址列表）'),
       cc: z.array(z.string()).optional().describe('抄送地址列表'),
       text: z.string().optional().describe('转发时附上的说明文字（可省略）'),
@@ -656,7 +661,7 @@ export function registerTools(server, ctx) {
     schema: {
       account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().optional().describe('原邮件所在文件夹，默认 INBOX'),
-      uid: z.coerce.number().int().positive().describe('原邮件的 uid'),
+      uid: z.coerce.number().int().positive().describe('原邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
       text: z.string().min(1).describe('回复正文（纯文本）'),
       replyAll: z.boolean().optional().describe('是否回复全部（含原邮件抄送人），默认 false'),
       attachments: attachSchema,
