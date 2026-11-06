@@ -1,4 +1,4 @@
-// MCP 工具层：11 个工具全部是对 mail.js / store.js 现有函数的映射，不引入新的业务逻辑。
+// MCP 工具层：所有工具都是对 mail.js / store.js 现有函数的映射，不引入新的业务逻辑。
 // 三条硬约束：
 //  1. 每个工具先过 scope 检查，令牌没给的权限一律拒绝（不是靠工具不注册，而是靠显式拒绝给出可读理由）
 //  2. 所有入参都按「这个用户自己的账号」解析，findAccount/listAccounts 天然按 uid 隔离
@@ -6,13 +6,18 @@
 import { z } from 'zod';
 import { listAccounts, findAccount } from './store.js';
 import {
-  listFolders, listMessages, getMessage, setFlags, moveMessages,
-  createFolder, sendMail, saveDraft, unseenCounts,
+  listFolders, listMessages, getMessage, getAttachment, setFlags, moveMessages,
+  markAllRead, emptyFolder, deleteFolder,
+  createFolder, sendMail, saveDraft, listDrafts, deleteDraft, unseenCounts,
 } from './mail.js';
 import * as cache from './cache.js';
 import * as idle from './idle.js';
 
-const BODY_LIMIT = 8000;   // 正文字符上限：再长会一次性灌满模型上下文
+const BODY_LIMIT = 8000;        // 正文字符上限：再长会一次性灌满模型上下文
+const ATT_TEXT_LIMIT = 20000;   // 附件文本上限
+const ATT_B64_LIMIT = 200_000;  // 二进制附件转 base64 的上限（原始字节数）
+const SEND_ATTACH_MAX = 20;     // 单封信附件上限（与 sendMail 一致）
+const SEND_ATTACH_BYTES = 20 * 1024 * 1024; // 发信附件总大小上限（解码后）
 const MAX_UIDS = 200;      // 单次批量操作上限：防止 agent 误传一整页
 const PAGE_MAX = 50;
 
@@ -71,6 +76,34 @@ function normUids(uids) {
 
 function normFolder(f) {
   return String(f || 'INBOX').trim() || 'INBOX';
+}
+
+// 发信附件参数：content 必须是 base64（agent 读本地文件后自己编码）。
+// 数量与解码后总大小都在这里拦，避免把几 MB 的 base64 灌进 SMTP 才失败
+const attachSchema = z.array(z.object({
+  filename: z.string().min(1).max(200).describe('附件文件名，例如 报告.pdf'),
+  content: z.string().min(1).describe('附件内容，base64 编码'),
+  contentType: z.string().optional().describe('MIME 类型，例如 application/pdf；不确定可省略'),
+})).max(SEND_ATTACH_MAX).optional().describe(`附件列表（base64 编码），最多 ${SEND_ATTACH_MAX} 个、总计不超过 20MB`);
+
+function checkAttachSize(list) {
+  let total = 0;
+  for (const a of list || []) {
+    total += Math.floor((a.content || '').length * 3 / 4);
+    if (total > SEND_ATTACH_BYTES) {
+      throw new Error(`附件总体积超过 20MB（当前约 ${Math.round(total / 1024 / 1024)}MB），请压缩或分多封发送`);
+    }
+  }
+}
+
+// 附件按「文本类」处理就给文本，否则给 base64 —— agent 能直接读 CSV/日志/JSON，
+// 图片和 PDF 这种给 base64 让上游模型自己决定
+const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|x-yaml|sql))/i;
+const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|log|json|xml|yaml|yml|ini|conf|html?|eml)$/i;
+
+function isTextLike(contentType, filename) {
+  if (TEXT_MIME.test(String(contentType || ''))) return true;
+  return TEXT_EXT.test(String(filename || ''));
 }
 
 // 发信后让「已发送」缓存追上服务器（sendMail 已把原信 APPEND 到 Sent，本地缓存缺这封）
@@ -181,18 +214,20 @@ export function registerTools(server, ctx) {
     name: 'list_messages',
     scope: 'read',
     title: '列出邮件',
-    description: '按时间倒序分页列出某文件夹的邮件摘要（发件人、主题、时间、已读/星标），不含正文。要看正文再用 read_message。',
+    description: '按时间倒序分页列出某文件夹的邮件摘要（发件人、主题、时间、已读/星标），不含正文。要看正文再用 read_message；'
+      + '只关心未读时传 unreadOnly=true，不用翻整夹去找。',
     annotations: { readOnlyHint: true },
     schema: {
       account: z.string().optional().describe('账号 id 或邮箱地址'),
       folder: z.string().optional().describe('文件夹路径，默认 INBOX'),
       page: z.coerce.number().int().min(1).optional().describe('页码，从 1 开始'),
       pageSize: z.coerce.number().int().min(1).max(PAGE_MAX).optional().describe(`每页条数，最多 ${PAGE_MAX}，默认 20`),
+      unreadOnly: z.boolean().optional().describe('只列未读邮件（默认 false 列全部）'),
     },
-    run: async ({ account, folder, page, pageSize }) => {
+    run: async ({ account, folder, page, pageSize, unreadOnly }) => {
       const acc = resolveAccount(uid, account);
       const dir = normFolder(folder);
-      const d = await listMessages(uid, acc.id, dir, { page: page || 1, pageSize: pageSize || 20 });
+      const d = await listMessages(uid, acc.id, dir, { page: page || 1, pageSize: pageSize || 20, unreadOnly: !!unreadOnly });
       return json({
         account: { id: acc.id, email: acc.email },
         folder: dir,
@@ -271,7 +306,8 @@ export function registerTools(server, ctx) {
     name: 'read_message',
     scope: 'read',
     title: '读取邮件正文',
-    description: `读取一封邮件的正文（纯文本）。正文超过 ${BODY_LIMIT} 字会截断并标注；附件只列文件名，不返回内容。`,
+    description: `读取一封邮件的正文（纯文本）和基础信头。正文超过 ${BODY_LIMIT} 字会截断并标注；`
+      + '附件只列清单（带编号），要看附件内容用 read_attachment。信头里的认证结果可用于判断钓鱼邮件。',
     annotations: { readOnlyHint: true },
     schema: {
       account: z.string().optional().describe('账号 id 或邮箱地址'),
@@ -293,10 +329,49 @@ export function registerTools(server, ctx) {
         `收件人：${(m.to || []).map((t) => t.address).filter(Boolean).join(', ') || '(无)'}`,
         m.cc?.length ? `抄送：${m.cc.map((t) => t.address).filter(Boolean).join(', ')}` : '',
         `时间：${m.date || '未知'}`,
-        m.attachments?.length ? `附件：${m.attachments.map((a) => `${a.filename}（${Math.round(a.size / 1024)} KB）`).join('、')}` : '附件：无',
+        m.replyTo?.address && m.replyTo.address !== m.from?.address
+          ? `回信地址：${m.replyTo.address}（⚠ 与发件人不一致，回复会寄到第三方，谨防钓鱼）` : '',
+        m.returnPath ? `Return-Path：${m.returnPath}` : '',
+        m.authResults ? `认证结果：${String(m.authResults).slice(0, 300)}` : '',
+        m.attachments?.length
+          ? `附件：${m.attachments.map((a, i) => `#${i + 1} ${a.filename}（${Math.round(a.size / 1024)} KB）`).join('、')}`
+          : '附件：无',
       ].filter(Boolean).join('\n');
 
       return text(`${head}\n\n${body || '(这封邮件没有可显示的正文)'}${truncated ? `\n\n[正文已截断，只显示了前 ${BODY_LIMIT} 字]` : ''}`);
+    },
+  });
+
+  define(server, ctx, {
+    name: 'read_attachment',
+    scope: 'read',
+    title: '读取附件内容',
+    description: '读取一封邮件里某个附件的内容。文本类附件（txt/csv/json/html 等）直接返回文本；'
+      + '小体积二进制（如 PDF）返回 base64；过大的二进制只报大小，请让用户到网页端下载。',
+    annotations: { readOnlyHint: true },
+    schema: {
+      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
+      uid: z.coerce.number().int().positive().describe('邮件的 uid'),
+      index: z.coerce.number().int().min(1).max(50).describe('第几个附件（从 1 开始，编号见 read_message 的附件清单）'),
+    },
+    run: async ({ account, folder, uid: msgUid, index }) => {
+      const acc = resolveAccount(uid, account);
+      const dir = normFolder(folder);
+      const att = await getAttachment(uid, acc.id, dir, String(msgUid), index - 1);
+      const kb = Math.round((att.content?.length || 0) / 102.4) / 10;
+      if (isTextLike(att.contentType, att.filename)) {
+        let txt = att.content.toString('utf8').replace(/^\uFEFF/, '');
+        const cut = txt.length > ATT_TEXT_LIMIT;
+        if (cut) txt = txt.slice(0, ATT_TEXT_LIMIT);
+        return text(`附件：${att.filename}（${kb} KB，${att.contentType}）\n\n${txt}${cut ? `\n\n[文本已截断，只显示前 ${ATT_TEXT_LIMIT} 字]` : ''}`);
+      }
+      if ((att.content?.length || 0) > ATT_B64_LIMIT) {
+        return text(`附件「${att.filename}」是二进制文件（${att.contentType}，${kb} KB），体积超出可直接传输的上限。`
+          + `请让用户在 MailNest 网页端打开这封邮件直接下载。`);
+      }
+      const b64 = att.content.toString('base64');
+      return text(`附件：${att.filename}（${kb} KB，${att.contentType}）\n以下为文件完整内容的 base64 编码（自行解码后即为原文件）：\n\n${b64}`);
     },
   });
 
@@ -390,6 +465,75 @@ export function registerTools(server, ctx) {
   });
 
   define(server, ctx, {
+    name: 'mark_all_read',
+    scope: 'write',
+    title: '全部标为已读',
+    description: '把整个文件夹的所有邮件一次性标为已读（服务端一条命令完成，几千封也很快）。单个/少量邮件请用 set_flags。',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    schema: {
+      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      folder: z.string().optional().describe('文件夹路径，默认 INBOX'),
+    },
+    run: async ({ account, folder }) => {
+      const acc = resolveAccount(uid, account);
+      const dir = normFolder(folder);
+      await markAllRead(uid, acc.id, dir);
+      try { cache.addFlagToAll(uid, acc.id, dir, '\\Seen'); } catch { /* 缓存回写失败不影响主流程 */ }
+      return text(`已把「${acc.email} / ${dir}」的全部邮件标为已读。`);
+    },
+  });
+
+  define(server, ctx, {
+    name: 'empty_folder',
+    scope: 'write',
+    title: '清空垃圾箱类文件夹',
+    description: '永久删除某文件夹里的全部邮件（IMAP \\\\Deleted + EXPUNGE，不可恢复）。'
+      + '只允许对垃圾箱/垃圾邮件类文件夹执行；普通文件夹请用 delete_messages 先移入垃圾箱。',
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    schema: {
+      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      folder: z.string().min(1).describe('要清空的文件夹路径（须为垃圾箱/垃圾邮件类）'),
+    },
+    run: async ({ account, folder }) => {
+      const acc = resolveAccount(uid, account);
+      const dir = String(folder || '').trim();
+      const folders = await listFolders(uid, acc.id);
+      const node = folders.find((f) => f.path === dir);
+      if (!node) {
+        throw new Error(`「${acc.email}」没有名为「${dir}」的文件夹，可用：${folders.slice(0, 12).map((f) => f.path).join('、')}`);
+      }
+      const trashy = node.special === '\\Trash' || node.special === '\\Junk'
+        || /trash|junk|spam|deleted|垃圾|已删除/i.test(dir);
+      if (!trashy) {
+        throw new Error(`「${dir}」不是垃圾箱类文件夹，不允许一键清空（永久删除不可恢复）。`
+          + `普通文件夹的邮件请用 delete_messages 移入垃圾箱`);
+      }
+      await emptyFolder(uid, acc.id, dir);
+      try { cache.clearFolder(uid, acc.id, dir); } catch { /* 缓存回写失败不影响主流程 */ }
+      return text(`已永久清空「${acc.email} / ${dir}」（共不可恢复）。`);
+    },
+  });
+
+  define(server, ctx, {
+    name: 'delete_folder',
+    scope: 'write',
+    title: '删除文件夹',
+    description: '删除一个自定义文件夹及其中的全部邮件（不可恢复）。收件箱和系统文件夹（已发送/垃圾箱等）不允许删除。',
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    schema: {
+      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      path: z.string().min(1).max(100).describe('要删除的文件夹路径'),
+    },
+    run: async ({ account, path }) => {
+      const acc = resolveAccount(uid, account);
+      const p = String(path || '').trim();
+      await deleteFolder(uid, acc.id, p); // 内部已拦 INBOX 与系统文件夹
+      try { cache.dropFolder(uid, acc.id, p); } catch { /* 缓存回写失败不影响主流程 */ }
+      return text(`已删除「${acc.email}」下的文件夹「${p}」及其全部邮件。`);
+    },
+  });
+
+  define(server, ctx, {
     name: 'create_folder',
     scope: 'write',
     title: '新建文件夹',
@@ -414,21 +558,70 @@ export function registerTools(server, ctx) {
     name: 'send_message',
     scope: 'send',
     title: '发送新邮件',
-    description: '用指定账号发送一封新邮件。纯文本正文。发送前请把收件人、主题、正文完整展示给用户确认。',
+    description: '用指定账号发送一封新邮件，可带附件。发送前请把收件人、主题、正文（和附件清单）完整展示给用户确认。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
       account: z.string().optional().describe('用哪个账号发；只有一个账号时可省略'),
       to: z.array(z.string()).min(1).describe('收件人邮箱地址列表'),
       cc: z.array(z.string()).optional().describe('抄送地址列表'),
+      bcc: z.array(z.string()).optional().describe('密送地址列表'),
       subject: z.string().describe('邮件主题'),
       text: z.string().min(1).describe('邮件正文（纯文本）'),
+      attachments: attachSchema,
     },
-    run: async ({ account, to, cc, subject, text: body }) => {
+    run: async ({ account, to, cc, bcc, subject, text: body, attachments }) => {
       const acc = resolveAccount(uid, account);
-      const result = await sendMail(uid, acc, { to, cc: cc || [], subject, text: body });
+      checkAttachSize(attachments);
+      const result = await sendMail(uid, acc, { to, cc: cc || [], bcc: bcc || [], subject, text: body, attachments });
       syncSentCache(uid, acc.id);
       const rejected = (result.rejected || []).filter(Boolean);
-      return text(`已通过「${acc.email}」发送给 ${to.join(', ')}。${rejected.length ? `\n被拒收：${rejected.join(', ')}` : ''}`);
+      const attNote = attachments?.length ? `，含 ${attachments.length} 个附件` : '';
+      return text(`已通过「${acc.email}」发送给 ${to.join(', ')}${attNote}。${rejected.length ? `\n被拒收：${rejected.join(', ')}` : ''}`);
+    },
+  });
+
+  define(server, ctx, {
+    name: 'forward_message',
+    scope: 'send',
+    title: '转发邮件',
+    description: '把一封已有邮件（含全部附件）转发给别人。原邮件以引用块形式附在正文前。',
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    schema: {
+      account: z.string().optional().describe('账号 id 或邮箱地址'),
+      folder: z.string().optional().describe('原邮件所在文件夹，默认 INBOX'),
+      uid: z.coerce.number().int().positive().describe('原邮件的 uid'),
+      to: z.array(z.string()).min(1).describe('转发给谁（邮箱地址列表）'),
+      cc: z.array(z.string()).optional().describe('抄送地址列表'),
+      text: z.string().optional().describe('转发时附上的说明文字（可省略）'),
+    },
+    run: async ({ account, folder, uid: msgUid, to, cc, text: note }) => {
+      const acc = resolveAccount(uid, account);
+      const dir = normFolder(folder);
+      const orig = await getMessage(uid, acc.id, dir, String(msgUid));
+      // 附件逐个取回（本地缓存命中就是磁盘读），超 20MB 拒发
+      const attachments = [];
+      let bytes = 0;
+      for (let i = 0; i < (orig.attachments || []).length; i++) {
+        const att = await getAttachment(uid, acc.id, dir, String(msgUid), i);
+        bytes += att.content?.length || 0;
+        if (bytes > SEND_ATTACH_BYTES) throw new Error('原邮件附件总体积超过 20MB，转发被拒；请让用户在网页端手动操作');
+        attachments.push({ filename: att.filename, contentType: att.contentType, content: att.content.toString('base64') });
+      }
+      const quote = [
+        '---------- 转发的邮件 ----------',
+        `发件人：${orig.from?.text || orig.from?.address || '未知'}`,
+        `主题：${orig.subject}`,
+        `时间：${orig.date || '未知'}`,
+        orig.attachments?.length ? `附件：${orig.attachments.map((a) => a.filename).join('、')}` : '',
+        '',
+        htmlToText(orig.text ? '' : (orig.html || '')) || orig.text || '(无正文)',
+      ].filter((l) => l !== undefined).join('\n');
+      const subject = /^fwd:\s*/i.test(orig.subject) ? orig.subject : `Fwd: ${orig.subject}`;
+      const body = `${note ? `${note}\n\n` : ''}${quote}`;
+      await sendMail(uid, acc, { to, cc: cc || [], subject, text: body, attachments });
+      syncSentCache(uid, acc.id);
+      return text(`已把「${orig.subject}」转发给 ${to.join(', ')}` +
+        `${attachments.length ? `（含 ${attachments.length} 个附件）` : ''}。`);
     },
   });
 
@@ -444,8 +637,9 @@ export function registerTools(server, ctx) {
       uid: z.coerce.number().int().positive().describe('原邮件的 uid'),
       text: z.string().min(1).describe('回复正文（纯文本）'),
       replyAll: z.boolean().optional().describe('是否回复全部（含原邮件抄送人），默认 false'),
+      attachments: attachSchema,
     },
-    run: async ({ account, folder, uid: msgUid, text: body, replyAll }) => {
+    run: async ({ account, folder, uid: msgUid, text: body, replyAll, attachments }) => {
       const acc = resolveAccount(uid, account);
       const dir = normFolder(folder);
       const orig = await getMessage(uid, acc.id, dir, String(msgUid));
@@ -455,8 +649,9 @@ export function registerTools(server, ctx) {
       const refs = Array.isArray(orig.references) ? orig.references : (orig.references ? [orig.references] : []);
       const references = [...refs, orig.messageId].filter(Boolean).join(' ');
       const subject = /^re:\s*/i.test(orig.subject) ? orig.subject : `Re: ${orig.subject}`;
+      checkAttachSize(attachments);
       await sendMail(uid, acc, {
-        to: [to], cc, subject, text: body,
+        to: [to], cc, subject, text: body, attachments,
         inReplyTo: orig.messageId || undefined,
         references: references || undefined,
       });
@@ -478,16 +673,83 @@ export function registerTools(server, ctx) {
       text: z.string().min(1).describe('正文'),
     },
     run: async ({ account, to, subject, text: body }) => {
-      const acc = resolveAccount(uid, account);
+      // 草稿允许在没配账号时先存下来（发送时再校验账号），所以这里不能直接 resolveAccount
+      const all = listAccounts(uid);
+      let accId = '';
+      if (account) accId = resolveAccount(uid, account).id;
+      else if (all.length === 1) accId = all[0].id;
+      else if (all.length > 1) throw new Error(`有 ${all.length} 个账号，请用 account 指定保存到哪个：${all.map((a) => a.email).join('、')}`);
       const d = saveDraft(uid, {
-        accountId: acc.id,
+        accountId: accId,
         to: Array.isArray(to) ? to.join(', ') : (to || ''),
         subject: subject || '(无主题)',
         text: body,
       });
-      return text(`已保存草稿${d?.id ? `（草稿 id ${d.id}）` : ''}，可在网页端「草稿」里继续编辑。`);
+      return text(`已保存草稿（草稿 id ${d.id}），可在网页端「草稿」里继续编辑，或用 send_draft 发送。`);
+    },
+  });
+
+  define(server, ctx, {
+    name: 'list_drafts',
+    scope: 'read',
+    title: '列出草稿',
+    description: '列出所有没发出去的草稿（含 id、账号、收件人、主题）。草稿存在 MailNest 本地，不占邮箱服务器的 Drafts。',
+    annotations: { readOnlyHint: true },
+    schema: {},
+    run: async () => {
+      const drafts = listDrafts(uid);
+      if (!drafts.length) return text('当前没有草稿。');
+      const lines = drafts.map((d) => {
+        const acc = listAccounts(uid).find((a) => a.id === d.accountId);
+        const who = acc?.email || (d.accountId ? '账号已删除' : '未指定账号');
+        return `- id=${d.id}（${who}）→ ${(d.to || '(无收件人)')}「${d.subject}」，正文 ${String(d.text || '').length} 字`;
+      });
+      return text(`共 ${drafts.length} 份草稿：\n${lines.join('\n')}\n\n继续编辑请在网页端「草稿」操作；直接发送用 send_draft。`);
+    },
+  });
+
+  define(server, ctx, {
+    name: 'send_draft',
+    scope: 'send',
+    title: '发送草稿',
+    description: '把一份已有草稿直接发出去（按草稿里存的收件人/主题/正文），发送成功后草稿自动删除。',
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    schema: {
+      draftId: z.string().min(1).describe('草稿 id，从 list_drafts 拿'),
+    },
+    run: async ({ draftId }) => {
+      const id = String(draftId || '').trim();
+      const d = listDrafts(uid).find((x) => x.id === id);
+      if (!d) throw new Error(`找不到草稿「${id}」，可用 list_drafts 查看现有草稿`);
+      const acc = listAccounts(uid).find((a) => a.id === d.accountId);
+      if (!acc) throw new Error('这份草稿对应的邮箱账号已被删除，无法发送');
+      const to = String(d.to || '').split(/[,;，；]/).map((s) => s.trim()).filter(Boolean);
+      if (!to.length) throw new Error('这份草稿没有收件人，请让用户在网页端补上后再发');
+      await sendMail(uid, acc, { to, subject: d.subject || '(无主题)', text: d.text });
+      deleteDraft(uid, id);
+      syncSentCache(uid, acc.id);
+      return text(`草稿「${d.subject}」已通过「${acc.email}」发送给 ${to.join(', ')}，草稿已删除。`);
+    },
+  });
+
+  define(server, ctx, {
+    name: 'delete_draft',
+    scope: 'send',
+    title: '删除草稿',
+    description: '删除一份草稿（只是 MailNest 本地的草稿，不影响服务器）。',
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    schema: {
+      draftId: z.string().min(1).describe('草稿 id，从 list_drafts 拿'),
+    },
+    run: async ({ draftId }) => {
+      const id = String(draftId || '').trim();
+      if (!listDrafts(uid).some((x) => x.id === id)) {
+        throw new Error(`找不到草稿「${id}」，可用 list_drafts 查看现有草稿`);
+      }
+      deleteDraft(uid, id);
+      return text(`已删除草稿「${id}」。`);
     },
   });
 }
 
-export const TOOL_COUNT = 11;
+export const TOOL_COUNT = 20;

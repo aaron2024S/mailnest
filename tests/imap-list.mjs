@@ -18,6 +18,7 @@ function envelope(i) {
 
 let sawXoauth2 = false;
 const storeLog = [];
+const searchLog = [];
 let expungeCount = 0;
 const deleteLog = [];
 
@@ -87,6 +88,9 @@ const server = net.createServer((sock) => {
             'To: me <me@qq.com>',
             `Subject: =?UTF-8?B?${Buffer.from(`测试邮件 ${seq}`, 'utf8').toString('base64')}?=`,
             'Date: Mon, 2 Nov 2026 09:00:00 +0800',
+            'Reply-To: fake@evil.com',
+            'Return-Path: <bounce@qq.com>',
+            'Authentication-Results: spf=fail (domain of zhangsan@qq.com) smtp.mailfrom=zhangsan@qq.com;',
             `Message-ID: <msg${seq}@qq.com>`,
             'Content-Type: text/plain; charset=utf-8',
             '',
@@ -96,6 +100,23 @@ const server = net.createServer((sock) => {
           const len = Buffer.byteLength(raw, 'utf8');
           sock.write(`* ${seq} FETCH (UID ${uid} FLAGS (\\Seen) BODY[] {${len}}\r\n${raw})\r\n`);
           sock.write(`${tag2} OK body done\r\n`);
+          continue;
+        }
+        // UID FETCH 的 range 是 uid 列表（逗号/冒号区间）——「只看未读」按名单取信封走这里
+        if (isUid || range.includes(',')) {
+          const uids = range.split(',').flatMap((x) => {
+            if (x.includes(':')) {
+              const [p, q] = x.split(':').map((y) => parseInt(y, 10));
+              return Array.from({ length: Math.abs(q - p) + 1 }, (_, k) => Math.min(p, q) + k);
+            }
+            return [parseInt(x, 10)];
+          }).filter(Number.isFinite);
+          for (const uid of uids) {
+            const i = uid - 100;
+            if (i < 1 || i > COUNT) continue;
+            sock.write(`* ${i} FETCH (UID ${uid} FLAGS (\\Seen) INTERNALDATE "02-Nov-2026 09:00:00 +0800" RFC822.SIZE 1234 ${envelope(i)} ${SENT_BODY})\r\n`);
+          }
+          sock.write(`${tag2} OK fetch done\r\n`);
           continue;
         }
         const [a, b] = range.split(':').map((x) => parseInt(x, 10));
@@ -109,6 +130,10 @@ const server = net.createServer((sock) => {
           sock.write(`* ${i} FETCH (UID ${100 + i} FLAGS (\\Seen) INTERNALDATE "02-Nov-2026 09:00:00 +0800" RFC822.SIZE 1234 ${envelope(i)} ${SENT_BODY})\r\n`);
         }
         sock.write(`${tag2} OK fetch done\r\n`);
+      } else if (C === 'SEARCH') {
+        // 只看未读的名单来源：固定返回 3 个 uid，断言只关心命令与后续 FETCH 名单
+        searchLog.push(rest);
+        sock.write(`* SEARCH 103 105 107\r\n${tag2} OK search done\r\n`);
       } else if (C === 'STORE') {
         // 记录整夹操作发出的 STORE（全部已读 / 清空），供后面断言
         storeLog.push(rest);
@@ -198,12 +223,27 @@ check('附件标记为 false', page1.messages[0].hasAttachment === false);
 const p2 = await listMessages(user.id, 'a_test', 'INBOX', { page: 2, pageSize: 10 });
 check('分页 page2 有 4 条', p2.messages.length === 4, `len=${p2.messages.length}`);
 
+// 只看未读：SEARCH UNSEEN 拿名单 → 按名单 FETCH，不再整夹拉信封
+const un = await listMessages(user.id, 'a_test', 'INBOX', { unreadOnly: true, page: 1, pageSize: 5 });
+check('未读分页发出 SEARCH UNSEEN', searchLog.some((l) => /UNSEEN/i.test(l)), JSON.stringify(searchLog));
+check('未读总数来自 SEARCH', un.total === 3, `total=${un.total}`);
+check('未读分页只取名单内的 uid', un.messages.length === 3 && un.messages.every((m) => [103, 105, 107].includes(m.uid)),
+  JSON.stringify(un.messages.map((m) => m.uid)));
+check('未读列表新的在前', un.messages[0].uid === 107, JSON.stringify(un.messages.map((m) => m.uid)));
+const un2 = await listMessages(user.id, 'a_test', 'INBOX', { unreadOnly: true, page: 2, pageSize: 5 });
+check('未读分页第二页为空', un2.total === 3 && un2.messages.length === 0, `len=${un2.messages.length}`);
+
 // 读信正文（回归：raw.flags is not iterable —— fetchOne 查询必须显式要 flags）
 const msg = await getMessage(user.id, 'a_test', 'INBOX', 101);
 check('正文主题解析', msg.subject === '测试邮件 1', msg.subject);
 check('正文内容解析', (msg.text || '').includes('正文内容 hello body'), JSON.stringify(msg.text));
 check('正文 flags 可迭代且含 \\Seen', Array.isArray(msg.flags) && msg.flags.includes('\\Seen'), JSON.stringify(msg.flags));
 check('正文发件人地址', msg.from.address === 'zhangsan@qq.com', JSON.stringify(msg.from));
+// 防钓鱼信头：Reply-To 与发件人不一致、Return-Path、认证结果原样透出
+check('正文带防钓鱼信头', msg.replyTo?.address === 'fake@evil.com'
+  && /bounce@qq\.com/.test(msg.returnPath || '')
+  && /spf=fail/.test(msg.authResults || ''),
+JSON.stringify({ replyTo: msg.replyTo, returnPath: msg.returnPath, authResults: msg.authResults }));
 
 // OAuth2 账号（Outlook）：必须走 AUTHENTICATE XOAUTH2，而不是 LOGIN
 const oauthPage = await listMessages(user.id, 'a_oauth', 'INBOX', { page: 1, pageSize: 50 });

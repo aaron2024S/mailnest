@@ -228,9 +228,11 @@ ok('initialized 通知被接受', r.status >= 200 && r.status < 300, String(r.st
 r = await rpcCall(readToken, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
 const tools = r.data?.result?.tools || [];
 const names = tools.map((t) => t.name).sort();
-ok('工具数量 12', tools.length === 12, `${tools.length}: ${names.join(',')}`);
-const expect = ['create_folder', 'delete_messages', 'list_accounts', 'list_folders', 'list_messages',
-  'move_messages', 'read_message', 'reply_message', 'save_draft', 'search_messages', 'send_message', 'set_flags'];
+ok('工具数量 20', tools.length === 20, `${tools.length}: ${names.join(',')}`);
+const expect = ['create_folder', 'delete_folder', 'delete_draft', 'delete_messages', 'empty_folder',
+  'forward_message', 'list_accounts', 'list_drafts', 'list_folders', 'list_messages',
+  'mark_all_read', 'move_messages', 'read_attachment', 'read_message', 'reply_message',
+  'save_draft', 'search_messages', 'send_draft', 'send_message', 'set_flags'];
 ok('工具名齐全', expect.every((n) => names.includes(n)), names.join(','));
 ok('每个工具有描述', tools.every((t) => t.description && t.description.length > 8), '');
 ok('未越权：没有账号/密码/令牌管理类工具',
@@ -261,6 +263,62 @@ ok('只读令牌发信被拒', r.data?.result?.isError === true, '');
 
 r = await callTool(readToken, 'set_flags', { uids: [], action: 'nope' });
 ok('非法 action 被 schema 拦住', r.status >= 400 || r.data?.error || r.data?.result?.isError, JSON.stringify(r.data).slice(0, 160));
+
+// ---------- 新增工具：读侧 ----------
+r = await callTool(readToken, 'list_messages', { unreadOnly: true, account: 'nope@example.com' });
+ok('unreadOnly 参数被接受（schema 层）', r.data?.result?.isError === true
+  && /找不到账号|还没有添加/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+
+r = await callTool(readToken, 'read_attachment', { uid: 1, index: 1 });
+ok('read_attachment 无账号给可读错误', r.data?.result?.isError === true
+  && /找不到账号|还没有添加/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+
+// ---------- 新增工具：发信侧（需含 send 的令牌） ----------
+r = await req('POST', '/api/agent/tokens', { name: '测试发信', scopes: ['read', 'send'], expiresInDays: 30 });
+const sendToken = r.data?.token;
+ok('生成 read+send 令牌', r.status === 200 && /^mn_mcp_/.test(sendToken || ''), JSON.stringify(r.data?.record?.scopes));
+
+r = await callTool(sendToken, 'mark_all_read', {});
+ok('无 write 权限：整夹标已读被拒', r.data?.result?.isError === true
+  && /整理邮件/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+r = await callTool(sendToken, 'empty_folder', { folder: 'Trash' });
+ok('无 write 权限：清空垃圾箱被拒', r.data?.result?.isError === true
+  && /整理邮件/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+r = await callTool(sendToken, 'delete_folder', { path: '测试夹' });
+ok('无 write 权限：删文件夹被拒', r.data?.result?.isError === true, r.data?.result?.content?.[0]?.text);
+
+r = await callTool(sendToken, 'forward_message', { uid: 1, to: ['a@b.com'] });
+ok('forward_message 无账号给可读错误', r.data?.result?.isError === true
+  && /还没有添加任何邮箱账号/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+r = await callTool(sendToken, 'send_message', {
+  to: ['a@b.com'], subject: 'x', text: 'y',
+  attachments: [{ filename: 'a.pdf', content: 'aGVsbG8=' }],
+});
+ok('send_message 带 attachments 参数 schema 通过', r.data?.result?.isError === true
+  && /还没有添加任何邮箱账号/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+
+// 草稿流：save → list → send（不存在的 id 报错）→ delete
+r = await callTool(sendToken, 'save_draft', { subject: 'MCP 测试草稿', text: 'hello' });
+ok('save_draft 成功', !r.data?.result?.isError && /草稿 id /.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+const draftId = (r.data.result.content[0].text.match(/草稿 id ([^）\s]+)/) || [])[1];
+
+r = await callTool(sendToken, 'list_drafts');
+ok('list_drafts 能列出刚存的草稿', !r.data?.result?.isError && (r.data?.result?.content?.[0]?.text || '').includes(draftId), r.data?.result?.content?.[0]?.text);
+
+r = await callTool(sendToken, 'send_draft', { draftId: 'd_nope' });
+ok('send_draft 不存在的 id 给可读错误', r.data?.result?.isError === true
+  && /找不到草稿/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+
+r = await callTool(sendToken, 'delete_draft', { draftId });
+ok('delete_draft 成功', !r.data?.result?.isError && /已删除草稿/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+r = await callTool(sendToken, 'delete_draft', { draftId });
+ok('delete_draft 删两次报找不到', r.data?.result?.isError === true && /找不到草稿/.test(r.data?.result?.content?.[0]?.text || ''), '');
+
+// 清掉发信令牌，恢复后面的「单令牌撤销流」前置状态
+r = await req('GET', '/api/agent/tokens');
+const sendTokRec = r.data.tokens.find((t) => t.name === '测试发信');
+r = await req('DELETE', `/api/agent/tokens/${sendTokRec.id}`);
+ok('清理发信令牌', r.status === 200, String(r.status));
 
 r = await req('GET', '/api/agent/tokens');
 const used = r.data?.tokens?.[0] || {};

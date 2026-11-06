@@ -74,10 +74,13 @@ Claude Code 也可以用命令行：
 claude mcp add --transport http mailnest http://<地址>:8006/mcp --header "Authorization: Bearer mn_mcp_..."
 ```
 
-**提供的工具（12 个）：** `list_accounts`、`list_folders`、`list_messages`、`read_message`、
+**提供的工具（20 个）：** `list_accounts`、`list_folders`、`list_messages`（可 `unreadOnly` 只列未读）、
+`read_message`（带回信地址/认证结果，可判断钓鱼邮件）、`read_attachment`（读附件：文本类直接给文本，小体积二进制给 base64）、
 `search_messages`（按关键词搜主题/发件人/收件人/已读正文，走本地索引）、
-`set_flags`、`move_messages`、`delete_messages`（只进垃圾箱，不做永久删除）、`create_folder`、
-`send_message`、`reply_message`、`save_draft`。
+`set_flags`、`mark_all_read`（整夹标已读）、`move_messages`、`delete_messages`（只进垃圾箱）、
+`empty_folder`（仅限垃圾箱类文件夹，永久清空）、`create_folder`、`delete_folder`（仅自定义文件夹）、
+`send_message`（可带附件/密送）、`reply_message`（可带附件）、`forward_message`（连附件一起转发）、
+`save_draft`、`list_drafts`、`send_draft`、`delete_draft`。
 
 **要点：**
 

@@ -291,41 +291,60 @@ function bodyHasAttachment(bodyStructure) {
   return walk(bodyStructure);
 }
 
+// 列表摘要信封：listMessages 普通分页和未读分页共用一种输出形状
+function envelopeOf(msg) {
+  const env = msg.envelope || {};
+  return {
+    uid: msg.uid,
+    from: env.from?.[0]
+      ? { name: env.from[0].name || '', address: env.from[0].address || '' }
+      : { name: '', address: '' },
+    to: (env.to || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
+    subject: env.subject || '(无主题)',
+    date: msg.internalDate ? msg.internalDate.toISOString() : null,
+    flags: [...msg.flags],
+    size: msg.size || 0,
+    hasAttachment: bodyHasAttachment(msg.bodyStructure),
+  };
+}
+
 // 列表页是「点一下就等结果」的交互，不该跟批量操作共用 60 秒上限：
 // 真卡住时用户盯着空白列表一分钟，比直接报错重试难受得多。
 // 20 秒对冷连接 + SELECT + 一页信封已经足够宽裕（实测 outlook 最慢十几秒）。
 const LIST_TIMEOUT = Number(process.env.MAILNEST_LIST_TIMEOUT_MS) || 20000;
 
-export async function listMessages(uid, accountId, folder, { page = 1, pageSize = 50 } = {}) {
+// 只看未读时先 SEARCH UNSEEN 拿 uid 名单再按名单分页取信封 —— 整夹信封全拉的话
+// 三千封的夹只为找 5 封未读，纯浪费；SEARCH 是服务端一次完成的
+export async function listMessages(uid, accountId, folder, { page = 1, pageSize = 50, unreadOnly = false } = {}) {
   pageSize = Math.min(Math.max(1, pageSize | 0), PAGE_MAX);
   page = Math.max(1, page | 0);
   try {
     return await withMailbox(uid, accountId, folder, async (client) => {
       // 注意：getMailboxLock 返回的锁对象只有 { path, release }，没有 count；
       // 邮件总数要从 client.mailbox.exists 取（选中的邮箱对象）
-      const total = client.mailbox?.exists || 0;
       const uidvalidity = client.mailbox?.uidValidity != null ? Number(client.mailbox.uidValidity) : null;
+      const fetchQuery = { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true };
+      const out = [];
+
+      if (unreadOnly) {
+        const found = await client.search({ seen: false }, { uid: true });
+        const uidList = (found || []).map(Number).sort((a, b) => b - a); // 新 uid 在前 ≈ 新邮件在前
+        const total = uidList.length;
+        const slice = uidList.slice((page - 1) * pageSize, page * pageSize);
+        if (!slice.length) return { total, page, pageSize, uidvalidity, messages: [] };
+        for await (const msg of client.fetch(slice, fetchQuery, { uid: true })) {
+          out.push(envelopeOf(msg));
+        }
+        out.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+        return { total, page, pageSize, uidvalidity, messages: out };
+      }
+
+      const total = client.mailbox?.exists || 0;
       const start = Math.max(1, total - (page - 1) * pageSize - pageSize + 1);
       const end = total - (page - 1) * pageSize;
-      const out = [];
       if (end < 1) return { total, page, pageSize, uidvalidity, messages: [] };
-      for await (const msg of client.fetch(`${start}:${end}`, {
-        uid: true, flags: true, envelope: true, bodyStructure: true,
-        internalDate: true, size: true,
-      })) {
-        const env = msg.envelope || {};
-        out.push({
-          uid: msg.uid,
-          from: env.from?.[0]
-            ? { name: env.from[0].name || '', address: env.from[0].address || '' }
-            : { name: '', address: '' },
-          to: (env.to || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
-          subject: env.subject || '(无主题)',
-          date: msg.internalDate ? msg.internalDate.toISOString() : null,
-          flags: [...msg.flags],
-          size: msg.size || 0,
-          hasAttachment: bodyHasAttachment(msg.bodyStructure),
-        });
+      for await (const msg of client.fetch(`${start}:${end}`, fetchQuery)) {
+        out.push(envelopeOf(msg));
       }
       out.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
       return { total, page, pageSize, uidvalidity, messages: out };
@@ -426,8 +445,19 @@ export function extractMessage(parsed, ctx) {
   let html = null;
   if (parsed.html) html = cleanHtml(typeof parsed.html === 'string' ? parsed.html : parsed.html.toString());
   html = inlineCid(html, attachments, ctx);
+  // 防钓鱼三件套：回信地址（Reply-To 常被用来冒充正规发件人）、Return-Path、
+  // 服务器认证结果（SPF/DKIM/DMARC）。取不到就是 null，不要造默认值。
+  const headerText = (name) => {
+    const v = parsed.headers?.get?.(name);
+    if (v == null) return null;
+    return typeof v === 'string' ? v : (v.text ?? String(v));
+  };
+  const replyAddr = parsed.replyTo?.value?.[0]?.address || null;
   return {
     from: parsed.from ? { name: '', address: parsed.from.value?.[0]?.address || '', text: parsed.from?.text || '' } : null,
+    replyTo: replyAddr ? { address: replyAddr, name: parsed.replyTo.value[0].name || '' } : null,
+    returnPath: headerText('return-path'),
+    authResults: headerText('authentication-results'),
     to: (parsed.to?.value || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
     cc: (parsed.cc?.value || []).map((t) => ({ name: t.name || '', address: t.address || '' })),
     subject: parsed.subject || '(无主题)',
