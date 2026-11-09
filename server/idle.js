@@ -430,7 +430,10 @@ async function fetchIntoCache(uid, accountId, client, folderPath, { range, uidva
     count += batch.length;
     batch = [];
   };
-  for await (const msg of client.fetch(range, fetchQuery)) {
+  // ⚠ 第三个参数必须带 {uid:true}：range 是 UID 区间（增量 = maxUid+1:*），
+  // 不带会被 imapflow 当成「序号区间」——本地只有 3 封时发出去的是 FETCH 213:*，
+  // 服务器直接 BAD，整次对账失败，文件夹永远停在最后一次全量同步的状态。
+  for await (const msg of client.fetch(range, fetchQuery, { uid: true })) {
     if (msg.uid <= minUid) continue;
     const env = toEnvelope(msg);
     seen.push(env.uid);

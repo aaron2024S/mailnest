@@ -19,6 +19,7 @@ function envelope(i) {
 let sawXoauth2 = false;
 const storeLog = [];
 const searchLog = [];
+const fetchLog = [];
 let expungeCount = 0;
 const deleteLog = [];
 
@@ -76,8 +77,11 @@ const server = net.createServer((sock) => {
           sock.write(`${tag2} OK done\r\n`);
         }
       } else if (C === 'STATUS') {
-        sock.write(`* STATUS ${rest.split(/\s+/).slice(0, -1).join(' ')} (UNSEEN 14)\r\n${tag2} OK done\r\n`);
+        // ⚠ 文件夹名必须带引号：imapflow 的解析器对不带引号的 STATUS 响应会丢弃全部属性
+        const stName = rest.split(/\s+/).slice(0, -1).join(' ').replace(/^"|"$/g, '');
+        sock.write(`* STATUS "${stName}" (MESSAGES ${COUNT} UIDNEXT 115 UIDVALIDITY 1 UNSEEN 14)\r\n${tag2} OK done\r\n`);
       } else if (C === 'FETCH') {
+        fetchLog.push(`${isUid ? 'UID ' : ''}${rest}`);
         const range = rest.split(/\s+/)[0];
         // 正文抓取：UID FETCH n (UID FLAGS BODY[].PEEK[]) —— 返回带 literal 的完整源码
         if (/BODY(\.PEEK)?\[/i.test(rest)) {
@@ -104,9 +108,12 @@ const server = net.createServer((sock) => {
         }
         // UID FETCH 的 range 是 uid 列表（逗号/冒号区间）——「只看未读」按名单取信封走这里
         if (isUid || range.includes(',')) {
+          const topUid = COUNT + 100; // 假服务器 uid = 100 + 序号，最高就是 114
           const uids = range.split(',').flatMap((x) => {
             if (x.includes(':')) {
-              const [p, q] = x.split(':').map((y) => parseInt(y, 10));
+              const [p0, q0] = x.split(':');
+              const p = parseInt(p0, 10);
+              const q = Number.isFinite(parseInt(q0, 10)) ? parseInt(q0, 10) : topUid; // 「n:*」= n 到最大 uid
               return Array.from({ length: Math.abs(q - p) + 1 }, (_, k) => Math.min(p, q) + k);
             }
             return [parseInt(x, 10)];
@@ -122,6 +129,12 @@ const server = net.createServer((sock) => {
         const [a, b] = range.split(':').map((x) => parseInt(x, 10));
         const from = Number.isFinite(a) ? a : 1;
         const to = Number.isFinite(b) ? b : from;
+        // 真服务器对「序号 > EXISTS」的范围回 BAD（RFC 3501）；模拟它才能抓住
+        // 「UID 区间被误当序号发出去」这类 bug——假服务器放行的话测试就白测了
+        if (!isUid && from > COUNT) {
+          sock.write(`${tag2} BAD Invalid messageset\r\n`);
+          continue;
+        }
         if (!(to >= 1)) {
           sock.write(`${tag2} OK done\r\n`);
           continue;
@@ -140,6 +153,9 @@ const server = net.createServer((sock) => {
         sock.write(`${tag2} OK store done\r\n`);
       } else if (C === 'EXPUNGE') {
         expungeCount++;
+        // 真服务器必须推未应答 EXPUNGE 行，imapflow 才会把 mailbox.exists 减到 0；
+        // 不推的话「清空后校验剩余数」会误判为没删掉
+        for (let i = COUNT; i >= 1; i--) sock.write(`* ${i} EXPUNGE\r\n`);
         sock.write(`${tag2} OK expunge done\r\n`);
       } else if (C === 'DELETE') {
         deleteLog.push(rest);
@@ -264,6 +280,36 @@ const { emptyFolderIsolated } = await import('../server/mail.js');
 const expungeBefore = expungeCount;
 await emptyFolderIsolated(user.id, 'a_test', 'Trash');
 check('后台清空用独立连接也能真删', expungeCount > expungeBefore, `${expungeBefore} -> ${expungeCount}`);
+
+// ---------- 增量对账回归：UID 区间必须以 UID 语义发 FETCH（2026-11-09「已删除夹丢新邮件」的根因） ----------
+{
+  const cache = await import('../server/cache.js');
+  const { syncFolderSnapshot } = await import('../server/idle.js');
+  const { ImapFlow } = await import('imapflow');
+  const client = new ImapFlow({
+    host: '127.0.0.1', port: 43143, tls: false, logger: false,
+    auth: { user: 'me@qq.com', pass: 'x'.repeat(10) },
+  });
+  await client.connect();
+  const F = 'Projects2026';
+  // 种一个「停在旧状态」的索引：只有 uid 101..104 四封，全量索引完整、uidvalidity 未变
+  cache.clearFolder(user.id, 'a_test', F);
+  cache.upsertEnvelopes(user.id, 'a_test', F,
+    [1, 2, 3, 4].map((i) => ({ uid: 100 + i, subject: `旧邮件 ${i}`, date: '2026-02-01T00:00:00Z', flags: ['\\Seen'] })),
+    1);
+  cache.markFullIndex(user.id, 'a_test', F, true);
+  cache.setUidvalidity(user.id, 'a_test', F, 1);
+  const fetchBefore = fetchLog.length;
+  const out = await syncFolderSnapshot(user.id, 'a_test', client, F);
+  // 服务器有 14 封（uid 101..114）、本地 4 封 → 增量应拉 uid 105..114 共 10 封；
+  // 修 bug 前这里发的是「序号 FETCH 105:*」→ 服务器 BAD → 整个对账失败 → 文件夹永远停在 4 封
+  check('增量对账走 incremental 且拉满差值', out.mode === 'incremental' && out.fetched === 10, JSON.stringify(out));
+  check('增量 FETCH 以 UID 语义发出（带 UID 前缀，不是序号）',
+    fetchLog.slice(fetchBefore).some((l) => /^UID 105:\*/.test(l)), JSON.stringify(fetchLog.slice(fetchBefore)));
+  check('对账后本地总数与服务器一致', cache.folderTotal(user.id, 'a_test', F) === 14,
+    String(cache.folderTotal(user.id, 'a_test', F)));
+  client.close();
+}
 
 // ---------- 删除文件夹：只放行自建（无 special），INBOX/系统文件夹在进 IMAP 前就拒绝 ----------
 const { deleteFolder: delFolder } = await import('../server/mail.js');
