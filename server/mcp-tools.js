@@ -304,8 +304,9 @@ export function registerTools(server, ctx) {
     scope: 'read',
     title: '列出邮件',
     description: '按时间倒序分页列出邮件摘要（发件人、主题、时间、已读/星标），不含正文。要看正文再用 read_message。'
-      + '用户问「有没有未读邮件」「有哪些未读」「未读的都是什么」时用这个，传 unreadOnly=true；'
-      + '没提是哪个邮箱就不要猜账号——不填 account 会列出全部账号并按时间合并。',
+      + '用户问「有没有未读邮件」「有哪些未读」「未读的都是什么」时用这个，传 unreadOnly=true。'
+      + '⚠ 用户指名了某个邮箱（如「outlook 的未读」「QQ邮箱的未读」）时必须传 account=那个邮箱，不要查全部账号；'
+      + '只有用户没提任何邮箱时才省略 account（此时会合并全部账号并按时间排序）。',
     annotations: { readOnlyHint: true },
     schema: {
       account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；省略则查全部账号'),
@@ -377,6 +378,8 @@ export function registerTools(server, ctx) {
         total,
         pageSize: per,
         messages: shown,
+        hint: '以上是全部账号合并的结果（每条 message 的 account 字段标明来源邮箱）。'
+          + '如果用户问的只是其中一个邮箱，请带上 account=那个邮箱重新调用本工具，只查该账号。',
         ...(total > shown.length
           ? { note: `共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请指定 account 或调大 pageSize` }
           : {}),
