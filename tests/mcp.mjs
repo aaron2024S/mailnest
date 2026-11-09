@@ -264,6 +264,21 @@ const expect = ['create_folder', 'delete_folder', 'delete_draft', 'delete_messag
   'save_draft', 'search_messages', 'send_draft', 'send_message', 'set_flags', 'unread_count'];
 ok('工具名齐全', expect.every((n) => names.includes(n)), names.join(','));
 ok('每个工具有描述', tools.every((t) => t.description && t.description.length > 8), '');
+
+// 描述之间要能互相区分。2026-11-09 实测：用户问「有未读邮件吗」，模型选了
+// list_accounts（当时它写着「问有没有新邮件用这一个工具就够」），于是只回了一串
+// 账号未读计数——用户要的是邮件本身。这条守卫防止那句话被写回去。
+{
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t.description || '']));
+  ok('list_accounts 不再抢「有没有未读」的活',
+    !/有没有新邮件|用这一个工具就够/.test(byName.list_accounts || ''), byName.list_accounts);
+  ok('list_messages 承接「有没有未读邮件」并点名 unreadOnly',
+    /有没有未读邮件/.test(byName.list_messages || '') && /unreadOnly/.test(byName.list_messages || ''),
+    byName.list_messages);
+  ok('list_messages 说明不填 account 就查全部账号', /全部账号/.test(byName.list_messages || ''), byName.list_messages);
+  ok('unread_count 只承接数量类问题',
+    /只回答未读邮件的数量/.test(byName.unread_count || ''), byName.unread_count);
+}
 ok('未越权：没有账号/密码/令牌管理类工具',
   !tools.some((t) => /account_|password|user|oauth|token/i.test(t.name)), names.join(','));
 ok('只读工具带 readOnlyHint', tools.filter((t) => /^list_|^read_/.test(t.name)).every((t) => t.annotations?.readOnlyHint === true), '');

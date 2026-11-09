@@ -190,9 +190,11 @@ export function registerTools(server, ctx) {
     name: 'list_accounts',
     scope: 'read',
     title: '列出邮箱账号',
-    description: '列出当前账号下已配置的邮箱（含各文件夹未读数）。用户问「有几封未读」「有没有新邮件」「哪个邮箱有未读」时，'
-      + '用这一个工具就够（返回值里 unread 就是未读数）；要列出未读邮件的清单用 list_messages 的 unreadOnly=true。'
-      + '其它工具里的 account 参数可填显示名、邮箱地址或 id。',
+    // 别在这里写「问未读就用这个」：这句话会让模型拿账号列表去回答「有没有未读邮件」，
+    // 而用户要看的是邮件本身。只回答数量用 unread_count，要邮件明细用 list_messages。
+    description: '列出当前账号下已配置的邮箱，顺带给出各文件夹未读数——它的用途是核对账号清单、'
+      + '以及确认其它工具的 account 参数该填什么（显示名、邮箱地址或 id 都行）。'
+      + '凡是问未读的都不要用它（它只给统计）：问数量用 unread_count，要看具体是哪几封用 list_messages（unreadOnly=true）。',
     annotations: { readOnlyHint: true },
     schema: {},
     run: async () => {
@@ -218,9 +220,9 @@ export function registerTools(server, ctx) {
     name: 'unread_count',
     scope: 'read',
     title: '查询未读数量',
-    description: '查有多少封未读邮件。用户问「有几封未读」「XX邮箱有没有未读/新邮件」时用这个。'
-      + '不指定 account 且有多个账号时，返回每个账号的未读汇总；指定 account 时返回该账号的文件夹明细。'
-      + '要看未读邮件的清单和内容，接着用 list_messages（unreadOnly=true）和 read_message。',
+    description: '只回答未读邮件的数量，不返回邮件本身。用在用户明确只关心数字时（「几封未读」「未读多少」）；'
+      + '要是他想看具体是哪几封，改用 list_messages（unreadOnly=true）。'
+      + '不指定 account 且有多个账号时，返回每个账号的未读汇总；指定 account 时返回该账号的文件夹明细。',
     annotations: { readOnlyHint: true },
     schema: { account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；不填则汇总所有账号') },
     run: async ({ account }) => {
@@ -280,27 +282,23 @@ export function registerTools(server, ctx) {
     name: 'list_messages',
     scope: 'read',
     title: '列出邮件',
-    description: '按时间倒序分页列出某文件夹的邮件摘要（发件人、主题、时间、已读/星标），不含正文。要看正文再用 read_message；'
-      + '只关心未读时传 unreadOnly=true，不用翻整夹去找。',
+    description: '按时间倒序分页列出邮件摘要（发件人、主题、时间、已读/星标），不含正文。要看正文再用 read_message。'
+      + '用户问「有没有未读邮件」「有哪些未读」「未读的都是什么」时用这个，传 unreadOnly=true；'
+      + '没提是哪个邮箱就不要猜账号——不填 account 会列出全部账号并按时间合并。',
     annotations: { readOnlyHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；省略则查全部账号'),
       folder: z.string().optional().describe('文件夹路径，默认 INBOX'),
-      page: z.coerce.number().int().min(1).optional().describe('页码，从 1 开始'),
+      page: z.coerce.number().int().min(1).optional().describe('页码，从 1 开始（跨账号只支持第一页）'),
       pageSize: z.coerce.number().int().min(1).max(PAGE_MAX).optional().describe(`每页条数，最多 ${PAGE_MAX}，默认 20`),
       unreadOnly: z.boolean().optional().describe('只列未读邮件（默认 false 列全部）'),
     },
     run: async ({ account, folder, page, pageSize, unreadOnly }) => {
-      const acc = resolveAccount(uid, account);
       const dir = normFolder(folder);
-      const d = await listMessages(uid, acc.id, dir, { page: page || 1, pageSize: pageSize || 20, unreadOnly: !!unreadOnly });
-      return json({
-        account: { id: acc.id, email: acc.email },
-        folder: dir,
-        total: d.total,
-        page: d.page,
-        pageSize: d.pageSize,
-        messages: d.messages.map((m) => ({
+      const per = Math.min(Math.max(1, pageSize || 20), PAGE_MAX);
+      const pg = Math.max(1, page || 1);
+      const toItem = (m, acc) => {
+        const it = {
           uid: m.uid,
           from: m.from.name ? `${m.from.name} <${m.from.address}>` : m.from.address,
           subject: m.subject,
@@ -308,7 +306,67 @@ export function registerTools(server, ctx) {
           unread: !m.flags.includes('\\Seen'),
           starred: m.flags.includes('\\Flagged'),
           hasAttachment: m.hasAttachment,
-        })),
+        };
+        // 跨账号时每条都标来源：uid 只在单个账号内唯一，后续「回 1 看这封」
+        // 必须连账号一起带回去，否则下一步定位不到是哪封信。
+        if (acc) it.account = acc.displayName && acc.displayName !== acc.email ? acc.displayName : acc.email;
+        return it;
+      };
+
+      const all = listAccounts(uid);
+      if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
+
+      // 指定账号（或本来就只有一个）：沿用原来的分页语义
+      if (account || all.length === 1) {
+        const acc = account ? resolveAccount(uid, account) : all[0];
+        const d = await listMessages(uid, acc.id, dir, { page: pg, pageSize: per, unreadOnly: !!unreadOnly });
+        return json({
+          account: { id: acc.id, email: acc.email },
+          folder: dir,
+          total: d.total,
+          page: d.page,
+          pageSize: d.pageSize,
+          messages: d.messages.map((m) => toItem(m)),
+        });
+      }
+
+      // 没指定账号 + 多个账号：合并查询。
+      // 「有没有未读邮件」这种没人指名道姓的问法就走这里——它是唯一能给出邮件本身的路径，
+      // 只回一串账号计数用户是不认的（2026-11-09 实测）。
+      if (pg > 1) {
+        throw new Error(`有 ${all.length} 个账号，跨账号只列第一页；要翻页请指定 account：${all.map(accountLabel).join('、')}`);
+      }
+      const merged = [];
+      const failed = [];
+      let totalFound = 0;
+      for (const acc of all) {
+        try {
+          const d = await listMessages(uid, acc.id, dir, { page: 1, pageSize: per, unreadOnly: !!unreadOnly });
+          totalFound += d.total;
+          for (const m of d.messages) merged.push(toItem(m, acc));
+        } catch (e) {
+          // 单个账号连不上不该拖垮整次查询（Outlook 掉 token 是常态）
+          failed.push(`${accountLabel(acc)}：${humanError(e)}`);
+        }
+      }
+      merged.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+      const shown = merged.slice(0, per);
+      if (!shown.length) {
+        const what = unreadOnly ? '未读邮件' : '邮件';
+        return text(failed.length
+          ? `没有查到${what}（部分账号查询失败：${failed.join('；')}）`
+          : `所有账号都没有${what}`);
+      }
+      return json({
+        accounts: all.map((a) => a.email),
+        folder: dir,
+        total: totalFound,
+        pageSize: per,
+        messages: shown,
+        ...(totalFound > shown.length
+          ? { note: `共 ${totalFound} 封，只列了最新的 ${shown.length} 封；要更多请指定 account 或调大 pageSize` }
+          : {}),
+        ...(failed.length ? { failedAccounts: failed } : {}),
       });
     },
   });
