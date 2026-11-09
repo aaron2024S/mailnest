@@ -670,4 +670,23 @@ function sseCtx(over = {}) {
   ok('汇总视图不重置为单账号视图', ctx.activeAccount === 'all');
 }
 
+// 26) 邮件正文必须进沙箱 iframe：邮件自带 <style> 在 v-html 下泄漏进主页面，
+//     TMDB 这类深色模板邮件能把整页染花（2026-11-09 用户实测）。防回归。
+{
+  const idx = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  ok('正文用沙箱 iframe 渲染（srcdoc 绑定 emailDoc）', /<iframe class="r-frame"[\s\S]*?:srcdoc="emailDoc"/.test(idx));
+  const sb = idx.match(/sandbox="([^"]+)"/);
+  ok('iframe sandbox 存在且不含 allow-scripts（邮件脚本永不执行）', !!sb && !/allow-scripts/.test(sb?.[1] || ''), sb?.[1] || '缺 sandbox');
+  ok('iframe sandbox 允许弹窗（邮件链接新标签打开）', !!sb && /allow-popups/.test(sb[1]));
+  ok('不再用 v-html 注入邮件正文', !idx.includes('v-html="selected.html"'));
+  const doc = C.emailDoc.call({ selected: { html: '<style>p{color:red}</style><p>hi</p>' } });
+  ok('emailDoc 带 base target=_blank（链接不劫持 iframe）', doc.includes('<base target="_blank">'));
+  ok('emailDoc 重置 body 边距并铺白底', /html,body\{margin:0;padding:0;background:#fff/.test(doc));
+  ok('emailDoc 保留邮件原始 HTML（含 style，模板布局不受影响）', doc.includes('<style>p{color:red}</style>'));
+  ok('emailDoc 保留裸表格补边框规则', doc.includes('table:not([style])'));
+  ok('纯文本邮件（无 html）emailDoc 为空串走 r-text 分支', C.emailDoc.call({ selected: { text: 'x' } }) === '');
+  ok('fitFrame 高度自适应方法存在', typeof M.fitFrame === 'function');
+  ok('watch.selected 清理尺寸观察器', typeof captured.watch?.selected === 'function');
+}
+
 console.log(`\n全部通过：${pass} 项断言`);

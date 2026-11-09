@@ -214,6 +214,29 @@ const app = createApp({
       return f ? this.folderLabel(f) : this.activeFolder;
     },
     totalAttachSize() { return this.compose.attachments.reduce((s, a) => s + a.size, 0); },
+    // 邮件正文包一层最小 HTML 再放进沙箱 iframe（srcdoc）。直接 v-html 会把邮件自带
+    // 的 <style> 泄漏进主页面（TMDB/Steam 这类模板邮件能把整页染花）；iframe 内互不影响。
+    emailDoc() {
+      const h = this.selected?.html || '';
+      if (!h) return '';
+      return '<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank">'
+        + '<style>html,body{margin:0;padding:0;background:#fff;color:#24292f;'
+        + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;word-break:break-word}'
+        + 'img{max-width:100%;height:auto}'
+        // 原 .r-html 的「裸表格补边框」规则跟着搬进来，纯文本排版的老邮件仍可读
+        + 'table:not([style]){border-collapse:collapse;width:100%;margin:10px 0}'
+        + 'td:not([style]),th:not([style]){border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
+        + 'th:not([style]){background:#f5f6f8}'
+        + 'blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
+        + '</style></head><body>' + h + '</body></html>';
+    },
+  },
+
+  watch: {
+    // 换邮件 / 关阅读区时，旧正文的尺寸观察器跟着作废，别挂在已卸载的文档上
+    selected() {
+      if (this._frameRO) { this._frameRO.disconnect(); this._frameRO = null; }
+    },
   },
 
   methods: {
@@ -824,6 +847,28 @@ const app = createApp({
         if (gen === this._openGen) this.openingKey = null;
       }
     },
+    // 沙箱 iframe 高度自适应：load 时量一次；图片懒加载、字体替换导致的后续变高
+    // 由 ResizeObserver 补量。宽出容器的邮件（固定 600px 模板）留出横向滚动条高度。
+    fitFrame(e) {
+      const f = e && e.target;
+      if (!f) return;
+      try {
+        const doc = f.contentDocument;
+        if (!doc) return;
+        const fit = () => {
+          const de = doc.documentElement;
+          const h = Math.max(de.scrollHeight, doc.body ? doc.body.scrollHeight : 0);
+          if (h <= 0) return;
+          const wide = de.scrollWidth > de.clientWidth;
+          f.style.height = (h + (wide ? 18 : 2)) + 'px';
+        };
+        fit();
+        if (this._frameRO) this._frameRO.disconnect();
+        this._frameRO = new ResizeObserver(fit);
+        this._frameRO.observe(doc.documentElement);
+      } catch { /* 同源沙箱不会走到这里，兜个底而已 */ }
+    },
+
     // 键盘上下切换当前邮件（j/k 或 ↑/↓）
     stepMessage(delta) {
       const rows = this.filteredMessages;

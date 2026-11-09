@@ -456,7 +456,12 @@
                 <span class="sz">{{ fmtSize(a.size) }}</span>
               </a>
             </div>
-            <div class="r-html" v-if="selected.html" v-html="selected.html"></div>
+            <!-- 正文必须进沙箱 iframe：邮件自带 <style>（模板布局必需，服务端有意放行）
+                 在 v-html 下会泄漏进主页面，TMDB 这类深色模板能把整页染花。
+                 不给 allow-scripts，邮件里的脚本永远不跑；高度由 fitFrame 自适应。 -->
+            <iframe class="r-frame" v-if="selected.html" :srcdoc="emailDoc" title="邮件正文"
+                    sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                    @load="fitFrame"></iframe>
             <div class="r-text" v-else>{{ selected.text }}</div>
 
             <div class="quick-reply">
