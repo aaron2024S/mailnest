@@ -635,7 +635,22 @@ export async function deleteMessages(uid, accountId, folder, messageUids) {
   try {
     return await withMailbox(uid, accountId, folder, async (client) => {
       const seq = messageUids.map(String).join(',');
-      await client.messageDelete(seq, { uid: true });
+      // ⚠ messageDelete 的两步（STORE \Deleted → EXPUNGE）任何一步失败都会被 imapflow
+      // 吞成 false，绝不能当成功——否则界面删了、服务器没删，重开文件夹邮件全回来。
+      const ok = await client.messageDelete(seq, { uid: true });
+      if (!ok) {
+        // 二段式兜底：显式打 \Deleted 再 EXPUNGE（不用 UID EXPUNGE，兼容怪服务器）
+        await client.messageFlagsAdd(seq, '\\Deleted', { uid: true });
+        await client.expunge();
+      }
+      // 验证：这批 uid 应该已经全部消失
+      let left = [];
+      try {
+        left = await client.search({ uid: seq }) || [];
+      } catch { /* 个别服务器不支持按 uid SEARCH，跳过验证 */ }
+      if (left.length) {
+        throw new Error(`有 ${left.length} 封邮件服务器拒绝删除，稍后重试或到邮箱官方网页端处理`);
+      }
       return { ok: true };
     });
   } catch (e) {

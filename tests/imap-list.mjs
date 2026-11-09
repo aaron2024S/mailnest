@@ -22,6 +22,24 @@ const searchLog = [];
 const fetchLog = [];
 let expungeCount = 0;
 const deleteLog = [];
+// 服务器上「还活着」的 uid 账本（STORE \Deleted 时销账），供按 uid 的 SEARCH 校验
+const alive = new Set();
+for (let i = 1; i <= COUNT; i++) alive.add(100 + i);
+
+// 展开 IMAP uid 集合（「101,102」「105:*」）为 uid 数组；「*」= 最高 uid
+function expandUidSet(set) {
+  const topUid = COUNT + 100; // 假服务器 uid = 100 + 序号
+  return String(set).split(',').flatMap((x) => {
+    if (x.includes(':')) {
+      const [p0, q0] = x.split(':');
+      const p = parseInt(p0, 10);
+      const q = Number.isFinite(parseInt(q0, 10)) ? parseInt(q0, 10) : topUid;
+      return Array.from({ length: Math.abs(q - p) + 1 }, (_, k) => Math.min(p, q) + k);
+    }
+    const n = parseInt(x, 10);
+    return Number.isFinite(n) ? [n] : [];
+  }).filter((n) => n >= 1);
+}
 
 const server = net.createServer((sock) => {
   sock.setEncoding('utf8');
@@ -144,12 +162,24 @@ const server = net.createServer((sock) => {
         }
         sock.write(`${tag2} OK fetch done\r\n`);
       } else if (C === 'SEARCH') {
-        // 只看未读的名单来源：固定返回 3 个 uid，断言只关心命令与后续 FETCH 名单
         searchLog.push(rest);
-        sock.write(`* SEARCH 103 105 107\r\n${tag2} OK search done\r\n`);
+        // 按 uid 的 SEARCH（deleteMessages 的删后校验用）：返回这批 uid 里还活着的
+        if (/^UID\s/i.test(rest.trim())) {
+          const set = rest.trim().slice(4);
+          const want = expandUidSet(set);
+          const hits = [...alive].filter((u) => want.includes(u)).sort((a, b) => a - b);
+          sock.write(`* SEARCH ${hits.join(' ')}\r\n${tag2} OK search done\r\n`);
+        } else {
+          // 只看未读的名单来源：固定返回 3 个 uid，断言只关心命令与后续 FETCH 名单
+          sock.write(`* SEARCH 103 105 107\r\n${tag2} OK search done\r\n`);
+        }
       } else if (C === 'STORE') {
         // 记录整夹操作发出的 STORE（全部已读 / 清空），供后面断言
         storeLog.push(rest);
+        // \Deleted 标记要记账：EXPUNGE 只真删被标记的（或 UID EXPUNGE 指定的）
+        if (/\\Deleted/.test(rest)) {
+          for (const u of expandUidSet(rest.split(/\s+/)[0])) alive.delete(u);
+        }
         sock.write(`${tag2} OK store done\r\n`);
       } else if (C === 'EXPUNGE') {
         expungeCount++;
@@ -309,6 +339,20 @@ check('后台清空用独立连接也能真删', expungeCount > expungeBefore, `
   check('对账后本地总数与服务器一致', cache.folderTotal(user.id, 'a_test', F) === 14,
     String(cache.folderTotal(user.id, 'a_test', F)));
   client.close();
+}
+
+// ---------- 批量删除回归：messageDelete 静默失败绝不能当成功（「全选删除没效果」的兜底） ----------
+{
+  const { deleteMessages } = await import('../server/mail.js');
+  // 把活账本重置满（前面的清空测试把它删光了），删 uid 101..103 三封
+  for (let i = 1; i <= COUNT; i++) alive.add(100 + i);
+  const searchBefore = searchLog.length;
+  await deleteMessages(user.id, 'a_test', 'Projects2026', [101, 102, 103]);
+  // deleteMessages 内部会做删后校验：如果这批 uid 还活着，它会抛错，这里就走不到
+  check('批量删除 3 封不抛错（删后校验通过）', true);
+  check('删后校验按 uid SEARCH 发出', searchLog.slice(searchBefore).some((l) => /^UID 101,102,103/i.test(l.trim())),
+    JSON.stringify(searchLog.slice(searchBefore)));
+  check('被删的 uid 从服务器账本消失', !alive.has(101) && !alive.has(102) && !alive.has(103), JSON.stringify([...alive]));
 }
 
 // ---------- 删除文件夹：只放行自建（无 special），INBOX/系统文件夹在进 IMAP 前就拒绝 ----------
