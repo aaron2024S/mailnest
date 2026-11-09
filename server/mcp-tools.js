@@ -42,6 +42,32 @@ export function splitUnread(counts) {
   return { inbox, total, other: total - inbox };
 }
 
+// 认证结果（Authentication-Results）是 SPF/DKIM/DMARC 的原始报文，动辄两三百字：
+//   mx.qq.com; spf=pass smtp.mailfrom=<a@b> (ip=1.2.3.4); dkim=pass header.d=b; dmarc=pass
+// 它只用于判断钓鱼，却被拼在正文前面，用户看到的全是等号和 IP，正文还被挤到显示上限之外。
+// 这里压成一句人话；原文只在异常时附在结果最后，留给模型复核。
+export function summarizeAuth(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const pick = (k) => (s.match(new RegExp(`\\b${k}\\s*=\\s*([A-Za-z]+)`, 'i')) || [])[1]?.toLowerCase() || '';
+  const ZH = {
+    pass: '通过', fail: '未通过', softfail: '可疑', none: '未声明',
+    permerror: '配置有误', temperror: '临时失败', policy: '按策略',
+  };
+  const spf = pick('spf');
+  const dkim = pick('dkim');
+  const dmarc = pick('dmarc');
+  const parts = [spf && `SPF ${ZH[spf] || spf}`, dkim && `DKIM ${ZH[dkim] || dkim}`, dmarc && `DMARC ${ZH[dmarc] || dmarc}`]
+    .filter(Boolean);
+  const bad = new Set(['fail', 'softfail', 'permerror', 'temperror']);
+  const suspicious = [spf, dkim, dmarc].some((v) => bad.has(v)) || /\b(quarantine|reject)\b/i.test(s);
+  return {
+    suspicious,
+    brief: parts.join(' · ') || '无法解析',
+    raw: s.length > 200 ? `${s.slice(0, 200)}…` : s,
+  };
+}
+
 function htmlToText(html) {
   return String(html)
     .replace(/<(script|style)[\s\S]*?<\/\1>/gi, '')
@@ -129,7 +155,18 @@ function normUids(uids) {
 }
 
 function normFolder(f) {
-  return String(f || 'INBOX').trim() || 'INBOX';
+  const s = String(f || '').trim();
+  if (!s) return 'INBOX';
+  // 用户和模型都会说「收件箱」「垃圾箱」这种展示名。直接拿去当 IMAP 路径查，
+  // 会得到一个不存在的文件夹。常见的这几个统一映射成规范名。
+  const ALIAS = {
+    收件箱: 'INBOX', inbox: 'INBOX',
+    已发送: 'Sent', 发件箱: 'Sent', sent: 'Sent',
+    已删除: 'Trash', 垃圾箱: 'Trash', 废纸篓: 'Trash', trash: 'Trash',
+    垃圾邮件: 'Junk', 广告邮件: 'Junk', spam: 'Junk', junk: 'Junk',
+    草稿: 'Drafts', 草稿箱: 'Drafts', drafts: 'Drafts',
+  };
+  return ALIAS[s.toLowerCase()] || s;
 }
 
 // 发信附件参数：content 必须是 base64（agent 读本地文件后自己编码）。
@@ -334,7 +371,7 @@ export function registerTools(server, ctx) {
       const dir = normFolder(folder);
       const per = Math.min(Math.max(1, pageSize || 20), PAGE_MAX);
       const pg = Math.max(1, page || 1);
-      const toItem = (m, acc) => {
+      const toItem = (m, acc, folderPath) => {
         const it = {
           uid: m.uid,
           from: m.from.name ? `${m.from.name} <${m.from.address}>` : m.from.address,
@@ -344,6 +381,9 @@ export function registerTools(server, ctx) {
           starred: m.flags.includes('\\Flagged'),
           hasAttachment: m.hasAttachment,
         };
+        // uid 只在「某个文件夹」里唯一，不在收件箱的信只看 uid 定位不到。
+        // 把规范文件夹名带回去，上层「回 1 看正文」时才能原样带过来。
+        if (folderPath) it.folder = folderPath;
         // 跨账号时每条都标来源：uid 只在单个账号内唯一，后续「回 1 看这封」
         // 必须连账号一起带回去，否则下一步定位不到是哪封信。
         if (acc) it.account = acc.displayName && acc.displayName !== acc.email ? acc.displayName : acc.email;
@@ -363,7 +403,7 @@ export function registerTools(server, ctx) {
           total: d.total,
           page: d.page,
           pageSize: d.pageSize,
-          messages: d.messages.map((m) => toItem(m)),
+          messages: d.messages.map((m) => toItem(m, null, dir)),
         });
       }
 
@@ -377,7 +417,7 @@ export function registerTools(server, ctx) {
         all,
         async (acc) => {
           const d = await listMessages(uid, acc.id, dir, { page: 1, pageSize: per, unreadOnly: !!unreadOnly });
-          return { total: d.total, messages: d.messages.map((m) => toItem(m, acc)) };
+          return { total: d.total, messages: d.messages.map((m) => toItem(m, acc, dir)) };
         },
         per,
       );
@@ -463,7 +503,10 @@ export function registerTools(server, ctx) {
         total: hits.length,
         messages: shown.map((m) => ({
           account: m.acc.displayName && m.acc.displayName !== m.acc.email ? m.acc.displayName : m.acc.email,
-          folder: folderName(m.folder),
+          // folder 给机器（下一步原样传给 read_message / set_flags 等），folderName 给人看。
+          // 只给「收件箱」这种展示名的话，模型照着回传会去找一个叫「收件箱」的文件夹，必然失败。
+          folder: m.folder,
+          folderName: folderName(m.folder),
           uid: m.uid,
           from: m.from?.name ? `${m.from.name} <${m.from.address}>` : (m.from?.address || '未知'),
           subject: m.subject,
@@ -500,22 +543,41 @@ export function registerTools(server, ctx) {
       const truncated = body.length > BODY_LIMIT;
       if (truncated) body = body.slice(0, BODY_LIMIT);
 
+      // 用户在微信里要的是正文。所以信头只留「这封是谁、什么时候、带没带附件」这几行，
+      // 机器串（认证结果 / Return-Path）挪到最后：正常时一句话，异常时才附原文。
+      // 2026-11-09 实测：正常营销邮件里 `认证结果：mx.qq.com; spf=pass smtp.mailfrom=<…>(ip=…)`
+      // 占了三百字还排在最前面，用户看到的全是等号和 IP。
+      const auth = summarizeAuth(m.authResults);
+      const replyToDiff = !!(m.replyTo?.address && m.replyTo.address !== m.from?.address);
+      const domainOf = (a) => String(a || '').toLowerCase().split('@').pop().replace(/[>\s),]+$/, '');
+      const returnPathDiff = !!(m.returnPath && domainOf(m.returnPath) && domainOf(m.returnPath) !== domainOf(m.from?.address));
+      const toList = (m.to || []).map((t) => t.address).filter(Boolean);
+      const ccList = (m.cc || []).map((t) => t.address).filter(Boolean);
+
       const head = [
         `主题：${m.subject}`,
         `发件人：${m.from?.name ? `${m.from.name} <${m.from.address}>` : (m.from?.address || m.from?.text || '未知')}`,
-        `收件人：${(m.to || []).map((t) => t.address).filter(Boolean).join(', ') || '(无)'}`,
-        m.cc?.length ? `抄送：${m.cc.map((t) => t.address).filter(Boolean).join(', ')}` : '',
+        // 只有一个收件人时不啰嗦——用户自己知道这封信是寄给他的；抄送/多收件人才需要标
+        (toList.length > 1 || ccList.length) ? `收件人：${toList.join(', ') || '(无)'}` : '',
+        ccList.length ? `抄送：${ccList.join(', ')}` : '',
         `时间：${m.date || '未知'}`,
-        m.replyTo?.address && m.replyTo.address !== m.from?.address
-          ? `回信地址：${m.replyTo.address}（⚠ 与发件人不一致，回复会寄到第三方，谨防钓鱼）` : '',
-        m.returnPath ? `Return-Path：${m.returnPath}` : '',
-        m.authResults ? `认证结果：${String(m.authResults).slice(0, 300)}` : '',
         m.attachments?.length
           ? `附件：${m.attachments.map((a, i) => `#${i + 1} ${a.filename}（${Math.round(a.size / 1024)} KB）`).join('、')}`
           : '附件：无',
       ].filter(Boolean).join('\n');
 
-      return text(`${head}\n\n${body || '(这封邮件没有可显示的正文)'}${truncated ? `\n\n[正文已截断，只显示了前 ${BODY_LIMIT} 字]` : ''}`);
+      const warn = [];
+      if (replyToDiff) warn.push(`⚠ 回信地址是 ${m.replyTo.address}，与发件人不一致，回复会寄给第三方。`);
+      if (returnPathDiff) warn.push(`⚠ 退信地址是 ${m.returnPath}，与发件人不同（群发/代发常见，可疑时留意）。`);
+      if (auth?.suspicious) warn.push(`⚠ 信头校验未通过：${auth.brief}。`);
+      const tail = [
+        ...warn,
+        auth ? (auth.suspicious ? `原始认证结果：${auth.raw}` : `信头校验：${auth.brief}`) : '',
+      ].filter(Boolean).join('\n');
+
+      return text(`${head}\n\n${body || '(这封邮件没有可显示的正文)'}`
+        + `${truncated ? `\n\n[正文已截断，只显示了前 ${BODY_LIMIT} 字]` : ''}`
+        + `${tail ? `\n\n${tail}` : ''}`);
     },
   });
 

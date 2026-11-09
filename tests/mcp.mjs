@@ -397,6 +397,20 @@ ok('save_draft 成功', !r.data?.result?.isError && /已保存草稿/.test(r.dat
 const draftId = (r.data.result.content[0].text.match(/编号 ([^）\s]+)/) || [])[1];
 ok('用户文案不漏内部参数名', !/list_messages|unreadOnly|read_message|send_draft|account=|uid=/.test(r.data.result.content[0].text), r.data.result.content[0].text);
 
+// 认证结果是给判断钓鱼用的 SPF/DKIM/DMARC 原始报文，动辄两三百字。它曾整段拼在正文前面，
+// 用户看到的是满屏等号和 IP，真正的正文被挤到显示上限之外。现在压成一句，异常才附原文。
+{
+  const { summarizeAuth } = await import('../server/mcp-tools.js');
+  const good = summarizeAuth('mx.qq.com; spf=pass smtp.mailfrom=<a@b> (ip=205.205.208.10); dkim=pass header.d=b.com; dmarc=pass');
+  ok('认证结果压成一句人话', good?.suspicious === false && /SPF 通过/.test(good.brief)
+    && !/smtp\.mailfrom|ip=/.test(good.brief), good?.brief);
+  const bad = summarizeAuth('mx.qq.com; spf=fail smtp.mailfrom=<evil@x> (ip=1.2.3.4); dkim=fail header.d=x; dmarc=fail');
+  ok('认证不通过要标出来', bad?.suspicious === true && /未通过/.test(bad.brief), bad?.brief);
+  ok('没有认证结果时不编造', summarizeAuth('') === null, String(summarizeAuth('')));
+  const raw = summarizeAuth('spf=pass ' + 'x'.repeat(500));
+  ok('异常时附的原文有上限', raw.raw.length <= 201, String(raw.raw.length));
+}
+
 r = await callTool(sendToken, 'list_drafts');
 ok('list_drafts 能列出刚存的草稿', !r.data?.result?.isError && (r.data?.result?.content?.[0]?.text || '').includes(draftId), r.data?.result?.content?.[0]?.text);
 
