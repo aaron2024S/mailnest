@@ -683,7 +683,7 @@ function sseCtx(over = {}) {
   ok('emailDoc 带 base target=_blank（链接不劫持 iframe）', doc.includes('<base target="_blank">'));
   ok('emailDoc 重置 body 边距并铺白底', /html,body\{margin:0;padding:0;background:#fff/.test(doc));
   ok('emailDoc 保留邮件原始 HTML（含 style，模板布局不受影响）', doc.includes('<style>p{color:red}</style>'));
-  ok('emailDoc 保留裸表格补边框规则', doc.includes('table:not([style])'));
+  ok('emailDoc 保留裸表格补边框规则（且不碰带 width 属性的模板布局表）', doc.includes('table:not([style]):not([width])'));
   ok('纯文本邮件（无 html）emailDoc 为空串走 r-text 分支', C.emailDoc.call({ selected: { text: 'x' } }) === '');
   ok('fitFrame 高度自适应方法存在', typeof M.fitFrame === 'function');
   ok('watch.selected 清理尺寸观察器', typeof captured.watch?.selected === 'function');

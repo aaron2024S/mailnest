@@ -223,10 +223,11 @@ const app = createApp({
         + '<style>html,body{margin:0;padding:0;background:#fff;color:#24292f;'
         + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;word-break:break-word}'
         + 'img{max-width:100%;height:auto}'
-        // 原 .r-html 的「裸表格补边框」规则跟着搬进来，纯文本排版的老邮件仍可读
-        + 'table:not([style]){border-collapse:collapse;width:100%;margin:10px 0}'
-        + 'td:not([style]),th:not([style]){border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
-        + 'th:not([style]){background:#f5f6f8}'
+        // 「裸表格补边框」只针对真·裸表（无 style 也无 width 属性）：模板布局表用
+        // width="600" 属性定宽、无 style，若按选择器补 width:100% 会覆盖属性把布局打碎
+        + 'table:not([style]):not([width]){border-collapse:collapse;margin:10px 0}'
+        + 'table:not([style]):not([width]) td,table:not([style]):not([width]) th{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
+        + 'table:not([style]):not([width]) th{background:#f5f6f8}'
         + 'blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
         + '</style></head><body>' + h + '</body></html>';
     },
