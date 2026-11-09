@@ -599,9 +599,12 @@ export async function emptyFolderIsolated(uid, accountId, folder) {
         // exists 是 imapflow 在 EXPUNGE 事件后实时维护的剩余数量。
         let left = Number(client.mailbox?.exists) || 0;
         if (left > 0) {
-          // 二段式兜底：显式打 \Deleted 再 EXPUNGE（经典 IMAP 两步，兼容怪服务器）
-          await client.messageFlagsAdd('1:*', '\\Deleted', { uid: true });
-          await client.expunge();
+          // CLOSE 式兜底：RFC 3501 CLOSE 会隐式清除全部 \Deleted（imapflow 1.x 没有公开
+          // 的 expunge() 方法，这是唯一的「纯清除」入口；清空场景本来就是要全删）
+          try {
+            await client.mailboxClose();
+            await client.mailboxOpen(folder);
+          } catch { /* 关不上就算了，交给下面的报错 */ }
           left = Number(client.mailbox?.exists) || 0;
         }
         if (left > 0) {
@@ -634,24 +637,62 @@ export async function emptyFolderIsolated(uid, accountId, folder) {
 export async function deleteMessages(uid, accountId, folder, messageUids) {
   try {
     return await withMailbox(uid, accountId, folder, async (client) => {
-      const seq = messageUids.map(String).join(',');
+      const targets = [...new Set(messageUids.map(Number))].filter(Number.isFinite).sort((a, b) => a - b);
+      if (!targets.length) return { ok: true };
+      const seq = targets.map(String).join(',');
+
       // ⚠ messageDelete 的两步（STORE \Deleted → EXPUNGE）任何一步失败都会被 imapflow
-      // 吞成 false，绝不能当成功——否则界面删了、服务器没删，重开文件夹邮件全回来。
-      const ok = await client.messageDelete(seq, { uid: true });
-      if (!ok) {
-        // 二段式兜底：显式打 \Deleted 再 EXPUNGE（不用 UID EXPUNGE，兼容怪服务器）
-        await client.messageFlagsAdd(seq, '\\Deleted', { uid: true });
-        await client.expunge();
-      }
-      // 验证：这批 uid 应该已经全部消失
-      let left = [];
+      // 吞成 false；更糟的是服务器对 UID EXPUNGE 回「假 OK」时返回 true——都绝不能当成功。
+      const verify = async () => {
+        try {
+          return new Set((await client.search({ uid: seq })) || []);
+        } catch {
+          return null; // 服务器不支持按 uid SEARCH，无法验证
+        }
+      };
+      const tryDelete = async (list) => {
+        const s = list.map(String).join(',');
+        // messageDelete 本身就是「打 \Deleted + EXPUNGE」两步；返回 false 说明服务器拒了，
+        // 交给下面的逐封 / CLOSE 兜底（imapflow 1.x 没有公开 expunge() 方法，别造二段式）
+        return await client.messageDelete(s, { uid: true });
+      };
+
+      let firstErr = null;
+      let left = null;
+      // ① 整批一把删（快路径）
       try {
-        left = await client.search({ uid: seq }) || [];
-      } catch { /* 个别服务器不支持按 uid SEARCH，跳过验证 */ }
-      if (left.length) {
-        throw new Error(`有 ${left.length} 封邮件服务器拒绝删除，稍后重试或到邮箱官方网页端处理`);
+        await tryDelete(targets);
+      } catch (e) {
+        firstErr = e;
       }
-      return { ok: true };
+      left = await verify();
+      if (!firstErr && (left === null || left.size === 0)) return { ok: true };
+
+      // ② 逐封删：有的服务器（如 QQ）对带逗号列表的 UID EXPUNGE 回 OK 却不删，
+      //    单个 uid 却正常——「单封能删、全选删不掉」就是这么来的
+      for (const one of targets) {
+        try {
+          await tryDelete([one]);
+        } catch { /* 单封失败不挡后面的 */ }
+      }
+      left = await verify();
+      if (left === null || left.size === 0) {
+        console.log(`[mailnest] 批量删除走了逐封兜底（folder=${folder}，整批被服务器假成功）`);
+        return { ok: true };
+      }
+
+      // ③ CLOSE 式兜底：个别服务器把 \Deleted 攒到 mailbox 关闭时才真正清除
+      try {
+        await client.mailboxClose();
+        await client.mailboxOpen(folder);
+      } catch { /* 关不上就算了 */ }
+      left = await verify();
+      if (left === null || left.size === 0) {
+        console.log(`[mailnest] 批量删除走了逐封+close 兜底（folder=${folder}）`);
+        return { ok: true };
+      }
+
+      throw new Error(`有 ${left === null ? targets.length : left.size} 封邮件服务器拒绝删除，稍后重试或到邮箱官方网页端处理`);
     });
   } catch (e) {
     throw imapError(e);

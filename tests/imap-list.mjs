@@ -22,9 +22,12 @@ const searchLog = [];
 const fetchLog = [];
 let expungeCount = 0;
 const deleteLog = [];
-// 服务器上「还活着」的 uid 账本（STORE \Deleted 时销账），供按 uid 的 SEARCH 校验
+// 服务器上「还活着」的 uid 账本与 \Deleted 标记账本（STORE 只打标，EXPUNGE 才销账），
+// 供按 uid 的 SEARCH 校验；模拟 QQ 怪癖用（多 uid 的 UID EXPUNGE 假成功）
 const alive = new Set();
 for (let i = 1; i <= COUNT; i++) alive.add(100 + i);
+const flagged = new Set();
+const qqRefusedLog = []; // 被假成功吞掉的多 uid UID EXPUNGE 记录
 
 // 展开 IMAP uid 集合（「101,102」「105:*」）为 uid 数组；「*」= 最高 uid
 function expandUidSet(set) {
@@ -43,7 +46,7 @@ function expandUidSet(set) {
 
 const server = net.createServer((sock) => {
   sock.setEncoding('utf8');
-  sock.write('* OK [CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR] mock ready\r\n');
+  sock.write('* OK [CAPABILITY IMAP4rev1 UIDPLUS ID AUTH=XOAUTH2 SASL-IR] mock ready\r\n');
   let buf = '';
   sock.on('data', (chunk) => {
     buf += chunk;
@@ -60,11 +63,11 @@ const server = net.createServer((sock) => {
       const rest = isUid ? rest0.slice(rest0.split(/\s+/)[0].length).trim() : rest0;
       const C = cmd.toUpperCase();
       if (C === 'CAPABILITY') {
-        sock.write(`* CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR\r\n${tag2} OK done\r\n`);
+        sock.write(`* CAPABILITY IMAP4rev1 UIDPLUS ID AUTH=XOAUTH2 SASL-IR\r\n${tag2} OK done\r\n`);
       } else if (C === 'ID') {
         sock.write(`* ID ("name" "mock")\r\n${tag2} OK done\r\n`);
       } else if (C === 'LOGIN') {
-        sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR] logged in\r\n`);
+        sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 UIDPLUS ID AUTH=XOAUTH2 SASL-IR] logged in\r\n`);
       } else if (C === 'AUTHENTICATE') {
         // OAuth2 账号走 AUTHENTICATE XOAUTH2 <base64(user=..\x01auth=Bearer ..\x01\x01)>
         const parts = rest.split(/\s+/);
@@ -73,13 +76,14 @@ const server = net.createServer((sock) => {
         try { raw = Buffer.from(parts[1] || '', 'base64').toString('utf8'); } catch { raw = ''; }
         if (mech === 'XOAUTH2' && /^user=[^\u0001]+\u0001auth=Bearer [^\u0001]+\u0001\u0001$/.test(raw)) {
           sawXoauth2 = true;
-          sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 ID AUTH=XOAUTH2 SASL-IR] authenticated\r\n`);
+          sock.write(`${tag2} OK [CAPABILITY IMAP4rev1 UIDPLUS ID AUTH=XOAUTH2 SASL-IR] authenticated\r\n`);
         } else {
           sock.write(`${tag2} NO [AUTHENTICATIONFAILED] bad token\r\n`);
         }
       } else if (C === 'SELECT' || C === 'EXAMINE') {
         sock.write('* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)\r\n');
-        sock.write(`* ${COUNT} EXISTS\r\n* 0 RECENT\r\n`);
+        // EXISTS 报账本真实存活数（CLOSE/EXPUNGE 后重选要能反映出删掉了）
+        sock.write(`* ${alive.size} EXISTS\r\n* 0 RECENT\r\n`);
         sock.write('* OK [UIDVALIDITY 1] ok\r\n* OK [UIDNEXT 115] ok\r\n');
         sock.write(`${tag2} OK [READ-WRITE] selected\r\n`);
       } else if (C === 'LIST') {
@@ -176,16 +180,37 @@ const server = net.createServer((sock) => {
       } else if (C === 'STORE') {
         // 记录整夹操作发出的 STORE（全部已读 / 清空），供后面断言
         storeLog.push(rest);
-        // \Deleted 标记要记账：EXPUNGE 只真删被标记的（或 UID EXPUNGE 指定的）
-        if (/\\Deleted/.test(rest)) {
-          for (const u of expandUidSet(rest.split(/\s+/)[0])) alive.delete(u);
+        // \Deleted 只打标不销账：EXPUNGE 才真删（RFC 3501 两段式语义）
+        if (/\\Deleted/i.test(rest)) {
+          const set = expandUidSet(rest.split(/\s+/)[0]);
+          for (const u of (isUid ? set : set.map((s) => s + 100))) flagged.add(u);
         }
         sock.write(`${tag2} OK store done\r\n`);
+      } else if (C === 'EXPUNGE' && isUid) {
+        // UID EXPUNGE（服务器带 UIDPLUS 能力才会发）：
+        // 模拟 QQ 怪癖——带逗号列表的多 uid 回 OK 但不删（假成功），单个 uid 正常删
+        const set = expandUidSet(rest);
+        if (rest.includes(',') && set.length > 1) {
+          qqRefusedLog.push(rest);
+          sock.write(`${tag2} OK expunge done\r\n`);
+        } else {
+          expungeCount++;
+          for (const u of set) {
+            if (alive.delete(u)) {
+              flagged.delete(u);
+              sock.write(`* ${u - 100} EXPUNGE\r\n`);
+            }
+          }
+          sock.write(`${tag2} OK expunge done\r\n`);
+        }
       } else if (C === 'EXPUNGE') {
         expungeCount++;
         // 真服务器必须推未应答 EXPUNGE 行，imapflow 才会把 mailbox.exists 减到 0；
         // 不推的话「清空后校验剩余数」会误判为没删掉
-        for (let i = COUNT; i >= 1; i--) sock.write(`* ${i} EXPUNGE\r\n`);
+        for (const u of [...flagged].sort((a, b) => b - a)) {
+          if (alive.delete(u)) sock.write(`* ${u - 100} EXPUNGE\r\n`);
+        }
+        flagged.clear();
         sock.write(`${tag2} OK expunge done\r\n`);
       } else if (C === 'DELETE') {
         deleteLog.push(rest);
@@ -195,8 +220,13 @@ const server = net.createServer((sock) => {
       } else if (C === 'LOGOUT') {
         sock.write(`* BYE bye\r\n${tag2} OK done\r\n`);
         sock.end();
-      } else if (C === 'NOOP' || C === 'CLOSE' || C === 'UNSELECT') {
+      } else if (C === 'NOOP' || C === 'UNSELECT') {
         sock.write(`${tag2} OK done\r\n`);
+      } else if (C === 'CLOSE') {
+        // RFC 3501 CLOSE：悄悄清除所有 \Deleted（没有未应答 EXPUNGE 行）
+        for (const u of flagged) alive.delete(u);
+        flagged.clear();
+        sock.write(`${tag2} OK close done\r\n`);
       } else {
         sock.write(`${tag2} BAD unsupported ${cmd}\r\n`);
       }
@@ -344,15 +374,31 @@ check('后台清空用独立连接也能真删', expungeCount > expungeBefore, `
 // ---------- 批量删除回归：messageDelete 静默失败绝不能当成功（「全选删除没效果」的兜底） ----------
 {
   const { deleteMessages } = await import('../server/mail.js');
-  // 把活账本重置满（前面的清空测试把它删光了），删 uid 101..103 三封
+  // 把活账本重置满（前面的清空测试把它删光了），删 uid 101..103 三封。
+  // 假服务器带 UIDPLUS 且模拟 QQ 怪癖：带逗号列表的 UID EXPUNGE 回 OK 但不删——
+  // deleteMessages 必须靠删后校验发现、逐封兜底救回，而不是当成功。
   for (let i = 1; i <= COUNT; i++) alive.add(100 + i);
+  flagged.clear();
+  const refusedBefore = qqRefusedLog.length;
   const searchBefore = searchLog.length;
   await deleteMessages(user.id, 'a_test', 'Projects2026', [101, 102, 103]);
-  // deleteMessages 内部会做删后校验：如果这批 uid 还活着，它会抛错，这里就走不到
   check('批量删除 3 封不抛错（删后校验通过）', true);
+  check('多 uid UID EXPUNGE 被假成功命中（QQ 怪癖被模拟）', qqRefusedLog.length > refusedBefore, JSON.stringify(qqRefusedLog));
+  check('兜底逐封重删（单个 uid 的 UID EXPUNGE）', searchLog.slice(searchBefore).some((l) => /^UID\s+101[, ]|UID\s+102[, ]|UID\s+103/.test(l.trim())),
+    JSON.stringify(searchLog.slice(searchBefore)));
   check('删后校验按 uid SEARCH 发出', searchLog.slice(searchBefore).some((l) => /^UID 101,102,103/i.test(l.trim())),
     JSON.stringify(searchLog.slice(searchBefore)));
   check('被删的 uid 从服务器账本消失', !alive.has(101) && !alive.has(102) && !alive.has(103), JSON.stringify([...alive]));
+}
+
+// ---------- 批量删除回归②：单 uid 的快路径不受怪癖影响 ----------
+{
+  const { deleteMessages } = await import('../server/mail.js');
+  for (let i = 1; i <= COUNT; i++) alive.add(100 + i);
+  flagged.clear();
+  await deleteMessages(user.id, 'a_test', 'Projects2026', [102]);
+  check('单封删除不抛错（单 uid UID EXPUNGE 正常删）', true);
+  check('102 从账本消失', !alive.has(102), JSON.stringify([...alive]));
 }
 
 // ---------- 删除文件夹：只放行自建（无 special），INBOX/系统文件夹在进 IMAP 前就拒绝 ----------
