@@ -2,7 +2,9 @@ version: "3.8"
 
 services:
   mailnest:
-    image: aaron2024s/mailnest:0.2.8
+    # 跟着 latest 走：版本号只在 package.json 一处，发版 workflow 同时推
+    # <版本> 与 latest 两个 tag。要钉死某一版就把 latest 换成具体号。
+    image: aaron2024s/mailnest:latest
     container_name: mailnest
     restart: unless-stopped
     ports:

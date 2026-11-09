@@ -4,8 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '镜像版本号（如 0.1.0），会同时打 <version> 和 latest 两个 tag'
-        required: true
+        # 留空即跟随 package.json —— 版本号只有那一个出处。
+        # 以前这里是 required: true，每次发版都要手抄一遍；抄错不会报错，
+        # 只会静默打出一个错 tag，等发现时镜像已经推出去了。
+        description: '镜像版本号（留空 = 用 package.json 里的版本号）'
+        required: false
+        default: ''
         type: string
 
 concurrency:
@@ -18,6 +22,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # 解析发版版本号：入参留空就用 package.json 里的值。
+      # 无论走哪条路都先过格式校验 —— 挡住 latest / 带 v 前缀 / 空串这类手滑。
+      - name: Resolve version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          PKG_VER="$(node -p "require('./package.json').version")"
+          INPUT="$(printf '%s' "${INPUT_VERSION:-}" | tr -d '[:space:]')"
+          INPUT="${INPUT#v}"
+          VER="${INPUT:-$PKG_VER}"
+          if ! printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::版本号 '$VER' 不是 x.y.z 形式（不要填 latest）"
+            exit 1
+          fi
+          if [ "$VER" != "$PKG_VER" ]; then
+            echo "::warning::入参 $VER 与 package.json 的 $PKG_VER 不一致，镜像会打成 $VER"
+          fi
+          echo "package.json : $PKG_VER"
+          echo "本次发版     : $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       # 不装 QEMU：只构建 amd64（runner 原生架构），arm64 在 QEMU 下 npm ci
       # 会随机 SIGILL（exit 132），2026-11-09 用户决定不再发 arm64 镜像
@@ -37,7 +64,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/mailnest:${{ inputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailnest:${{ steps.ver.outputs.version }}
             ${{ secrets.DOCKERHUB_USERNAME }}/mailnest:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
