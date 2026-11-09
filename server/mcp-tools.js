@@ -33,6 +33,15 @@ function humanError(e) {
   return msg.length > 300 ? `${msg.slice(0, 300)}…` : msg;
 }
 
+// 未读口径：主口径 = 收件箱（与 list_messages 默认行为一致），全部文件夹合计作附加信息。
+// 抽成纯函数方便单测。
+export function splitUnread(counts) {
+  const inboxKey = Object.keys(counts).find((k) => String(k).toUpperCase() === 'INBOX');
+  const inbox = Number(inboxKey ? counts[inboxKey] : 0) || 0;
+  const total = Object.values(counts).reduce((s, n) => s + (Number(n) || 0), 0);
+  return { inbox, total, other: total - inbox };
+}
+
 function htmlToText(html) {
   return String(html)
     .replace(/<(script|style)[\s\S]*?<\/\1>/gi, '')
@@ -226,12 +235,15 @@ export function registerTools(server, ctx) {
       }
       const out = [];
       for (const a of all) {
-        let unread = 0;
-        try {
-          const counts = await unseenCounts(uid, a.id);
-          unread = Object.values(counts).reduce((s, n) => s + (Number(n) || 0), 0);
-        } catch { /* 单个账号连不上不影响整体列表 */ }
-        out.push({ id: a.id, email: a.email, name: a.displayName, unread });
+        let counts = {};
+        try { counts = await unseenCounts(uid, a.id); } catch { /* 单个账号连不上不影响整体列表 */ }
+        const { inbox, total, other } = splitUnread(counts);
+        // 主口径是收件箱未读（与 list_messages 默认行为一致），其它文件夹合计只作附加字段
+        out.push({
+          id: a.id, email: a.email, name: a.displayName,
+          unread: inbox,
+          ...(other > 0 ? { unreadOther: other } : {}),
+        });
       }
       return json({ accounts: out });
     },
@@ -255,9 +267,9 @@ export function registerTools(server, ctx) {
           const folders = Object.entries(counts)
             .filter(([, n]) => Number(n) > 0)
             .map(([p, n]) => `${p} ${n} 封`);
-          return { total: Object.values(counts).reduce((s, n) => s + (Number(n) || 0), 0), folders };
+          return { ...splitUnread(counts), folders };
         } catch (e) {
-          return { total: 0, folders: [], error: humanError(e) };
+          return { inbox: 0, total: 0, other: 0, folders: [], error: humanError(e) };
         }
       };
       const label = (a) => `${a.displayName && a.displayName !== a.email ? `${a.displayName}（${a.email}）` : a.email}`;
@@ -266,17 +278,17 @@ export function registerTools(server, ctx) {
         let grand = 0;
         for (const a of all) {
           const r = await totalOf(a);
-          grand += r.total;
-          lines.push(`- ${label(a)}：${r.total} 封未读${r.folders.length ? `（${r.folders.join('、')}）` : ''}${r.error ? `（查询失败：${r.error}）` : ''}`);
+          grand += r.inbox;
+          lines.push(`- ${label(a)}：收件箱 ${r.inbox} 封未读${r.other ? `（另有 ${r.other} 封在其它文件夹）` : ''}${r.error ? `（查询失败：${r.error}）` : ''}`);
         }
-        return text(`所有账号共 ${grand} 封未读：\n${lines.join('\n')}\n\n要看某个账号的未读邮件清单，用 list_messages（unreadOnly=true）。`);
+        return text(`所有账号收件箱共 ${grand} 封未读：\n${lines.join('\n')}\n\n要看到底是哪几封，跟我说「看未读邮件」就行。`);
       }
       const acc = resolveAccount(uid, account || (all.length === 1 ? '' : ''));
       const r = await totalOf(acc);
       const head = r.error
         ? `「${label(acc)}」未读数查询失败：${r.error}`
-        : `「${label(acc)}」共有 ${r.total} 封未读${r.folders.length ? `，分布在：${r.folders.join('、')}` : '（没有未读邮件）'}`;
-      return text(`${head}\n\n要看未读邮件清单用 list_messages（unreadOnly=true），看正文用 read_message。`);
+        : `「${label(acc)}」收件箱 ${r.inbox} 封未读，全部文件夹合计 ${r.total} 封${r.total > r.inbox ? `（${r.folders.join('、')}）` : r.total === 0 ? '（没有未读邮件）' : ''}`;
+      return text(`${head}\n\n要看到底是哪几封、或看某一封的正文，直接说就行。`);
     },
   });
 
@@ -356,7 +368,7 @@ export function registerTools(server, ctx) {
       // 「有没有未读邮件」这种没人指名道姓的问法就走这里——它是唯一能给出邮件本身的路径，
       // 只回一串账号计数用户是不认的（2026-11-09 实测）。
       if (pg > 1) {
-        throw new Error(`有 ${all.length} 个账号，跨账号只列第一页；要翻页请指定 account：${all.map(accountLabel).join('、')}`);
+        throw new Error(`有 ${all.length} 个账号，一次只能列第一页；要往后翻请先说是哪个邮箱：${all.map(accountLabel).join('、')}`);
       }
       const { failed, total, shown } = await collectAcrossAccounts(
         all,
@@ -427,19 +439,33 @@ export function registerTools(server, ctx) {
       const shown = hits.slice(0, cap);
 
       if (!shown.length) {
-        const hint = indexing ? '\n提示：该账号正在首次建立索引，等几秒后再搜一次可能会有结果。'
-          : '\n提示：正文只搜索已打开过（已缓存）的邮件；也可以换更短的关键词，或用 list_messages 逐页查看。';
+        const hint = indexing
+          ? '部分邮箱正在建立搜索索引，等几秒再搜一次可能会有结果。'
+          : '正文只搜索已打开过（已缓存）的邮件；也可以换更短的关键词，或让我把邮件逐页列出来。';
         return text(`没搜到和「${q}」相关的邮件${dir ? `（范围：${dir}）` : ''}。${hint}`);
       }
-      const lines = shown.map((m, i) => {
-        const from = m.from?.name ? `${m.from.name} <${m.from.address}>` : (m.from?.address || '未知');
-        const who = targets.length > 1 ? `${m.acc.email} / ` : '';
-        const head = `${i + 1}. [${who}${m.folder}] ${m.subject} — ${from} · ${m.date || '未知时间'} · uid=${m.uid}`
-          + `${m.flags.includes('\\Seen') ? '' : ' · 未读'}${m.hasAttachment ? ' · 有附件' : ''}`;
-        return m.snippet ? `${head}\n   命中正文：${m.snippet}` : head;
+      // 结构化返回：uid / 来源账号都在字段里，模型接「看第 N 封」时直接取用，
+      // 文本层不再出现 uid=xxx 这类用户看不懂的东西
+      const folderName = (p) => (String(p).toUpperCase() === 'INBOX' ? '收件箱' : p);
+      const notes = [];
+      if (hits.length > shown.length) notes.push(`共找到 ${hits.length} 封，只显示最新的 ${shown.length} 封，想缩小范围直接说`);
+      if (indexing) notes.push('部分邮箱的搜索索引刚建立，稍后再搜结果可能更全');
+      return json({
+        query: q,
+        total: hits.length,
+        messages: shown.map((m) => ({
+          account: m.acc.displayName && m.acc.displayName !== m.acc.email ? m.acc.displayName : m.acc.email,
+          folder: folderName(m.folder),
+          uid: m.uid,
+          from: m.from?.name ? `${m.from.name} <${m.from.address}>` : (m.from?.address || '未知'),
+          subject: m.subject,
+          date: m.date,
+          unread: !m.flags.includes('\\Seen'),
+          hasAttachment: m.hasAttachment,
+          ...(m.snippet ? { snippet: m.snippet } : {}),
+        })),
+        ...(notes.length ? { note: notes.join('；') } : {}),
       });
-      const tail = shown.length >= cap ? `\n\n（只显示前 ${cap} 封，可用 limit 或 folder 缩小范围）` : '';
-      return text(`搜到 ${shown.length} 封和「${q}」相关的邮件：\n\n${lines.join('\n')}${tail}`);
     },
   });
 
@@ -830,7 +856,7 @@ export function registerTools(server, ctx) {
         subject: subject || '(无主题)',
         text: body,
       });
-      return text(`已保存草稿（草稿 id ${d.id}），可在网页端「草稿」里继续编辑，或用 send_draft 发送。`);
+      return text(`已保存草稿（编号 ${d.id}），可在网页端「草稿」里继续编辑；要发的时候跟我说一声。`);
     },
   });
 
@@ -847,9 +873,9 @@ export function registerTools(server, ctx) {
       const lines = drafts.map((d) => {
         const acc = listAccounts(uid).find((a) => a.id === d.accountId);
         const who = acc?.email || (d.accountId ? '账号已删除' : '未指定账号');
-        return `- id=${d.id}（${who}）→ ${(d.to || '(无收件人)')}「${d.subject}」，正文 ${String(d.text || '').length} 字`;
+        return `- 编号 ${d.id}（${who}）→ ${(d.to || '(无收件人)')}「${d.subject}」，正文 ${String(d.text || '').length} 字`;
       });
-      return text(`共 ${drafts.length} 份草稿：\n${lines.join('\n')}\n\n继续编辑请在网页端「草稿」操作；直接发送用 send_draft。`);
+      return text(`共 ${drafts.length} 份草稿：\n${lines.join('\n')}\n\n继续编辑请在网页端「草稿」操作；要发哪一份跟我说编号。`);
     },
   });
 

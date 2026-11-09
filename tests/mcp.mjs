@@ -128,6 +128,17 @@ const user = store.createUser({ username: 'unit', password: 'password123', role:
     return resolveAccount(user.id, '').id === 'acc_solo';
   })());
   store.saveAccounts(user.id, []); // 还原，避免影响该目录里其他断言
+
+  {
+    // 未读口径：主口径 = 收件箱，合计作附加（问题 4 的根基函数）
+    const { splitUnread } = await import('../server/mcp-tools.js');
+    const a = splitUnread({ INBOX: 3 });
+    ok('未读口径：纯收件箱', a.inbox === 3 && a.total === 3 && a.other === 0, JSON.stringify(a));
+    const b = splitUnread({ inbox: 3, '项目': 2, Junk: 2 }); // 键大小写不敏感
+    ok('未读口径：收件箱 3 + 其它 4', b.inbox === 3 && b.total === 7 && b.other === 4, JSON.stringify(b));
+    const c = splitUnread({ Sent: 2 });
+    ok('未读口径：无收件箱键时收件箱为 0', c.inbox === 0 && c.total === 2 && c.other === 2, JSON.stringify(c));
+  }
 }
 
 // ============ A2. 跨账号合并（不连 IMAP，直接喂数据） ============
@@ -376,8 +387,9 @@ ok('send_message 带 attachments 参数 schema 通过', r.data?.result?.isError 
 
 // 草稿流：save → list → send（不存在的 id 报错）→ delete
 r = await callTool(sendToken, 'save_draft', { subject: 'MCP 测试草稿', text: 'hello' });
-ok('save_draft 成功', !r.data?.result?.isError && /草稿 id /.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
-const draftId = (r.data.result.content[0].text.match(/草稿 id ([^）\s]+)/) || [])[1];
+ok('save_draft 成功', !r.data?.result?.isError && /已保存草稿/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
+const draftId = (r.data.result.content[0].text.match(/编号 ([^）\s]+)/) || [])[1];
+ok('用户文案不漏内部参数名', !/list_messages|unreadOnly|read_message|send_draft|account=|uid=/.test(r.data.result.content[0].text), r.data.result.content[0].text);
 
 r = await callTool(sendToken, 'list_drafts');
 ok('list_drafts 能列出刚存的草稿', !r.data?.result?.isError && (r.data?.result?.content?.[0]?.text || '').includes(draftId), r.data?.result?.content?.[0]?.text);
