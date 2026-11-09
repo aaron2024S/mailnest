@@ -406,6 +406,12 @@ const app = createApp({
       if (d.type === 'empty-done' || d.type === 'empty-error') {
         if (d.type === 'empty-done') {
           this.toast(d.count ? `已彻底删除 ${d.count} 封邮件` : '文件夹已清空', 'ok');
+          // 成功也重拉一次：防「清空瞬间有个在跑的对账把旧行写回缓存」的竞态，
+          // 让界面以服务端为准（有残留立刻能看见，而不是过几分钟邮件“复活”）
+          if (onScreen) {
+            this.page = 1;
+            this.loadMessages().catch(() => { /* loadMessages 内部已 toast */ });
+          }
         } else {
           this.toast(`清空失败：${d.message}`, 'error');
           if (onScreen) {

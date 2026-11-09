@@ -595,6 +595,19 @@ export async function emptyFolderIsolated(uid, accountId, folder) {
       const lock = await client.getMailboxLock(folder);
       try {
         await client.messageDelete('1:*', { uid: true });
+        // ⚠ 校验：部分服务器对「STORE \Deleted + EXPUNGE」静默不删（实测清空已删除后邮件复发）。
+        // exists 是 imapflow 在 EXPUNGE 事件后实时维护的剩余数量。
+        let left = Number(client.mailbox?.exists) || 0;
+        if (left > 0) {
+          // 二段式兜底：显式打 \Deleted 再 EXPUNGE（经典 IMAP 两步，兼容怪服务器）
+          await client.messageFlagsAdd('1:*', '\\Deleted', { uid: true });
+          await client.expunge();
+          left = Number(client.mailbox?.exists) || 0;
+        }
+        if (left > 0) {
+          throw new Error(`清空指令已执行，但服务器上仍有 ${left} 封邮件（服务器拒绝删除，稍后重试或到邮箱官方网页端处理）`);
+        }
+        return { ok: true };
       } finally {
         lock.release();
       }

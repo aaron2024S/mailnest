@@ -179,7 +179,12 @@ function ensureUserWatchers(uid) {
 const emptyJobs = new Set();
 function emptyInBackground(uid, accountId, folder, count) {
   const key = `${uid}:${accountId}:${folder}`;
-  if (emptyJobs.has(key)) return;
+  if (emptyJobs.has(key)) {
+    // 上一轮同夹任务还在跑：绝不能静默吞掉——界面已乐观清空，吞掉 = 用户永远以为删掉了
+    console.log(`[mailnest] 清空跳过 ${folder}: 上一轮清空还在进行中`);
+    sendToUser(uid, { type: 'empty-error', accountId, folder, message: '上一轮清空还在进行中，请等它结束后再试' });
+    return;
+  }
   emptyJobs.add(key);
   const t0 = Date.now();
   emptyFolderIsolated(uid, accountId, folder)
