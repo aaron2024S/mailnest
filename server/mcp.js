@@ -65,7 +65,24 @@ export function mountMcp(app) {
 
     const server = new McpServer(
       { name: 'mailnest', version: pkg.version },
-      { instructions: '这是 MailNest 自托管邮箱。先用 list_accounts 看有哪些邮箱，再用 list_folders / list_messages 定位，最后 read_message / reply_message 处理。发送或删除前先把内容展示给用户确认。' },
+      {
+        instructions: [
+          '这是 MailNest 自托管邮箱（多账号聚合）。按下面的路由规则选工具，不要按工具名猜：',
+          '1. 问「有几封未读 / 有没有新邮件」→ unread_count（不传 account 时返回全部账号汇总）。',
+          '2. 问「未读/邮件有哪些、都是什么」→ list_messages 且 unreadOnly=true。',
+          '3. 用户指名了某个邮箱（如「QQ邮箱的未读」「outlook 的邮件」）时，所有工具都必须传 account=那个邮箱；',
+          '   account 可填显示名、邮箱地址或 id；只有用户完全没提邮箱时才省略（此时 list_messages 会合并全部账号，',
+          '   结果里每条 message 带 account 字段标明来源）。',
+          '4. 看正文 → read_message；看附件 → 先 read_message 拿附件清单和编号，再 read_attachment。',
+          '5. 按关键词找信 → search_messages（可跨账号，首次调用会先建索引）。',
+          '6. uid 是邮件标识：自己用 list_messages 查到再传，绝对不要向用户索要；跨账号结果里 uid 只在其',
+          '   account 内唯一，后续操作必须把 account 一起带上。',
+          '7. 整理用 set_flags / move_messages / delete_messages / mark_all_read / empty_folder / create_folder /',
+          '   delete_folder；发信用 send_message / reply_message / forward_message，草稿用 save_draft / send_draft。',
+          '8. 发送、删除、移动前先把将要执行的内容展示给用户确认；Agent 不能永久删除单封邮件。',
+          '9. 工具返回里出现 hint / note 字段时，遵循其中的指引行动。',
+        ].join('\n'),
+      },
     );
     registerTools(server, auth);
 

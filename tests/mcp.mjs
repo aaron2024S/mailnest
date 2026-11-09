@@ -279,6 +279,10 @@ ok('协商出版本号', typeof r.data?.result?.protocolVersion === 'string', JS
 ok('声明 tools 能力', !!r.data?.result?.capabilities?.tools, JSON.stringify(r.data?.result?.capabilities));
 ok('serverInfo 是 mailnest', r.data?.result?.serverInfo?.name === 'mailnest', JSON.stringify(r.data?.result?.serverInfo));
 ok('serverInfo 带版本号', /^\d+\.\d+\.\d+/.test(r.data?.result?.serverInfo?.version || ''), JSON.stringify(r.data?.result?.serverInfo));
+const ins = String(r.data?.result?.instructions || '');
+ok('握手带 instructions 路由守则（弱模型靠它选工具）',
+  ins.includes('不要按工具名猜') && ins.includes('unread_count') && ins.includes('必须传 account') && ins.includes('不要向用户索要'),
+  ins.slice(0, 160));
 
 r = await rpcCall(readToken, { jsonrpc: '2.0', method: 'notifications/initialized' });
 ok('initialized 通知被接受', r.status >= 200 && r.status < 300, String(r.status));
