@@ -130,6 +130,35 @@ const user = store.createUser({ username: 'unit', password: 'password123', role:
   store.saveAccounts(user.id, []); // 还原，避免影响该目录里其他断言
 }
 
+// ============ A2. 跨账号合并（不连 IMAP，直接喂数据） ============
+{
+  // 用户问「有未读邮件吗」时没人指定账号，list_messages 要把几个账号的未读合到一页。
+  // 这段单测钉住三件事：合并后按时间倒序、某个账号挂了不影响其它账号、per 限的是总条数。
+  const { collectAcrossAccounts } = await import('../server/mcp-tools.js');
+  const accs = [
+    { id: 'a', email: 'a@x.com', displayName: 'QQ邮箱' },
+    { id: 'b', email: 'b@x.com', displayName: 'outlook' },
+    { id: 'c', email: 'c@x.com', displayName: '163' },
+  ];
+  const pages = {
+    a: [{ uid: 1, subject: '旧的', date: '2026-11-01T00:00:00Z' }, { uid: 2, subject: '新的', date: '2026-11-03T00:00:00Z' }],
+    b: [{ uid: 9, subject: '中间的', date: '2026-11-02T00:00:00Z' }],
+  };
+  const fetchOne = async (acc) => {
+    if (!pages[acc.id]) throw new Error('连接超时');
+    return { total: pages[acc.id].length, messages: pages[acc.id] };
+  };
+
+  const r = await collectAcrossAccounts(accs, fetchOne, 10);
+  ok('跨账号合并后按时间倒序', r.merged.map((m) => m.uid).join(',') === '2,9,1', r.merged.map((m) => m.uid).join(','));
+  ok('单个账号失败不拖垮其它账号', r.merged.length === 3 && r.failed.length === 1, JSON.stringify(r.failed));
+  ok('失败原因里看得出是哪个账号', /163/.test(r.failed[0] || '') && /连接超时/.test(r.failed[0] || ''), r.failed[0]);
+  ok('total 是各账号合计', r.total === 3, String(r.total));
+
+  const capped = await collectAcrossAccounts(accs.slice(0, 2), fetchOne, 2);
+  ok('per 限的是合并后的总条数', capped.shown.length === 2 && capped.merged.length === 3, `${capped.shown.length}/${capped.merged.length}`);
+}
+
 fs.rmSync(UNIT_DIR, { recursive: true, force: true });
 
 // ============ B. HTTP 端到端 ============

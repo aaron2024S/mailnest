@@ -88,6 +88,27 @@ function resolveAccount(uid, ref) {
 
 export { resolveAccount };
 
+// 跨账号汇总：单个账号失败只记一笔，不拖垮整次查询（Outlook 掉 token 是常态）；
+// 合并后按时间倒序，只留最新的 per 条。抽出来是为了能脱离 IMAP 单独测。
+async function collectAcrossAccounts(accounts, fetchOne, per) {
+  const merged = [];
+  const failed = [];
+  let total = 0;
+  for (const acc of accounts) {
+    try {
+      const d = await fetchOne(acc);
+      total += Number(d.total) || 0;
+      for (const m of d.messages || []) merged.push(m);
+    } catch (e) {
+      failed.push(`${accountLabel(acc)}：${humanError(e)}`);
+    }
+  }
+  merged.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  return { merged, failed, total, shown: merged.slice(0, per) };
+}
+
+export { collectAcrossAccounts };
+
 function normUids(uids) {
   const list = (Array.isArray(uids) ? uids : [uids]).map((x) => Number(x)).filter((n) => Number.isInteger(n) && n > 0);
   if (!list.length) throw new Error('没有指定要操作的邮件 uid');
@@ -336,21 +357,14 @@ export function registerTools(server, ctx) {
       if (pg > 1) {
         throw new Error(`有 ${all.length} 个账号，跨账号只列第一页；要翻页请指定 account：${all.map(accountLabel).join('、')}`);
       }
-      const merged = [];
-      const failed = [];
-      let totalFound = 0;
-      for (const acc of all) {
-        try {
+      const { failed, total, shown } = await collectAcrossAccounts(
+        all,
+        async (acc) => {
           const d = await listMessages(uid, acc.id, dir, { page: 1, pageSize: per, unreadOnly: !!unreadOnly });
-          totalFound += d.total;
-          for (const m of d.messages) merged.push(toItem(m, acc));
-        } catch (e) {
-          // 单个账号连不上不该拖垮整次查询（Outlook 掉 token 是常态）
-          failed.push(`${accountLabel(acc)}：${humanError(e)}`);
-        }
-      }
-      merged.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-      const shown = merged.slice(0, per);
+          return { total: d.total, messages: d.messages.map((m) => toItem(m, acc)) };
+        },
+        per,
+      );
       if (!shown.length) {
         const what = unreadOnly ? '未读邮件' : '邮件';
         return text(failed.length
@@ -360,11 +374,11 @@ export function registerTools(server, ctx) {
       return json({
         accounts: all.map((a) => a.email),
         folder: dir,
-        total: totalFound,
+        total,
         pageSize: per,
         messages: shown,
-        ...(totalFound > shown.length
-          ? { note: `共 ${totalFound} 封，只列了最新的 ${shown.length} 封；要更多请指定 account 或调大 pageSize` }
+        ...(total > shown.length
+          ? { note: `共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请指定 account 或调大 pageSize` }
           : {}),
         ...(failed.length ? { failedAccounts: failed } : {}),
       });
