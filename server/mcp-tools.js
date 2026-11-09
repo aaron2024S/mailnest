@@ -102,18 +102,21 @@ export { resolveAccount };
 async function collectAcrossAccounts(accounts, fetchOne, per) {
   const merged = [];
   const failed = [];
+  const perAccount = [];
   let total = 0;
   for (const acc of accounts) {
     try {
       const d = await fetchOne(acc);
-      total += Number(d.total) || 0;
+      const t = Number(d.total) || 0;
+      total += t;
+      perAccount.push({ account: acc.displayName || acc.email, id: acc.id, total: t });
       for (const m of d.messages || []) merged.push(m);
     } catch (e) {
       failed.push(`${accountLabel(acc)}：${humanError(e)}`);
     }
   }
   merged.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-  return { merged, failed, total, shown: merged.slice(0, per) };
+  return { merged, failed, total, perAccount, shown: merged.slice(0, per) };
 }
 
 export { collectAcrossAccounts };
@@ -370,7 +373,7 @@ export function registerTools(server, ctx) {
       if (pg > 1) {
         throw new Error(`有 ${all.length} 个账号，一次只能列第一页；要往后翻请先说是哪个邮箱：${all.map(accountLabel).join('、')}`);
       }
-      const { failed, total, shown } = await collectAcrossAccounts(
+      const { failed, total, perAccount, shown } = await collectAcrossAccounts(
         all,
         async (acc) => {
           const d = await listMessages(uid, acc.id, dir, { page: 1, pageSize: per, unreadOnly: !!unreadOnly });
@@ -385,15 +388,20 @@ export function registerTools(server, ctx) {
           : `所有账号都没有${what}`);
       }
       return json({
+        // ⚠ 指令放最前面：弱模型从上往下读，禁令必须先于数据出现
+        warning: '⚠ 这是全部账号合并的结果。规则：'
+          + '① 用户问题里提到了任何具体邮箱（如「QQ邮箱」「outlook」）时，禁止把本结果直接当作答案——'
+          + '先看 perAccount 里该邮箱的数量，需要明细就带 account=该邮箱重新调用一次本工具；'
+          + '② 用户没提任何邮箱时，才可以把本结果作为答案，并逐条说明来源邮箱。',
         accounts: all.map((a) => a.email),
+        // 分账号计数：用户问「XX邮箱有没有/有几封」时，答案就在这一行，不用重查也能答对数字
+        perAccount,
         folder: dir,
         total,
         pageSize: per,
         messages: shown,
-        hint: '以上是全部账号合并的结果（每条 message 的 account 字段标明来源邮箱）。'
-          + '如果用户问的只是其中一个邮箱，请带上 account=那个邮箱重新调用本工具，只查该账号。',
         ...(total > shown.length
-          ? { note: `共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请指定 account 或调大 pageSize` }
+          ? { note: `共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请带 account 或调大 pageSize` }
           : {}),
         ...(failed.length ? { failedAccounts: failed } : {}),
       });

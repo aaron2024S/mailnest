@@ -165,6 +165,12 @@ const user = store.createUser({ username: 'unit', password: 'password123', role:
   ok('单个账号失败不拖垮其它账号', r.merged.length === 3 && r.failed.length === 1, JSON.stringify(r.failed));
   ok('失败原因里看得出是哪个账号', /163/.test(r.failed[0] || '') && /连接超时/.test(r.failed[0] || ''), r.failed[0]);
   ok('total 是各账号合计', r.total === 3, String(r.total));
+  ok('perAccount 带每个账号的数量（用户问单个邮箱时直接可用）',
+    Array.isArray(r.perAccount) && r.perAccount.length === 2
+    && r.perAccount.find((p) => p.id === 'a')?.total === 2
+    && r.perAccount.find((p) => p.id === 'b')?.total === 1,
+    JSON.stringify(r.perAccount));
+  ok('perAccount 显示名优先', r.perAccount.every((p) => p.account === 'QQ邮箱' || p.account === 'outlook'), JSON.stringify(r.perAccount));
 
   const capped = await collectAcrossAccounts(accs.slice(0, 2), fetchOne, 2);
   ok('per 限的是合并后的总条数', capped.shown.length === 2 && capped.merged.length === 3, `${capped.shown.length}/${capped.merged.length}`);
