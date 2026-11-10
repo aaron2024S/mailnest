@@ -1386,7 +1386,8 @@ export function registerTools(server, ctx) {
     scope: 'send',
     title: '保存草稿',
     description: '新写一封没写完的邮件并存成草稿（不是发出去）。改已有草稿请用 update_draft，'
-      + '用这个会另存一份新的。',
+      + '用这个会另存一份新的。草稿只存收件人/抄送/密送/主题/正文，不含附件'
+      + '——要带附件就直接 send_message。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
       account: optStr().describe('用哪个账号保存（显示名/邮箱地址/id）；只有一个账号时可省略'),
