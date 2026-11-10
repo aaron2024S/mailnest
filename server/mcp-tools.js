@@ -509,15 +509,22 @@ export function registerTools(server, ctx) {
         const acc = account ? resolveAccount(uid, account) : all[0];
         const d = await listMessages(uid, acc.id, dir, { page: pg, pageSize: per, unreadOnly: !!unreadOnly });
         const kept = d.messages.filter((m) => inRange(m.date, sinceIso, beforeIso));
+        const ranged = !!(sinceIso || beforeIso);
         return json({
           account: { id: acc.id, email: acc.email },
           folder: dir,
-          total: d.total,
+          // 带时间范围时 total 必须是「范围内的数量」。以前这里直接给文件夹总数，
+          // 问「上个月几封」拿回 total=91、实际只有 4 封，模型会照 91 答。
+          total: ranged ? kept.length : d.total,
+          ...(ranged ? { folderTotal: d.total } : {}),
           page: d.page,
           pageSize: d.pageSize,
           messages: kept.map((m) => toItem(m, null, dir)),
-          ...(kept.length !== d.messages.length
-            ? { note: `按时间过滤后本页剩 ${kept.length} 封（原 ${d.messages.length} 封）；时间范围外的更老邮件要往后翻页` }
+          ...(ranged
+            ? {
+              note: `按时间过滤：本页匹配 ${kept.length} 封（该文件夹共 ${d.total} 封）；`
+                + '范围内更早的邮件要往后翻页，要精确总数请缩小时间范围',
+            }
             : {}),
         });
       }
@@ -543,6 +550,16 @@ export function registerTools(server, ctx) {
           : `所有账号都没有${what}`);
       }
       const ranged = shown.filter((m) => inRange(m.date, sinceIso, beforeIso));
+      const hasRange = !!(sinceIso || beforeIso);
+      // 两个 note 以前是两个展开键，同名会互相覆盖——时间过滤的说明被总数说明悄悄顶掉。
+      const notes = [];
+      if (hasRange) {
+        notes.push(`按时间过滤：本页匹配 ${ranged.length} 封（合并结果原 ${shown.length} 封）；`
+          + '范围内更早的邮件要往后翻页');
+      }
+      if (total > shown.length) {
+        notes.push(`共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请带 account 或调大 pageSize`);
+      }
       return json({
         // ⚠ 指令放最前面：弱模型从上往下读，禁令必须先于数据出现
         warning: '⚠ 这是全部账号合并的结果。规则：'
@@ -553,15 +570,11 @@ export function registerTools(server, ctx) {
         // 分账号计数：用户问「XX邮箱有没有/有几封」时，答案就在这一行，不用重查也能答对数字
         perAccount,
         folder: dir,
-        total,
+        total: hasRange ? ranged.length : total,
+        ...(hasRange ? { folderTotal: total } : {}),
         pageSize: per,
         messages: ranged,
-        ...(ranged.length !== shown.length
-          ? { note: `按时间过滤后剩 ${ranged.length} 封（合并结果原 ${shown.length} 封）` }
-          : {}),
-        ...(total > shown.length
-          ? { note: `共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请带 account 或调大 pageSize` }
-          : {}),
+        ...(notes.length ? { note: notes.join('；') } : {}),
         ...(failed.length ? { failedAccounts: failed } : {}),
       });
     },

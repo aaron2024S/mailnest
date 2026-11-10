@@ -336,10 +336,50 @@ export function ensureBodyIndex(uid) {
   return n;
 }
 
-function ftsQuery(q) {
-  const terms = ftsText(q).split(' ').filter(Boolean);
-  if (!terms.length) return null;
-  return terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(' AND ');
+const CJK_CLASS = '\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff\\u3040-\\u30ff';
+const CJK_RUN = new RegExp(`[${CJK_CLASS}]+`, 'g');
+const CJK_ONE = new RegExp(`[${CJK_CLASS}]`);
+
+function quoteTerm(t) {
+  return `"${String(t).replace(/"/g, '""')}"`;
+}
+
+// FTS5 的 MATCH 表达式。
+//
+// 这里踩过一个很贵的坑：索引时把中文逐字切开（见 ftsText），查询时如果也把中文
+// 拆成单字再用 AND 拼起来，表达式会变成
+//   搜「信用卡」→  "信" AND "用" AND "卡"
+// 于是**只要这三个字在任意位置出现过**就算命中：招行账单命中，但正文里带
+// 「美**团**」「Steam 团**队**」的 Steam 邮件也照样命中「美团」，面试邀请函也会
+// 命中「工资」。召回看着很高，全是噪声，而且按日期倒序后噪声排在最前面。
+//
+// 正确做法：中文连续段整体作为一个**短语**（`"信 用 卡"`）。因为索引里就是逐字
+// token，短语恰好等价于「这段字必须连着出现」，这才和用户心里的"搜这个词"一致。
+//
+// loose=true 时退回逐字 AND：只在精确短语搜空时兜底，宁可宽一点也别让用户空手而归。
+function ftsQuery(q, loose = false) {
+  const s = String(q || '');
+  if (!s.trim()) return null;
+  if (loose) {
+    const terms = ftsText(s).split(' ').filter(Boolean);
+    return terms.length ? terms.map(quoteTerm).join(' AND ') : null;
+  }
+
+  const parts = [];
+  const pushLatin = (str) => {
+    for (const t of String(str).split(/\s+/)) {
+      if (t) parts.push(quoteTerm(t));
+    }
+  };
+
+  let last = 0;
+  for (const m of s.matchAll(CJK_RUN)) {
+    pushLatin(s.slice(last, m.index));
+    parts.push(quoteTerm(m[0].split('').join(' ')));
+    last = m.index + m[0].length;
+  }
+  pushLatin(s.slice(last));
+  return parts.length ? parts.join(' AND ') : null;
 }
 
 function recountInTx(db, accountId, folderPath, uidvalidity = null) {
@@ -433,17 +473,33 @@ export function searchMessages(uid, accountId, query, { folder = null, limit = 2
   // 时间范围：调用方给的是 ISO 串（由 mcp-tools 统一把「上个月」「30d」这类说法换算好），
   // 信封里的 date 也是 ISO，直接按字符串比较即可（同格式、同 UTC）。
   const range = { since: since || null, before: before || null };
-  // 有全文索引就走 FTS（几万封也是毫秒级）；索引还没建好时退回 LIKE，保证功能不断
+  const warnFts = (e) => {
+    // 兜底可以，但绝不能静默：上一次这行没有输出，`f MATCH ?` 的语法错误被吞了几个月，
+    // 所有人都以为在用索引，其实每次都在 LIKE 扫全库。
+    if (!ftsWarned) {
+      ftsWarned = true;
+      console.error(`[cache] 全文检索不可用，已退回逐条比对：${e?.message || e}`);
+    }
+  };
+  // 有全文索引就走 FTS（几万封也是毫秒级）；索引还没建好时退回 LIKE，保证功能不断。
+  // 先按「中文短语」精确找，真搜不到再放宽成逐字 AND —— 顺序不能反：
+  // 放宽优先会把「美团」搜到的 Steam 邮件排在真命中前面。
   if (ftsReady(db)) {
-    const match = ftsQuery(q);
-    if (match) {
-      try { return searchFts(db, accountId, folder, q, match, limit, range); } catch (e) {
-        // 兜底可以，但绝不能静默：上一次这行没有输出，`f MATCH ?` 的语法错误被吞了几个月，
-        // 所有人都以为在用索引，其实每次都在 LIKE 扫全库。
-        if (!ftsWarned) {
-          ftsWarned = true;
-          console.error(`[cache] 全文检索不可用，已退回 LIKE 逐条比对：${e?.message || e}`);
-        }
+    const strict = ftsQuery(q, false);
+    if (strict) {
+      try {
+        const rows = searchFts(db, accountId, folder, q, strict, limit, range);
+        if (rows.length) return rows;
+      } catch (e) { warnFts(e); }
+    }
+    // 兜底只对「长中文串」开放：短词（美团/工资/机票这类两字词）一旦放宽成单字 AND，
+    // 几乎必然误命中——只要这两个字在别处出现过就算数，正是这次噪声的来源。
+    // 长串（如「信用卡账单」）放宽才有意义：它在原文里常被拆开写，短语找不到但确实存在。
+    const cjkLen = (q.match(CJK_RUN) || []).join('').length;
+    if (cjkLen >= 4) {
+      const loose = ftsQuery(q, true);
+      if (loose && loose !== strict) {
+        try { return searchFts(db, accountId, folder, q, loose, limit, range); } catch (e) { warnFts(e); }
       }
     }
   }

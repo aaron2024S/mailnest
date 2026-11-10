@@ -496,3 +496,43 @@ test('searchMessages 支持 since / before', () => {
   assert.equal(mid.length, 1);
   assert.equal(mid[0].uid, 2);
 });
+
+// ---------- 2026-11-10 回归：中文检索不能退化成「单字 AND」 ----------
+// 事故现场：全文索引修好后，搜「美团」返回 Steam 邮件——因为 Steam 正文里有
+// 「Steam 团队」和「美国」，逐字 AND 让「美」和「团」各自命中，于是任意含这两字的
+// 邮件都排进结果；「工资」返回面试邀请函、「机票」返回 12306 同理。召回很高，全是噪声。
+test('中文检索按短语匹配，不按散装单字', () => {
+  const A = 'a_zh01';
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [
+    mkMsg(1, '感谢您在 Steam 上的购买！', '2026-10-29T02:11:00.000Z'),
+    mkMsg(2, '招商银行信用卡电子账单', '2026-10-18T02:21:00.000Z'),
+    mkMsg(3, '网上购票系统-电子发票通知', '2026-04-15T10:00:00.000Z'),
+  ]);
+  // Steam 那封：正文里有「美国」和「Steam 团队」，但没有「美团」这两个字连写
+  cache.putBody(uid, A, 'INBOX', 1, {
+    text: '位于美国的 Valve 公司。祝您愉快，Steam 团队。', html: '',
+  });
+  cache.putBody(uid, A, 'INBOX', 2, { text: '本期应还 ¥1,686.68，到期还款日 2026/11/05。', html: '' });
+  cache.putBody(uid, A, 'INBOX', 3, { text: '乘车日期 2026-04-15，G745 次列车，北京南至苏州北。', html: '' });
+
+  assert.equal(cache.searchMessages(uid, A, '美团').length, 0, '「美团」不能命中含「美国」「团队」的邮件');
+  assert.equal(cache.searchMessages(uid, A, '工资').length, 0, '「工资」不能命中无关邮件');
+  assert.equal(cache.searchMessages(uid, A, '机票').length, 0, '「机票」不能命中 12306 发票');
+
+  const card = cache.searchMessages(uid, A, '信用卡');
+  assert.equal(card.length, 1, '「信用卡」应精确命中招行账单');
+  assert.equal(card[0].uid, 2);
+  assert.equal(cache.searchMessages(uid, A, '列车').length, 1, '正文里的「列车」要能搜到');
+  assert.equal(cache.searchMessages(uid, A, 'G745').length, 1);
+});
+
+test('整串搜不到时放宽成逐字 AND 兜底', () => {
+  const A = 'a_zh02';
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [
+    mkMsg(1, '招商银行信用卡电子账单', '2026-10-18T02:21:00.000Z'),
+  ]);
+  // 「信用卡账单」在这封里不是连写的（中间隔着「电子」），短语找不到，
+  // 必须靠兜底才能命中——只精确不放宽会让用户觉得「明明有却搜不到」。
+  const r = cache.searchMessages(uid, A, '信用卡账单');
+  assert.equal(r.length, 1, '整串不连续时应放宽命中');
+});
