@@ -1,0 +1,231 @@
+// 发送 / 回复 / 转发的回归测试。
+//
+// 之前这一整块只有「没权限时报错」「schema 收不收参数」这类断言 —— 真正把信发出去的
+// 那条路（SMTP 会话、头部拼装、附件编码、回复目标）一次都没跑过。用户问
+// 「发送邮件和回复邮件你有没有测试」，答案是没有。
+//
+// 这里起一个假的 SMTP 服务器，收下 nodemailer 真正发出的报文，再用 mailparser 解回来
+// 逐项断言：收件人/抄送/密送、主题、正文、附件字节、In-Reply-To、References。
+// 不往任何真实邮箱发信，但走的是和线上完全相同的 sendMail 路径。
+//
+// 用法：node tests/send.mjs
+import fs from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
+import { simpleParser } from 'mailparser';
+
+let pass = 0;
+let failed = 0;
+const ok = (name, cond, extra = '') => {
+  if (cond) { pass++; console.log(`✓ ${name}`); }
+  else { failed++; console.error(`✗ ${name} ${extra}`); }
+};
+
+const DIR = path.resolve('.send-test');
+fs.rmSync(DIR, { recursive: true, force: true });
+process.env.MAILNEST_DATA = DIR;
+
+const { sendMail } = await import('../server/mail.js');
+const { replyTargets, replySubject, forwardSubject } = await import('../server/mcp-tools.js');
+
+// ---------- 假 SMTP ----------
+// 只实现 nodemailer 会用到的那几条：EHLO / AUTH LOGIN / MAIL / RCPT / DATA / QUIT。
+// 刻意不在 EHLO 里声明 STARTTLS，否则它会尝试把连接升级成 TLS。
+function startFakeSmtp() {
+  const received = [];
+  const server = net.createServer((conn) => {
+    let mode = 'cmd';        // cmd | user | pass
+    let acc = Buffer.alloc(0);
+    let chunks = [];
+    let inData = false;
+
+    const send = (s) => { try { conn.write(`${s}\r\n`); } catch { /* 客户端已断开 */ } };
+
+    const onLine = (l) => {
+      const up = l.toUpperCase();
+      if (mode === 'user') { mode = 'pass'; return send('334 UGFzc3dvcmQ6'); }
+      if (mode === 'pass') { mode = 'cmd'; return send('235 2.7.0 Authentication successful'); }
+      if (up.startsWith('EHLO')) return conn.write('250-test.local\r\n250-AUTH LOGIN PLAIN\r\n250 OK\r\n');
+      if (up.startsWith('HELO')) return send('250 test.local');
+      if (up.startsWith('AUTH LOGIN')) { mode = 'user'; return send('334 VXNlcm5hbWU6'); }
+      if (up.startsWith('AUTH PLAIN')) return send('235 2.7.0 Authentication successful');
+      if (up.startsWith('MAIL FROM') || up.startsWith('RCPT TO')) return send('250 2.1.0 Ok');
+      if (up === 'DATA') { inData = true; chunks = []; return send('354 End data with <CR><LF>.<CR><LF>'); }
+      if (up === 'QUIT') { send('221 2.0.0 Bye'); return conn.end(); }
+      if (up === 'RSET' || up === 'NOOP') return send('250 2.0.0 Ok');
+      return send('250 2.0.0 Ok');
+    };
+
+    conn.write('220 test.local ESMTP ready\r\n');
+    conn.on('data', (chunk) => {
+      if (inData) {
+        chunks.push(chunk);
+        const all = Buffer.concat(chunks);
+        const end = all.indexOf('\r\n.\r\n');
+        if (end < 0) return;                       // 报文还没收完
+        received.push(all.subarray(0, end).toString('utf8'));
+        inData = false;
+        chunks = [];
+        send('250 2.0.0 Ok: queued');
+        const rest = all.subarray(end + 5).toString('utf8');
+        if (/QUIT/i.test(rest)) { send('221 2.0.0 Bye'); conn.end(); }
+        return;
+      }
+      acc = Buffer.concat([acc, chunk]);
+      let i;
+      while ((i = acc.indexOf('\r\n')) >= 0) {
+        const l = acc.subarray(0, i).toString('utf8');
+        acc = acc.subarray(i + 2);
+        onLine(l);
+      }
+    });
+    conn.on('error', () => { /* 测试结束时的正常断开 */ });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, received, port: server.address().port }));
+  });
+}
+
+const { server, received, port } = await startFakeSmtp();
+
+const account = {
+  id: 'acc-fake',
+  email: 'me@example.com',
+  displayName: '我自己',
+  auth: { user: 'me@example.com', pass: 'secret' },
+  smtp: { host: '127.0.0.1', port, tls: false },
+};
+
+const send = async (opts) => {
+  const before = received.length;
+  await sendMail('u-test', account, opts);
+  for (let i = 0; i < 100 && received.length === before; i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return received[received.length - 1] || '';
+};
+
+// ---------- 基本发送 ----------
+{
+  const raw = await send({
+    to: ['a@example.com', 'b@example.com'],
+    cc: ['c@example.com'],
+    bcc: ['secret@example.com'],
+    subject: '测试主题：中文与符号 🎉',
+    text: '正文第一行\n第二行',
+  });
+  const p = await simpleParser(raw);
+  const to = String(p.to?.text || '');
+  const cc = String(p.cc?.text || '');
+
+  ok('信发得出去（假服务器收到了完整报文）', raw.length > 100, `${raw.length} 字节`);
+  ok('To 头包含全部收件人', to.includes('a@example.com') && to.includes('b@example.com'), to);
+  ok('Cc 头只放抄送人', cc.includes('c@example.com') && !cc.includes('a@example.com'), cc);
+  // 密送泄漏是很严重的事故：收件人能从头部看到「还密送了谁」
+  ok('Bcc 不出现在报文任何位置（密送不泄漏）', !raw.includes('secret@example.com'));
+  ok('中文主题原样送达（MIME 编码后能正确解回）', p.subject === '测试主题：中文与符号 🎉', String(p.subject));
+  ok('正文原样送达', String(p.text || '').trim() === '正文第一行\n第二行', String(p.text || ''));
+  // 中文显示名会被 MIME 编码成 =?UTF-8?B?...?=，所以要解回来比，不能在原始报文里 grep
+  ok('From 用账号显示名 + 地址',
+    p.from?.value?.[0]?.address === 'me@example.com' && p.from?.value?.[0]?.name === '我自己',
+    JSON.stringify(p.from?.value));
+  // 没有 Message-ID 的话，对方客户端串不起会话，我们回复时带的 In-Reply-To 也无处可指
+  ok('报文自带 Message-ID（对方才能归到同一会话）',
+    /^<[^@>]+@[^>]+>$/.test(String(p.messageId || '')), String(p.messageId));
+}
+
+// ---------- 附件 ----------
+{
+  const body = '这是附件内容 hello 123';
+  const raw = await send({
+    to: ['a@example.com'],
+    subject: '带附件',
+    text: '见附件',
+    attachments: [
+      { filename: '报告.txt', content: Buffer.from(body).toString('base64'), contentType: 'text/plain' },
+      { filename: '数据.bin', content: Buffer.from([0, 1, 2, 250, 251]).toString('base64'), contentType: 'application/octet-stream' },
+    ],
+  });
+  const p = await simpleParser(raw);
+  ok('两个附件都在', p.attachments.length === 2, String(p.attachments.length));
+  ok('中文附件名保留', p.attachments[0].filename === '报告.txt', String(p.attachments[0].filename));
+  ok('附件内容字节一致（base64 解码没错位）',
+    p.attachments[0].content.toString('utf8') === body,
+    JSON.stringify(p.attachments[0].content.toString('utf8')));
+  ok('二进制附件不被当文本破坏',
+    Buffer.compare(p.attachments[1].content, Buffer.from([0, 1, 2, 250, 251])) === 0,
+    String([...p.attachments[1].content]));
+}
+
+// ---------- 回复用的头部 ----------
+{
+  const raw = await send({
+    to: ['a@example.com'],
+    subject: 'Re: 原主题',
+    text: '收到，谢谢',
+    inReplyTo: '<orig@example.com>',
+    references: '<older@example.com> <orig@example.com>',
+  });
+  const p = await simpleParser(raw);
+  ok('In-Reply-To 送达（客户端才能归到同一会话）',
+    String(p.inReplyTo || '') === '<orig@example.com>', String(p.inReplyTo));
+  ok('References 保留整条链，不是只剩最后一封',
+    String(p.references || '').includes('older@example.com')
+    && String(p.references || '').includes('orig@example.com'), String(p.references));
+}
+
+// ---------- 空主题兜底 ----------
+{
+  const raw = await send({ to: ['a@example.com'], subject: '', text: 'x' });
+  const p = await simpleParser(raw);
+  ok('空主题兜底为 (无主题)，不会发出无主题的空信头', p.subject === '(无主题)', String(p.subject));
+}
+
+// ---------- 回复发给谁（这一层最容易错，单独钉死）----------
+{
+  const t = replyTargets({ from: { address: 'noreply@shop.example' }, replyTo: { address: 'support@shop.example' } });
+  // 只回 From 等于寄给不收信的机器人，用户看不出没送达
+  ok('有 Reply-To 时回给 Reply-To，不是那个 noreply', t.to[0] === 'support@shop.example', JSON.stringify(t));
+}
+{
+  const t = replyTargets({ from: { address: 'friend@example.com' }, replyTo: null });
+  ok('没有 Reply-To 时回给发件人', t.to[0] === 'friend@example.com', JSON.stringify(t));
+}
+{
+  let msg = '';
+  try { replyTargets({ from: null, replyTo: null }); } catch (e) { msg = String(e.message); }
+  ok('既没有 Reply-To 也没有发件人时明确报错', /没有可回复/.test(msg), msg);
+}
+{
+  const orig = {
+    from: { address: 'boss@example.com' },
+    to: [{ address: 'me@example.com' }, { address: 'team@example.com' }],
+    cc: [{ address: 'cc1@example.com' }, { address: 'me@example.com' }, { address: 'boss@example.com' }],
+  };
+  const t = replyTargets(orig, { replyAll: true, self: ['me@example.com'] });
+  ok('回复全部带上原收件人（之前只取抄送，团队里的其他人会漏掉）',
+    t.cc.includes('team@example.com'), JSON.stringify(t.cc));
+  ok('回复全部带上原抄送', t.cc.includes('cc1@example.com'), JSON.stringify(t.cc));
+  ok('回复全部不把自己抄进去', !t.cc.includes('me@example.com'), JSON.stringify(t.cc));
+  ok('回复全部不把主收件人重复放进抄送', !t.cc.includes('boss@example.com'), JSON.stringify(t.cc));
+}
+{
+  const t = replyTargets({
+    from: { address: 'boss@example.com' },
+    to: [{ address: 'me@example.com' }, { address: 'team@example.com' }],
+  });
+  ok('不是回复全部时只发给一个人、不抄送', t.to.length === 1 && t.cc.length === 0, JSON.stringify(t));
+}
+
+// ---------- 主题前缀 ----------
+{
+  ok('Re: 前缀不重复叠加', replySubject('Re: 你好') === 'Re: 你好', replySubject('Re: 你好'));
+  ok('中文「回复：」也认，不再套一层 Re:', replySubject('回复：你好') === '回复：你好', replySubject('回复：你好'));
+  ok('普通主题补 Re:', replySubject('项目进度') === 'Re: 项目进度', replySubject('项目进度'));
+  ok('Fwd: 不重复', forwardSubject('Fwd: 报告') === 'Fwd: 报告', forwardSubject('Fwd: 报告'));
+  ok('中文「转发：」也认', forwardSubject('转发：报告') === '转发：报告', forwardSubject('转发：报告'));
+}
+
+server.close();
+console.log(`\n${failed ? '失败' : '全部通过'}：${pass} 项断言${failed ? `，失败 ${failed} 项` : ''}`);
+if (failed) process.exit(1);

@@ -426,6 +426,40 @@ function checkAttachSize(list) {
   }
 }
 
+// 回复发给谁。Reply-To 优先——很多营销/工单/通知用 noreply@ 发信，却把真正的
+// 回信地址放在 Reply-To；只回 From 等于寄给一个不收信的机器人，用户看不出没送达。
+// （read_message 早就基于这个判断给过「回复会寄给第三方」的提醒，两边必须一致。）
+// replyAll 时带上原收件人与原抄送，去掉自己和主收件人，避免自己给自己抄一份。
+export function replyTargets(orig, { replyAll = false, self = [] } = {}) {
+  const key = (s) => String(s || '').trim().toLowerCase();
+  const main = String(orig.replyTo?.address || orig.from?.address || orig.from?.text || '').trim();
+  if (!main) throw new Error('这封邮件没有可回复的发件人地址');
+  const selfSet = new Set(self.map(key).filter(Boolean));
+  const cc = [];
+  if (replyAll) {
+    for (const t of [...(orig.to || []), ...(orig.cc || [])]) {
+      const addr = String(t?.address || '').trim();
+      const k = key(addr);
+      if (!addr || selfSet.has(k) || k === key(main)) continue;
+      if (cc.some((x) => key(x) === k)) continue;
+      cc.push(addr);
+    }
+  }
+  return { to: [main], cc };
+}
+
+// 「Re:」「回复：」「答复:」都算已经是回复；否则补一个前缀。
+// 只认英文 Re: 的话，回复中文客户端的「回复：xxx」会变成「Re: 回复：xxx」。
+export function replySubject(subject) {
+  const s = String(subject || '(无主题)');
+  return /^(re|回复|答复)\s*[:：]/i.test(s) ? s : `Re: ${s}`;
+}
+
+export function forwardSubject(subject) {
+  const s = String(subject || '(无主题)');
+  return /^(fwd?|转发)\s*[:：]/i.test(s) ? s : `Fwd: ${s}`;
+}
+
 // 附件按「文本类」处理就给文本，否则给 base64 —— agent 能直接读 CSV/日志/JSON，
 // 图片和 PDF 这种给 base64 让上游模型自己决定
 const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|x-yaml|sql))/i;
@@ -1244,7 +1278,7 @@ export function registerTools(server, ctx) {
         '',
         htmlToText(orig.text ? '' : (orig.html || '')) || orig.text || '(无正文)',
       ].filter((l) => l !== undefined).join('\n');
-      const subject = /^fwd:\s*/i.test(orig.subject) ? orig.subject : `Fwd: ${orig.subject}`;
+      const subject = forwardSubject(orig.subject);
       const body = `${note ? `${note}\n\n` : ''}${quote}`;
       await sendMail(uid, acc, { to, cc: cc || [], subject, text: body, attachments });
       syncSentCache(uid, acc.id);
@@ -1271,20 +1305,18 @@ export function registerTools(server, ctx) {
       const acc = resolveAccount(uid, account);
       const dir = normFolder(folder);
       const orig = await getMessage(uid, acc.id, dir, String(msgUid));
-      const to = orig.from?.address || orig.from?.text || '';
-      if (!to) throw new Error('这封邮件没有可回复的发件人地址');
-      const cc = replyAll ? (orig.cc || []).map((t) => t.address).filter(Boolean) : [];
+      const { to, cc } = replyTargets(orig, { replyAll: !!replyAll, self: [acc.email, acc.auth?.user] });
       const refs = Array.isArray(orig.references) ? orig.references : (orig.references ? [orig.references] : []);
       const references = [...refs, orig.messageId].filter(Boolean).join(' ');
-      const subject = /^re:\s*/i.test(orig.subject) ? orig.subject : `Re: ${orig.subject}`;
+      const subject = replySubject(orig.subject);
       checkAttachSize(attachments);
       await sendMail(uid, acc, {
-        to: [to], cc, subject, text: body, attachments,
+        to, cc, subject, text: body, attachments,
         inReplyTo: orig.messageId || undefined,
         references: references || undefined,
       });
       syncSentCache(uid, acc.id);
-      return text(`已回复「${orig.subject}」（发给 ${to}${cc.length ? `，抄送 ${cc.join(', ')}` : ''}）。`);
+      return text(`已回复「${orig.subject}」（发给 ${to.join(', ')}${cc.length ? `，抄送 ${cc.join(', ')}` : ''}）。`);
     },
   });
 

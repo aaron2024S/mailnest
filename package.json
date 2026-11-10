@@ -7,7 +7,7 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node tests/imap-list.mjs && node tests/oauth-device.mjs && node tests/cache.mjs && node tests/attachments.mjs && node tests/frontend.mjs && node tests/range.mjs && node tests/mcp.mjs",
+    "test": "node tests/imap-list.mjs && node tests/oauth-device.mjs && node tests/cache.mjs && node tests/attachments.mjs && node tests/frontend.mjs && node tests/range.mjs && node tests/send.mjs && node tests/mcp.mjs",
     "test:imap": "node tests/imap-list.mjs",
     "test:oauth": "node tests/oauth-device.mjs",
     "test:cache": "node tests/cache.mjs && node tests/attachments.mjs",
