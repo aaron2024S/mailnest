@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { userDir } from './store.js';
+import { bodyTextOf, htmlToText } from './htmltext.js';
 
 const dbs = new Map(); // uid -> DatabaseSync
 
@@ -301,6 +302,40 @@ function ftsReady(db) {
   return (db.prepare('SELECT 1 AS x FROM fts_keys LIMIT 1').get()?.x || 0) === 1;
 }
 
+// 正文索引补建：老库里 HTML-only 邮件的索引体是空串（putBody 早期只取 body.text），
+// 正文明明在库、却永远搜不到。这里按当前规则重算索引——只动 msg_fts，不碰 messages，
+// 也不需要重新拉信。用 PRAGMA user_version 记账，每个库只跑一次。
+const BODY_INDEX_VER = 2;
+
+export function ensureBodyIndex(uid) {
+  const db = getDb(uid);
+  const row = db.prepare('PRAGMA user_version').get();
+  const ver = Number(row?.user_version ?? Object.values(row || {})[0] ?? 0);
+  if (ver >= BODY_INDEX_VER) return 0;
+  const rows = db.prepare('SELECT account_id, folder, uid, envelope, body FROM messages WHERE body IS NOT NULL').all();
+  let n = 0;
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) {
+      let env = {};
+      try { env = JSON.parse(r.envelope) || {}; } catch { continue; }
+      let body = '';
+      try { body = bodyTextOf(JSON.parse(r.body)); } catch { /* 坏正文跳过这一封 */ }
+      if (!body) continue;
+      ftsUpsert(db, r.account_id, r.folder, r.uid, {
+        subject: env.subject, sender: senderText(env.from), recipients: recipientsText(env.to), body,
+      });
+      n += 1;
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+  try { db.exec(`PRAGMA user_version = ${BODY_INDEX_VER}`); } catch { /* 记不上就下次再跑，幂等 */ }
+  return n;
+}
+
 function ftsQuery(q) {
   const terms = ftsText(q).split(' ').filter(Boolean);
   if (!terms.length) return null;
@@ -384,29 +419,42 @@ export function putFolders(uid, accountId, folders) {
 // ---------- 搜索（Agent 用） ----------
 // 只在本地缓存里找：信封（主题/发件人/收件人）+ 已缓存过的正文。
 // 缓存空的时候调用方应先同步，这里只负责检索，不做网络动作。
+let ftsWarned = false;
+
 function likeEscape(s) {
   return String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
 }
 
-export function searchMessages(uid, accountId, query, { folder = null, limit = 20 } = {}) {
+export function searchMessages(uid, accountId, query, { folder = null, limit = 20, since = null, before = null } = {}) {
   const q = String(query || '').trim();
   if (!q) return [];
   limit = Math.min(Math.max(1, limit | 0), 50);
   const db = getDb(uid);
+  // 时间范围：调用方给的是 ISO 串（由 mcp-tools 统一把「上个月」「30d」这类说法换算好），
+  // 信封里的 date 也是 ISO，直接按字符串比较即可（同格式、同 UTC）。
+  const range = { since: since || null, before: before || null };
   // 有全文索引就走 FTS（几万封也是毫秒级）；索引还没建好时退回 LIKE，保证功能不断
   if (ftsReady(db)) {
     const match = ftsQuery(q);
     if (match) {
-      try { return searchFts(db, accountId, folder, q, match, limit); } catch { /* 回退 LIKE */ }
+      try { return searchFts(db, accountId, folder, q, match, limit, range); } catch (e) {
+        // 兜底可以，但绝不能静默：上一次这行没有输出，`f MATCH ?` 的语法错误被吞了几个月，
+        // 所有人都以为在用索引，其实每次都在 LIKE 扫全库。
+        if (!ftsWarned) {
+          ftsWarned = true;
+          console.error(`[cache] 全文检索不可用，已退回 LIKE 逐条比对：${e?.message || e}`);
+        }
+      }
     }
   }
-  return searchLike(db, accountId, folder, q, limit);
+  return searchLike(db, accountId, folder, q, limit, range);
 }
 
 function withSnippet(q, row) {
   const matched = [];
   let text = '';
-  if (row.body) { try { text = JSON.parse(row.body)?.text || ''; } catch { /* ignore */ } }
+  // 和索引侧同源：text 为空就用 html 转出来，否则 HTML-only 邮件永远没有片段可给
+  if (row.body) { try { text = bodyTextOf(JSON.parse(row.body)); } catch { /* ignore */ } }
   const env = JSON.parse(row.envelope);
   const low = q.toLowerCase();
   if (String(env.subject || '').toLowerCase().includes(low)) matched.push('subject');
@@ -422,20 +470,25 @@ function withSnippet(q, row) {
   return out;
 }
 
-function searchFts(db, accountId, folder, q, match, limit) {
+function searchFts(db, accountId, folder, q, match, limit, range = {}) {
+  // ⚠ FTS5 的 MATCH 左侧必须是表名，不能写别名：原来写的是 `f MATCH ?`（f 是别名），
+  // 每条搜索都抛 `no such column: f`，而调用方的 try/catch 把它吞了、静默退回 LIKE 全表扫。
+  // 结果：全文索引建了却从没用上，几万封邮件每次搜索都在扫 JSON。2026-11-10 定位。
   const rows = db.prepare(`
     SELECT m.folder, m.uid, m.envelope, m.flags, m.body
     FROM msg_fts f
     JOIN fts_keys k ON k.rid = f.rowid
     JOIN messages m ON m.account_id = k.account_id AND m.folder = k.folder AND m.uid = k.uid
-    WHERE f MATCH ? AND k.account_id = ? AND (? IS NULL OR k.folder = ?)
+    WHERE msg_fts MATCH ? AND k.account_id = ? AND (? IS NULL OR k.folder = ?)
+      AND (? IS NULL OR COALESCE(json_extract(m.envelope, '$.date'), '') >= ?)
+      AND (? IS NULL OR COALESCE(json_extract(m.envelope, '$.date'), '') < ?)
     ORDER BY COALESCE(json_extract(m.envelope, '$.date'), '') DESC, m.uid DESC
     LIMIT ?
-  `).all(match, accountId, folder, folder, limit);
+  `).all(match, accountId, folder, folder, range.since, range.since, range.before, range.before, limit);
   return rows.map((r) => withSnippet(q, r));
 }
 
-function searchLike(db, accountId, folder, q, limit) {
+function searchLike(db, accountId, folder, q, limit, range = {}) {
   const pat = `%${likeEscape(q.toLowerCase())}%`;
   const rows = db.prepare(`
     SELECT folder, uid, envelope, flags, body,
@@ -447,6 +500,8 @@ function searchLike(db, accountId, folder, q, limit) {
     FROM messages
     WHERE account_id = ?
       AND (? IS NULL OR folder = ?)
+      AND (? IS NULL OR COALESCE(json_extract(envelope, '$.date'), '') >= ?)
+      AND (? IS NULL OR COALESCE(json_extract(envelope, '$.date'), '') < ?)
       AND ( lower(json_extract(envelope, '$.subject')) LIKE ? ESCAPE '\\'
          OR lower(json_extract(envelope, '$.from.name')) LIKE ? ESCAPE '\\'
          OR lower(json_extract(envelope, '$.from.address')) LIKE ? ESCAPE '\\'
@@ -454,7 +509,8 @@ function searchLike(db, accountId, folder, q, limit) {
          OR lower(coalesce(json_extract(body, '$.text'), '')) LIKE ? ESCAPE '\\' )
     ORDER BY COALESCE(json_extract(envelope, '$.date'), '') DESC, uid DESC
     LIMIT ?
-  `).all(accountId, folder, folder, pat, pat, pat, pat, pat, limit);
+  `).all(accountId, folder, folder, range.since, range.since, range.before, range.before,
+    pat, pat, pat, pat, pat, limit);
   return rows.map((r) => withSnippet(q, r));
 }
 
@@ -487,13 +543,15 @@ export function putBody(uid, accountId, folderPath, messageUid, body) {
     WHERE account_id = ? AND folder = ? AND uid = ?
   `).run(JSON.stringify({ ...body, v: BODY_V }), Date.now(), accountId, folderPath, messageUid);
   // 正文进库同时进全文索引（主题/收发人沿用信封里已有的）
+  // ⚠ 索引用的必须是「取过 html 兜底」的文本：HTML-only 邮件（银行账单、12306 发票）
+  // 的 body.text 是空字符串，早期版本直接拿它索引，导致正文进了库却永远搜不到。
   try {
     const row = db.prepare('SELECT envelope FROM messages WHERE account_id = ? AND folder = ? AND uid = ?')
       .get(accountId, folderPath, messageUid);
     if (row) {
       const env = JSON.parse(row.envelope);
       ftsUpsert(db, accountId, folderPath, messageUid, {
-        subject: env.subject, sender: senderText(env.from), recipients: recipientsText(env.to), body: body?.text || '',
+        subject: env.subject, sender: senderText(env.from), recipients: recipientsText(env.to), body: bodyTextOf(body),
       });
     }
   } catch { /* 索引失败不影响读信，rebuildFts 可重建 */ }

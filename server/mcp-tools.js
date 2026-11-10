@@ -12,6 +12,7 @@ import {
 } from './mail.js';
 import * as cache from './cache.js';
 import * as idle from './idle.js';
+import { htmlToText, bodyTextOf } from './htmltext.js';
 
 const BODY_LIMIT = 8000;        // 正文字符上限：再长会一次性灌满模型上下文
 const ATT_TEXT_LIMIT = 20000;   // 附件文本上限
@@ -22,6 +23,75 @@ const MAX_UIDS = 200;      // 单次批量操作上限：防止 agent 误传一�
 const PAGE_MAX = 50;
 
 const SCOPE_TEXT = { read: '读取邮件', write: '整理邮件', send: '发送邮件' };
+
+// ---- 入参宽容层 ----------------------------------------------------------
+// 模型的 function calling 输出不由我们控制，这几种错法都真实发生过：
+//   · {"account": null}      —— 想表达「不指定」，结果是 400 expected string, received null
+//   · {"to": "a@b.com"}      —— 该给数组却给了字符串
+//   · {"uids": "12,15"}      —— 该给数组却给了逗号串
+// 语义清清楚楚，只是形状不对。这一层负责把「意思同、形状异」的入参掰正，
+// 掰不动的才报错——把 400 原样丢给用户，是最不该发生的一类失败。
+const optStr = () => z.preprocess((v) => {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().replace(/^["'「『]+|["'」』]+$/g, '').trim();
+  return s === '' ? undefined : s;
+}, z.string().optional());
+
+const splitList = (v) => (Array.isArray(v) ? v : String(v).split(/[,，;；、\s]+/))
+  .map((x) => String(x).trim()).filter(Boolean);
+
+const addrList = (required) => z.preprocess((v) => {
+  if (v === null || v === undefined) return undefined;
+  const list = splitList(v);
+  return list.length ? list : undefined;
+}, required ? z.array(z.string()).min(1) : z.array(z.string()).optional());
+
+const uidList = () => z.preprocess((v) => {
+  if (v === null || v === undefined) return undefined;
+  const list = (Array.isArray(v) ? v : String(v).split(/[,，;；、\s]+/))
+    .map((x) => Number(String(x).trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return list.length ? list : undefined;
+}, z.array(z.number().int().positive()).min(1));
+
+// 时间过滤：既收具体日期，也收相对说法。用户嘴里是「上个月」「最近一周」，
+// 而这一层原来只能传关键词——想按时间问就只能把几千封拉下来自己比。
+function parseWhen(v, label) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  const now = new Date();
+  if (s === '上个月' || s === '上月') {
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString();
+  }
+  const rel = /^(\d+)\s*(d|天|日|w|周|m|月|y|年)$/i.exec(s);
+  if (rel) {
+    const n = Number(rel[1]);
+    const u = rel[2].toLowerCase();
+    const d = new Date(now.getTime());
+    if (u === 'd' || u === '天' || u === '日') d.setUTCDate(d.getUTCDate() - n);
+    else if (u === 'w' || u === '周') d.setUTCDate(d.getUTCDate() - n * 7);
+    else if (u === 'm' || u === '月') d.setUTCMonth(d.getUTCMonth() - n);
+    else d.setUTCFullYear(d.getUTCFullYear() - n);
+    return d.toISOString();
+  }
+  const t = Date.parse(s.length <= 10 ? `${s}T00:00:00Z` : s);
+  if (!Number.isFinite(t)) {
+    throw new Error(`${label} 看不懂「${s}」。可以填 7d、30d、3m、1y、上个月，或 2026-10-01 这样的日期`);
+  }
+  return new Date(t).toISOString();
+}
+
+// 时间范围过滤（list_messages 走的是 IMAP/缓存混用，统一在这一层过一遍）
+function inRange(date, sinceIso, beforeIso) {
+  if (!sinceIso && !beforeIso) return true;
+  const t = Date.parse(String(date || ''));
+  if (!Number.isFinite(t)) return true;   // 时间认不出来就不过滤，宁多给别漏给
+  if (sinceIso && t < Date.parse(sinceIso)) return false;
+  if (beforeIso && t >= Date.parse(beforeIso)) return false;
+  return true;
+}
+
 
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
 const json = (o) => text(JSON.stringify(o, null, 2));
@@ -66,21 +136,6 @@ export function summarizeAuth(raw) {
     brief: parts.join(' · ') || '无法解析',
     raw: s.length > 200 ? `${s.slice(0, 200)}…` : s,
   };
-}
-
-function htmlToText(html) {
-  return String(html)
-    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
 }
 
 // ---- 正文收拾 ------------------------------------------------------------
@@ -341,7 +396,7 @@ export function registerTools(server, ctx) {
       + '要是他想看具体是哪几封，改用 list_messages（unreadOnly=true）。'
       + '不指定 account 且有多个账号时，返回每个账号的未读汇总；指定 account 时返回该账号的文件夹明细。',
     annotations: { readOnlyHint: true },
-    schema: { account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；不填则汇总所有账号') },
+    schema: { account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；不填则汇总所有账号') },
     run: async ({ account }) => {
       const all = listAccounts(uid);
       if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
@@ -382,7 +437,7 @@ export function registerTools(server, ctx) {
     title: '列出文件夹',
     description: '列出某个邮箱账号的文件夹（收件箱、已发送、垃圾箱、自定义文件夹），带各文件夹未读数。',
     annotations: { readOnlyHint: true },
-    schema: { account: z.string().optional().describe('账号显示名、邮箱地址或 id；只有一个账号时可省略') },
+    schema: { account: optStr().describe('账号显示名、邮箱地址或 id；只有一个账号时可省略') },
     run: async ({ account }) => {
       const acc = resolveAccount(uid, account);
       const folders = await listFolders(uid, acc.id);
@@ -405,14 +460,18 @@ export function registerTools(server, ctx) {
       + '只有用户没提任何邮箱时才省略 account（此时会合并全部账号并按时间排序）。',
     annotations: { readOnlyHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；省略则查全部账号'),
-      folder: z.string().optional().describe('文件夹路径，默认 INBOX'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）；省略则查全部账号'),
+      folder: optStr().describe('文件夹路径，默认 INBOX'),
       page: z.coerce.number().int().min(1).optional().describe('页码，从 1 开始（跨账号只支持第一页）'),
       pageSize: z.coerce.number().int().min(1).max(PAGE_MAX).optional().describe(`每页条数，最多 ${PAGE_MAX}，默认 20`),
       unreadOnly: z.boolean().optional().describe('只列未读邮件（默认 false 列全部）'),
+      since: optStr().describe('只要这个时间之后（含）的邮件：7d、30d、上个月、2026-10-01 都行'),
+      before: optStr().describe('只要这个时间之前（不含）的邮件，写法同 since'),
     },
-    run: async ({ account, folder, page, pageSize, unreadOnly }) => {
+    run: async ({ account, folder, page, pageSize, unreadOnly, since, before }) => {
       const dir = normFolder(folder);
+      const sinceIso = parseWhen(since, 'since');
+      const beforeIso = parseWhen(before, 'before');
       const per = Math.min(Math.max(1, pageSize || 20), PAGE_MAX);
       const pg = Math.max(1, page || 1);
       const toItem = (m, acc, folderPath) => {
@@ -441,13 +500,17 @@ export function registerTools(server, ctx) {
       if (account || all.length === 1) {
         const acc = account ? resolveAccount(uid, account) : all[0];
         const d = await listMessages(uid, acc.id, dir, { page: pg, pageSize: per, unreadOnly: !!unreadOnly });
+        const kept = d.messages.filter((m) => inRange(m.date, sinceIso, beforeIso));
         return json({
           account: { id: acc.id, email: acc.email },
           folder: dir,
           total: d.total,
           page: d.page,
           pageSize: d.pageSize,
-          messages: d.messages.map((m) => toItem(m, null, dir)),
+          messages: kept.map((m) => toItem(m, null, dir)),
+          ...(kept.length !== d.messages.length
+            ? { note: `按时间过滤后本页剩 ${kept.length} 封（原 ${d.messages.length} 封）；时间范围外的更老邮件要往后翻页` }
+            : {}),
         });
       }
 
@@ -471,6 +534,7 @@ export function registerTools(server, ctx) {
           ? `没有查到${what}（部分账号查询失败：${failed.join('；')}）`
           : `所有账号都没有${what}`);
       }
+      const ranged = shown.filter((m) => inRange(m.date, sinceIso, beforeIso));
       return json({
         // ⚠ 指令放最前面：弱模型从上往下读，禁令必须先于数据出现
         warning: '⚠ 这是全部账号合并的结果。规则：'
@@ -483,7 +547,10 @@ export function registerTools(server, ctx) {
         folder: dir,
         total,
         pageSize: per,
-        messages: shown,
+        messages: ranged,
+        ...(ranged.length !== shown.length
+          ? { note: `按时间过滤后剩 ${ranged.length} 封（合并结果原 ${shown.length} 封）` }
+          : {}),
         ...(total > shown.length
           ? { note: `共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请带 account 或调大 pageSize` }
           : {}),
@@ -501,12 +568,16 @@ export function registerTools(server, ctx) {
     annotations: { readOnlyHint: true },
     schema: {
       query: z.string().min(1).max(200).describe('关键词，例如「发票」或「noreply@github.com」'),
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id；省略则搜索全部账号'),
-      folder: z.string().optional().describe('只搜某个文件夹（路径从 list_folders 拿）；省略则搜所有文件夹'),
+      account: optStr().describe('账号显示名、邮箱地址或 id；省略则搜索全部账号'),
+      folder: optStr().describe('只搜某个文件夹（路径从 list_folders 拿）；省略则搜所有文件夹'),
       limit: z.coerce.number().int().min(1).max(50).optional().describe('最多返回多少封，默认 20'),
+      since: optStr().describe('只要这个时间之后（含）的邮件：7d、30d、上个月、2026-10-01 都行'),
+      before: optStr().describe('只要这个时间之前（不含）的邮件，写法同 since'),
     },
-    run: async ({ query, account, folder, limit }) => {
+    run: async ({ query, account, folder, limit, since, before }) => {
       const q = String(query).trim();
+      const sinceIso = parseWhen(since, 'since');
+      const beforeIso = parseWhen(before, 'before');
       const all = listAccounts(uid);
       if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
       const targets = account ? [resolveAccount(uid, account)] : all;
@@ -515,6 +586,7 @@ export function registerTools(server, ctx) {
 
       const hits = [];
       let indexing = false;
+      const failed = [];
       for (const acc of targets) {
         if (dir) {
           const folders = await listFolders(uid, acc.id);
@@ -522,24 +594,37 @@ export function registerTools(server, ctx) {
             throw new Error(`「${acc.email}」没有名为「${dir}」的文件夹，可用：${folders.slice(0, 12).map((f) => f.path).join('、')}`);
           }
         }
-        if (await ensureIndexed(uid, acc, dir) === 'partial') indexing = true;
-        for (const m of cache.searchMessages(uid, acc.id, q, { folder: dir, limit: cap })) {
-          hits.push({ acc, ...m });
+        try {
+          if (await ensureIndexed(uid, acc, dir) === 'partial') indexing = true;
+          for (const m of cache.searchMessages(uid, acc.id, q, { folder: dir, limit: cap, since: sinceIso, before: beforeIso })) {
+            hits.push({ acc, ...m });
+          }
+        } catch (e) {
+          // 单个账号搜不了（掉线、令牌过期、索引建一半）：记下来继续搜别的，
+          // 但必须在结果里说出来——否则「6 封」和「31 封」看起来都像完整答案，
+          // 用户会以为确实只有这么多（2026-11-10 实测：同一句话三次搜出 12/6/31）。
+          failed.push(`${acc.displayName || acc.email}：${humanError(e)}`);
         }
       }
       hits.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
       const shown = hits.slice(0, cap);
 
       if (!shown.length) {
+        if (failed.length) {
+          return text(`这次没搜到「${q}」：${failed.length} 个账号查询失败（${failed.join('；')}）。`
+            + '这不代表没有——等那个邮箱恢复后再搜一次。');
+        }
         const hint = indexing
           ? '部分邮箱正在建立搜索索引，等几秒再搜一次可能会有结果。'
-          : '正文只搜索已打开过（已缓存）的邮件；也可以换更短的关键词，或让我把邮件逐页列出来。';
+          : '可以换一个更接近平台/发件人的词再搜（例如「火车票」换成「12306」），'
+            + '也可以放宽时间范围，或者用 list_messages 逐页翻。';
         return text(`没搜到和「${q}」相关的邮件${dir ? `（范围：${dir}）` : ''}。${hint}`);
       }
       // 结构化返回：uid / 来源账号都在字段里，模型接「看第 N 封」时直接取用，
       // 文本层不再出现 uid=xxx 这类用户看不懂的东西
       const folderName = (p) => (String(p).toUpperCase() === 'INBOX' ? '收件箱' : p);
       const notes = [];
+      if (failed.length) notes.push(`有 ${failed.length} 个账号没查成（${failed.join('；')}），下面的结果是其余账号的`);
       if (hits.length > shown.length) notes.push(`共找到 ${hits.length} 封，只显示最新的 ${shown.length} 封，想缩小范围直接说`);
       if (indexing) notes.push('部分邮箱的搜索索引刚建立，稍后再搜结果可能更全');
       return json({
@@ -560,6 +645,7 @@ export function registerTools(server, ctx) {
           ...(m.snippet ? { snippet: m.snippet } : {}),
         })),
         ...(notes.length ? { note: notes.join('；') } : {}),
+        ...(failed.length ? { failedAccounts: failed } : {}),
       });
     },
   });
@@ -576,18 +662,27 @@ export function registerTools(server, ctx) {
       + '异常时会附原始认证结果，可用于判断钓鱼邮件。',
     annotations: { readOnlyHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
+      format: optStr().describe('默认 text（收拾过的纯文本）；填 html 直接给原始 HTML —— '
+        + '纯文本把表格/版式吃掉了、数字对不上时用这个回去看原文'),
     },
-    run: async ({ account, folder, uid: msgUid }) => {
+    run: async ({ account, folder, uid: msgUid, format }) => {
       const acc = resolveAccount(uid, account);
       const dir = normFolder(folder);
       const m = await getMessage(uid, acc.id, dir, String(msgUid));
-      let body = String(m.text || '').trim();
-      if (!body && m.html) body = htmlToText(m.html);
-      // 先收拾页脚和超长追踪链接，再判截断——否则正文额度全花在版权声明上
-      body = trimBoilerplate(shortenLongUrls(body));
+      const wantHtml = String(format || '').toLowerCase() === 'html';
+      let body;
+      if (wantHtml) {
+        // 原文兜底：抽取器出错时（表格散架、纯图片排版）让上层能自己看结构
+        body = String(m.html || '').trim() || String(m.text || '').trim();
+      } else {
+        // 表格在 htmlToText 里补了单元格分隔符，所以这里必须走同一份实现
+        body = bodyTextOf(m);
+        // 先收拾页脚和超长追踪链接，再判截断——否则正文额度全花在版权声明上
+        body = trimBoilerplate(shortenLongUrls(body));
+      }
       const truncated = body.length > BODY_LIMIT;
       if (truncated) body = body.slice(0, BODY_LIMIT);
 
@@ -641,8 +736,8 @@ export function registerTools(server, ctx) {
       + '小体积二进制（如 PDF）返回 base64；过大的二进制只报大小，请让用户到网页端下载。',
     annotations: { readOnlyHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
       index: z.coerce.number().int().min(1).max(50).describe('第几个附件（从 1 开始，编号见 read_message 的附件清单）'),
     },
@@ -674,9 +769,9 @@ export function registerTools(server, ctx) {
     description: '批量设置邮件的已读、未读、星标状态。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('邮件所在文件夹，默认 INBOX'),
-      uids: z.array(z.coerce.number().int().positive()).min(1).describe('邮件 uid 列表'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('邮件所在文件夹，默认 INBOX'),
+      uids: uidList().describe('邮件 uid 列表'),
       action: z.enum(['read', 'unread', 'star', 'unstar']).describe('read=标为已读，unread=标为未读，star=加星标，unstar=取消星标'),
     },
     run: async ({ account, folder, uids, action }) => {
@@ -704,9 +799,9 @@ export function registerTools(server, ctx) {
     description: '把邮件移动到同账号的另一个文件夹。目标文件夹路径可从 list_folders 获取。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('邮件当前所在文件夹，默认 INBOX'),
-      uids: z.array(z.coerce.number().int().positive()).min(1).describe('邮件 uid 列表'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('邮件当前所在文件夹，默认 INBOX'),
+      uids: uidList().describe('邮件 uid 列表'),
       dest: z.string().min(1).describe('目标文件夹路径，例如 Archive 或 项目/2026'),
     },
     run: async ({ account, folder, uids, dest }) => {
@@ -731,9 +826,9 @@ export function registerTools(server, ctx) {
     description: '把邮件移到「已删除」文件夹。已在「已删除」里的邮件不会被永久删除 —— 这一步只能由用户在网页端手动执行。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('邮件当前所在文件夹，默认 INBOX'),
-      uids: z.array(z.coerce.number().int().positive()).min(1).describe('邮件 uid 列表'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('邮件当前所在文件夹，默认 INBOX'),
+      uids: uidList().describe('邮件 uid 列表'),
     },
     run: async ({ account, folder, uids }) => {
       const acc = resolveAccount(uid, account);
@@ -762,8 +857,8 @@ export function registerTools(server, ctx) {
     description: '把整个文件夹的所有邮件一次性标为已读（服务端一条命令完成，几千封也很快）。单个/少量邮件请用 set_flags。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('文件夹路径，默认 INBOX'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('文件夹路径，默认 INBOX'),
     },
     run: async ({ account, folder }) => {
       const acc = resolveAccount(uid, account);
@@ -782,7 +877,7 @@ export function registerTools(server, ctx) {
       + '只允许对垃圾箱/垃圾邮件类文件夹执行；普通文件夹请用 delete_messages 先移入垃圾箱。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       folder: z.string().min(1).describe('要清空的文件夹路径（须为垃圾箱/垃圾邮件类）'),
     },
     run: async ({ account, folder }) => {
@@ -812,7 +907,7 @@ export function registerTools(server, ctx) {
     description: '删除一个自定义文件夹及其中的全部邮件（不可恢复）。收件箱和系统文件夹（已发送/垃圾箱等）不允许删除。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       path: z.string().min(1).max(100).describe('要删除的文件夹路径'),
     },
     run: async ({ account, path }) => {
@@ -831,7 +926,7 @@ export function registerTools(server, ctx) {
     description: '在某个账号下新建文件夹。多级文件夹用该账号的分隔符（通常「/」）连接，例如「项目/2026」。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
       path: z.string().min(1).max(100).describe('文件夹路径，例如 待办 或 项目/2026'),
     },
     run: async ({ account, path }) => {
@@ -852,10 +947,10 @@ export function registerTools(server, ctx) {
     description: '用指定账号发送一封新邮件，可带附件。发送前请把收件人、主题、正文（和附件清单）完整展示给用户确认。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('用哪个账号发（显示名/邮箱地址/id）；只有一个账号时可省略'),
-      to: z.array(z.string()).min(1).describe('收件人邮箱地址列表'),
-      cc: z.array(z.string()).optional().describe('抄送地址列表'),
-      bcc: z.array(z.string()).optional().describe('密送地址列表'),
+      account: optStr().describe('用哪个账号发（显示名/邮箱地址/id）；只有一个账号时可省略'),
+      to: addrList(true).describe('收件人邮箱地址列表'),
+      cc: addrList().describe('抄送地址列表'),
+      bcc: addrList().describe('密送地址列表'),
       subject: z.string().describe('邮件主题'),
       text: z.string().min(1).describe('邮件正文（纯文本）'),
       attachments: attachSchema,
@@ -878,11 +973,11 @@ export function registerTools(server, ctx) {
     description: '把一封已有邮件（含全部附件）转发给别人。原邮件以引用块形式附在正文前。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('原邮件所在文件夹，默认 INBOX'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('原邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('原邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
-      to: z.array(z.string()).min(1).describe('转发给谁（邮箱地址列表）'),
-      cc: z.array(z.string()).optional().describe('抄送地址列表'),
+      to: addrList(true).describe('转发给谁（邮箱地址列表）'),
+      cc: addrList().describe('抄送地址列表'),
       text: z.string().optional().describe('转发时附上的说明文字（可省略）'),
     },
     run: async ({ account, folder, uid: msgUid, to, cc, text: note }) => {
@@ -923,8 +1018,8 @@ export function registerTools(server, ctx) {
     description: '回复一封已有邮件，自动带上原邮件的主题、In-Reply-To 和 References，保证邮件客户端里能正确归档到同一会话。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
-      account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
-      folder: z.string().optional().describe('原邮件所在文件夹，默认 INBOX'),
+      account: optStr().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
+      folder: optStr().describe('原邮件所在文件夹，默认 INBOX'),
       uid: z.coerce.number().int().positive().describe('原邮件的 uid，先用 list_messages 查到再传（不要向用户索要）'),
       text: z.string().min(1).describe('回复正文（纯文本）'),
       replyAll: z.boolean().optional().describe('是否回复全部（含原邮件抄送人），默认 false'),
@@ -958,7 +1053,7 @@ export function registerTools(server, ctx) {
     description: '把一封没写完的邮件存成草稿，用户可在网页端继续编辑或直接发送。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: z.string().optional().describe('用哪个账号保存（显示名/邮箱地址/id）'),
+      account: optStr().describe('用哪个账号保存（显示名/邮箱地址/id）'),
       to: z.array(z.string()).optional().describe('收件人'),
       subject: z.string().optional().describe('主题'),
       text: z.string().min(1).describe('正文'),

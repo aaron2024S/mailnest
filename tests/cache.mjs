@@ -441,3 +441,58 @@ test('IDLE 兜底轮询：不取锁、零变化零 fetch、增量与全量与 sy
   r = await pollInboxInline(uid, ACC4, badClient, 'INBOX');
   assert.equal(r, null);
 });
+
+// ---------- 2026-11-10 回归：正文索引 / 表格 / 时间过滤 ----------
+// 事故现场：12306 的电子发票是 HTML-only，text 为空、表格在 html 里。
+// 老实现只索引 body.text，于是「正文写着 G3120、搜 G3120 返回 0 封」。
+test('HTML-only 邮件的正文也进索引，表格不散架', async () => {
+  const { htmlToText } = await import('../server/htmltext.js');
+  const html = '<table><tr><th>车次</th><th>发到站</th><th>票价</th></tr>'
+    + '<tr><td>G3120</td><td>上海站-苏州站</td><td>42.00</td></tr></table>';
+  const txt = htmlToText(html);
+  assert.ok(txt.includes('车次 | 发到站 | 票价'), '表头要保留单元格分隔');
+  assert.ok(txt.includes('G3120 | 上海站-苏州站 | 42.00'), '数值要和标签在同一行');
+
+  const A = 'a_htm01';
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [
+    mkMsg(1, '网上购票系统-电子发票通知', '2025-05-29T05:21:00.000Z'),
+  ]);
+  // 真实形态：text 空、内容在 html
+  cache.putBody(uid, A, 'INBOX', 1, { text: '', html });
+  assert.equal(cache.searchMessages(uid, A, 'G3120').length, 1, '正文在 html 里也必须能搜到');
+  assert.equal(cache.searchMessages(uid, A, '上海站').length, 1);
+});
+
+test('ensureBodyIndex 能给老库补建正文索引', () => {
+  const A = 'a_htm02';
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [mkMsg(2, '老库里的账单', '2026-10-18T02:21:00.000Z')]);
+  cache.putBody(uid, A, 'INBOX', 2, { text: '', html: '<p>本期应还 1686.68</p>' });
+  // 模拟老库里索引体为空：直接把它写空，再让迁移补回来
+  cache.getDb(uid).prepare('UPDATE msg_fts SET body = \'\' WHERE rowid = '
+    + '(SELECT rid FROM fts_keys WHERE account_id = ? AND folder = ? AND uid = 2)').run(A, 'INBOX');
+  assert.equal(cache.searchMessages(uid, A, '本期应还').length, 0, '先确认索引确实空了');
+  // user_version 已经是迁移后的值，这里强制回落到 0 再跑一次
+  cache.getDb(uid).exec('PRAGMA user_version = 0');
+  const n = cache.ensureBodyIndex(uid);
+  assert.ok(n >= 1);
+  assert.equal(cache.searchMessages(uid, A, '本期应还').length, 1, '迁移后应能搜到');
+});
+
+test('searchMessages 支持 since / before', () => {
+  const A = 'a_time01';
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [
+    mkMsg(1, '本月账单', '2026-10-18T02:00:00.000Z'),
+    mkMsg(2, '上月账单', '2026-09-18T02:00:00.000Z'),
+    mkMsg(3, '更早的账单', '2026-05-18T02:00:00.000Z'),
+  ]);
+  const all = cache.searchMessages(uid, A, '账单');
+  assert.equal(all.length, 3);
+  const recent = cache.searchMessages(uid, A, '账单', { since: '2026-10-01T00:00:00.000Z' });
+  assert.equal(recent.length, 1);
+  assert.equal(recent[0].uid, 1);
+  const mid = cache.searchMessages(uid, A, '账单', {
+    since: '2026-06-01T00:00:00.000Z', before: '2026-10-01T00:00:00.000Z',
+  });
+  assert.equal(mid.length, 1);
+  assert.equal(mid[0].uid, 2);
+});

@@ -161,6 +161,14 @@ function ensureUserWatchers(uid) {
     const n = cache.rebuildFts(uid);
     if (n) console.log(`[mailnest] 全文索引回填 ${n} 封`);
   } catch (e) { console.log(`[mailnest] 全文索引回填失败：${e?.message || e}`); }
+  // 正文索引补建：HTML-only 邮件的正文早期没进索引（正文在 html 里、text 为空），
+  // 结果「正文里明明有 G3120，搜却搜不到」。放到后台跑：几千封要逐封转文本，别挡住登录。
+  setImmediate(() => {
+    try {
+      const n = cache.ensureBodyIndex(uid);
+      if (n) console.log(`[mailnest] 正文索引补建 ${n} 封`);
+    } catch (e) { console.log(`[mailnest] 正文索引补建失败：${e?.message || e}`); }
+  });
   // 失败计数随重启重置：tries 的用途是"别让一封坏邮件堵死队列"，不是永久拉黑。
   // 版本修复（比如 0.2.0 的解析 bug）发布后，之前被误记失败的邮件要能自动补上。
   try {

@@ -63,10 +63,21 @@ export function mountMcp(app) {
       audit(auth.uid, 'mcp', `${auth.name || 'MCP'} → ${tool}`, clientIp(req));
     }
 
+    // 权限自述：以前只有「被拒之后」才知道令牌能干什么，调用方没法提前规划——
+    // 想发信却要先试一次失败、再回头跟用户解释。这里在握手时就把能力边界说清楚。
+    const SCOPE_ZH = { read: '读取邮件', write: '整理邮件（标记/移动/删除）', send: '发送邮件' };
+    const have = (auth.scopes || []).map((x) => SCOPE_ZH[x] || x);
+    const lack = Object.keys(SCOPE_ZH).filter((x) => !(auth.scopes || []).includes(x)).map((x) => SCOPE_ZH[x]);
+    const scopeLine = `0. 本次令牌权限：${have.length ? have.join('、') : '无'}。`
+      + (lack.length
+        ? `${lack.join('、')}不可用，相关工具会直接拒绝；被拒时不要反复重试，告诉用户去网页端「设置 → Agent 接入」勾上即可。`
+        : '读写发送都可用。');
+
     const server = new McpServer(
       { name: 'mailnest', version: pkg.version },
       {
         instructions: [
+          scopeLine,
           '这是 MailNest 自托管邮箱（多账号聚合）。按下面的路由规则选工具，不要按工具名猜：',
           '1. 问「有几封未读 / 有没有新邮件」→ unread_count（不传 account 时返回全部账号汇总）。',
           '2. 问「未读/邮件有哪些、都是什么」→ list_messages 且 unreadOnly=true。',
@@ -81,6 +92,13 @@ export function mountMcp(app) {
           '   delete_folder；发信用 send_message / reply_message / forward_message，草稿用 save_draft / send_draft。',
           '8. 发送、删除、移动前先把将要执行的内容展示给用户确认；Agent 不能永久删除单封邮件。',
           '9. 工具返回里出现 hint / note 字段时，遵循其中的指引行动。',
+          '10. 按时间找信：search_messages / list_messages 都支持 since / before，'
+          + '可填 7d、30d、3m、1y、上个月或 2026-10-01；问「最近/上个月」时优先用它们，'
+          + '不要靠拉全量再自己算。',
+          '11. 搜不到时不要直接说「没有」：先换成平台名/发件人域再搜（火车票→12306、'
+          + '游戏订单→Steam、航班→行程单），最多换两次；仍然没有再说没有，并说明换过哪些词。',
+          '12. read_message 默认给纯文本；如果正文里数字和标签对不上（账单、发票这类表格），'
+          + '加 format=html 取原文再看一遍，别照着错位的数字下结论。',
         ].join('\n'),
       },
     );
