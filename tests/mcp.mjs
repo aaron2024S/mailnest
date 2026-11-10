@@ -406,6 +406,17 @@ ok('用户文案不漏内部参数名', !/list_messages|unreadOnly|read_message|
     && !/smtp\.mailfrom|ip=/.test(good.brief), good?.brief);
   const bad = summarizeAuth('mx.qq.com; spf=fail smtp.mailfrom=<evil@x> (ip=1.2.3.4); dkim=fail header.d=x; dmarc=fail');
   ok('认证不通过要标出来', bad?.suspicious === true && /未通过/.test(bad.brief), bad?.brief);
+  // 2026-11-10 回归：微软这类邮件写 dmarc=pass (p=REJECT sp=REJECT dis=NONE)，
+  // 里头的 REJECT 是发件方声明的策略，不是本封被判拒。老实现拿裸词扫原文，
+  // 于是三项全绿也被判「未通过」，正文末尾那行警告怎么也消不掉。
+  const policy = summarizeAuth('mx.qq.com; spf=pass smtp.mailfrom=<a@x> (ip=1.2.3.4); '
+    + 'dkim=pass header.d=accountprotection.microsoft.com; '
+    + 'dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=microsoft.com');
+  ok('p=REJECT 是策略不是结果，不能判可疑',
+    policy?.suspicious === false && /DMARC 通过/.test(policy.brief), policy?.brief);
+  const reallyRejected = summarizeAuth('mx.qq.com; spf=pass smtp.mailfrom=<a@x>; dkim=pass; dmarc=reject');
+  ok('dmarc 结果本身是 reject 时要标出来',
+    reallyRejected?.suspicious === true && /被判拒绝/.test(reallyRejected.brief), reallyRejected?.brief);
   ok('没有认证结果时不编造', summarizeAuth('') === null, String(summarizeAuth('')));
   const raw = summarizeAuth('spf=pass ' + 'x'.repeat(500));
   ok('异常时附的原文有上限', raw.raw.length <= 201, String(raw.raw.length));

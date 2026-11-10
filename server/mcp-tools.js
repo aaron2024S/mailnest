@@ -123,14 +123,22 @@ export function summarizeAuth(raw) {
   const ZH = {
     pass: '通过', fail: '未通过', softfail: '可疑', none: '未声明',
     permerror: '配置有误', temperror: '临时失败', policy: '按策略',
+    quarantine: '被判隔离', reject: '被判拒绝',
   };
   const spf = pick('spf');
   const dkim = pick('dkim');
   const dmarc = pick('dmarc');
   const parts = [spf && `SPF ${ZH[spf] || spf}`, dkim && `DKIM ${ZH[dkim] || dkim}`, dmarc && `DMARC ${ZH[dmarc] || dmarc}`]
     .filter(Boolean);
-  const bad = new Set(['fail', 'softfail', 'permerror', 'temperror']);
-  const suspicious = [spf, dkim, dmarc].some((v) => bad.has(v)) || /\b(quarantine|reject)\b/i.test(s);
+  // 只认「认证结果本身」的取值，不再拿裸词去扫原文。
+  // 2026-11-10 实测：微软/招行这类邮件写的是
+  //   dmarc=pass (p=REJECT sp=REJECT dis=NONE)
+  // 这里的 p=REJECT 是**发件方声明的处理策略**，不是这封信被判拒。
+  // 老实现用 /\b(quarantine|reject)\b/i 扫整行，于是每封正常邮件都被判可疑，
+  // 正文末尾那行「⚠ 信头校验未通过：SPF 通过 · DKIM 通过 · DMARC 通过」
+  // 三项全绿却写着未通过，怎么改文案都消不掉——根因在这里。
+  const bad = new Set(['fail', 'softfail', 'permerror', 'temperror', 'quarantine', 'reject']);
+  const suspicious = [spf, dkim, dmarc].some((v) => bad.has(v));
   return {
     suspicious,
     brief: parts.join(' · ') || '无法解析',
