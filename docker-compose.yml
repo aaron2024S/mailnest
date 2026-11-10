@@ -15,5 +15,10 @@ services:
       PORT: "${PORT:-8006}"
       # 走 HTTPS（反向代理）后改成 true，浏览器才会带 Secure cookie
       MAILNEST_SECURE_COOKIES: "false"
+      # 自然语言时间范围（今天/上个月/去年10月）按哪个时区解释。
+      # 用标准 TZ，镜像里默认就是 Asia/Shanghai，这里写出来是方便直接改。
+      # 刻意不用 ${TZ:-...} 继承宿主机：部分 NAS 把 TZ 设成 ":/etc/localtime"
+      # 这类 POSIX 写法，不是合法时区名，继承过来会让容器启动直接失败。
+      TZ: "Asia/Shanghai"
     volumes:
       - ./data:/app/data

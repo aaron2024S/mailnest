@@ -105,7 +105,19 @@ npm ci
 npm start          # 默认 8006 端口，数据在 ./data
 ```
 
-环境变量：`PORT`（默认 8006）、`HOST`、`MAILNEST_DATA`（数据目录，默认 `./data`）、`MAILNEST_SECURE_COOKIES`。
+环境变量：`PORT`（默认 8006）、`HOST`、`MAILNEST_DATA`（数据目录，默认 `./data`）、`MAILNEST_SECURE_COOKIES`、
+`TZ`。
+
+`TZ` 决定「今天」「上个月」「去年 10 月」这类说法按哪个时区折算成区间，用的是标准时区变量。
+容器默认是 UTC，所以东八区用户问「上个月」会从北京时间 1 号早上 8 点算起，1 号凌晨到的信
+会被算进上个月。镜像里已设成 `Asia/Shanghai`，用其它时区就在 compose 里改成
+`TZ: "Europe/London"` 这样。
+
+时区名必须是 IANA 名称（`Asia/Shanghai`、`Asia/Tokyo`、`Europe/London`、`America/New_York`）。
+写错会让程序启动失败并打印错误 —— 这是故意的：Node 遇到不认识的时区名不会报错，只会
+悄悄按系统默认（容器里就是 UTC）继续跑，时间边界算错却一切看起来正常，比启动失败难查得多。
+
+邮件本身的时间一直按 UTC 存储和比较，改动只影响「一句话对应哪段时间」。
 
 > 换端口：compose 目录下放 `.env` 写 `PORT=9000`，或 `PORT=9000 docker compose up -d`。
 

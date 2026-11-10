@@ -63,6 +63,9 @@ const inboxOUT = [
   m(202, ['某人', 'someone@cnonas.example'], '1.9 赵梦雨', '2025-10-14T02:00:00.000Z', READ),
   // 上个月（2026-10）的 Steam 通知
   m(203, ['Steam Support', 'noreply@steam.example'], '感谢您在 Steam 上的购买！', '2026-10-02T02:00:00.000Z', READ),
+  // 贴着月份边界的信：UTC 还是 9-30 23:00，北京时间已经是 10-01 07:00。
+  // 「上个月」按本地时区算就该包含它；按 UTC 算会漏掉。
+  m(204, ['某人', 'night@cnonas.example'], '深夜到的信', '2026-09-30T23:00:00.000Z', READ),
 ];
 // Steam 的自定义夹：问「Steam 给我发过邮件吗」时必须一起算上
 const steamFolder = [
@@ -158,9 +161,12 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
 
 {
   const r = await callList({ since: '上个月' });
-  // 3 封：收件箱 2 封 + Steam 自定义夹 1 封。只查收件箱会答成 2 封。
-  ok('since=上个月 = 整月区间且跨全部文件夹（3 封），不把本月的算进来',
-    !r.error && r.json.total === 3 && (r.json.messages || []).every((x) => String(x.date).slice(0, 7) === '2026-10'),
+  // 4 封：收件箱 3 封（含北京 10-01 07:00 那封，UTC 是 9-30）+ Steam 自定义夹 1 封。
+  // 只查收件箱会答成 3 封；按 UTC 算边界会漏掉跨月那封。
+  const { fmtZoned } = await import('../server/tz.js');
+  ok('since=上个月 = 整月区间且跨全部文件夹（4 封），不把本月的算进来',
+    !r.error && r.json.total === 4
+    && (r.json.messages || []).every((x) => fmtZoned(x.date).slice(0, 7) === '2026-10'),
     JSON.stringify((r.json?.messages || []).map((x) => x.date)));
 }
 
@@ -251,6 +257,54 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
   }
   ok('翻页不重复（3 页 × 2 条，实际 5 封，去重后仍是 5）',
     new Set(seen).size === 5 && seen.length === 5, `total=${total} got=${seen.length} uniq=${new Set(seen).size}`);
+}
+
+// ---------- 时区：区间边界必须落在用户时区 ----------
+// 场景：2026-09-30T23:00Z 这封信，北京时间是 10-01 07:00（属于 10 月），
+// UTC 还是 9-30（属于 9 月）。同一条问句，两种时区口径必须给出不同结果，
+// 而且「用户口径」那个才是对的。
+{
+  const prev = process.env.TZ;
+  process.env.TZ = 'Asia/Shanghai';
+  const cst = await callList({ since: '上个月', pageSize: 50 });
+  process.env.TZ = 'UTC';
+  const utc = await callList({ since: '上个月', pageSize: 50 });
+  process.env.TZ = prev || 'Asia/Shanghai';
+
+  const has = (r) => (r.json?.messages || []).some((x) => x.subject === '深夜到的信');
+  ok('北京 10-01 早上 7 点到的信算 10 月（UTC 口径会漏成 9 月）',
+    !cst.error && !utc.error && has(cst) && !has(utc),
+    `cst=${cst.json?.total} utc=${utc.json?.total}`);
+  ok('两种口径差在这 1 封上',
+    (cst.json?.total || 0) === (utc.json?.total || 0) + 1,
+    `${cst.json?.total} vs ${utc.json?.total}`);
+  ok('区间说明按本地日期写，不是截 UTC 前 10 位',
+    /2026-10-01 至 2026-11-01/.test(String(cst.json?.range || '')), String(cst.json?.range));
+}
+
+// ---------- 时区配置本身 ----------
+// 用标准 TZ，不用自造变量；写错必须当场失败而不是悄悄按 UTC 算。
+{
+  const { tzName, assertTz } = await import('../server/tz.js');
+  const prev = process.env.TZ;
+
+  delete process.env.TZ;
+  ok('不设 TZ 时默认 Asia/Shanghai', tzName() === 'Asia/Shanghai', String(tzName()));
+
+  process.env.TZ = 'Europe/London';
+  ok('TZ 可以覆盖默认值', tzName() === 'Europe/London', String(tzName()));
+
+  process.env.TZ = '';
+  ok('TZ 设成空串时退回默认值（不是空字符串当时区）',
+    tzName() === 'Asia/Shanghai', JSON.stringify(tzName()));
+
+  process.env.TZ = 'Asia/Shanghia';   // 少一个 n，最常见的拼错
+  let msg = '';
+  try { assertTz(); } catch (e) { msg = String(e.message); }
+  ok('时区名拼错时 assertTz 明确报错（Node 自己只会静默按系统默认）',
+    /时区名不合法/.test(msg), msg.slice(0, 40));
+
+  if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev;
 }
 
 // ---------- 不带条件时保持原行为 ----------

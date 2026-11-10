@@ -13,6 +13,7 @@ import {
 import * as cache from './cache.js';
 import * as idle from './idle.js';
 import { htmlToText, bodyTextOf } from './htmltext.js';
+import { zonedMidnight, zonedNow, fmtZoned, tzName } from './tz.js';
 
 const BODY_LIMIT = 8000;        // 正文字符上限：再长会一次性灌满模型上下文
 const ATT_TEXT_LIMIT = 20000;   // 附件文本上限
@@ -60,8 +61,11 @@ const uidList = () => z.preprocess((v) => {
 // 关键区别：有些说法本身就是**一段**（上个月、2025年10月、去年），必须同时给出
 // 两端边界；只给 since 会让「去年 10 月」变成「2025-10 之后的所有邮件」，答案全错。
 // 所以这里返回 { since, before }，而不是单个时间点。
-function monthStart(y, m) {          // m 从 0 起，可以是负数/越界，Date.UTC 会自己进位
-  return new Date(Date.UTC(y, m, 1)).toISOString();
+// 这些边界都要落在用户所在时区（见 tz.js）。用 Date.UTC 直接造的话，
+// 东八区用户问「上个月」会拿到北京时间 1 号早上 8 点作起点，
+// 1 号 0-8 点收到的信会被算进上个月。
+function monthStart(y, m) {          // m 从 0 起，可以是负数/越界，内部会自己进位
+  return zonedMidnight(y, m, 1).toISOString();
 }
 
 function parseSpan(v, label) {
@@ -69,8 +73,8 @@ function parseSpan(v, label) {
   const s = String(v).trim();
   if (!s) return null;
   const now = new Date();
-  const Y = now.getUTCFullYear();
-  const M = now.getUTCMonth();
+  // 「今天」「今年」「上个月」都按用户时区算，不是 UTC
+  const { y: Y, m: M, d: D } = zonedNow();
 
   // 单月 / 单年 —— 闭区间
   const mCn = /^(去年|前年|今年|明年)?\s*(\d{1,2})\s*月(?:份)?$/.exec(s);
@@ -117,8 +121,7 @@ function parseSpan(v, label) {
     return { since: new Date(now.getTime() - 7 * 86400000).toISOString(), before: null };
   }
   if (s === '今天' || s === '今日') {
-    const t0 = new Date(Date.UTC(Y, M, now.getUTCDate())).toISOString();
-    return { since: t0, before: null };
+    return { since: zonedMidnight(Y, M, D).toISOString(), before: null };
   }
 
   // 具体日期：只当起点用（「2026-10-01 之后」），不做闭区间——
@@ -146,7 +149,9 @@ function resolveRange(since, before) {
 
 // 把解析出的边界写回给人看的一句话，让模型回答时能说明「查的是哪段」
 function describeRange(sinceIso, beforeIso) {
-  const d = (iso) => (iso ? String(iso).slice(0, 10) : null);
+  // 说的是用户眼里的日期，所以按本地时区取年月日；
+  // 直接截 ISO 前 10 位拿到的是 UTC 日期，东八区会整体差一天。
+  const d = (iso) => (iso ? fmtZoned(iso) : null);
   if (sinceIso && beforeIso) return `${d(sinceIso)} 至 ${d(beforeIso)}（不含右端）`;
   if (sinceIso) return `${d(sinceIso)} 之后`;
   if (beforeIso) return `${d(beforeIso)} 之前`;

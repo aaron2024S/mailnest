@@ -506,18 +506,19 @@ ok('未登录不能列出令牌', r.status === 401, String(r.status));
 // 之后的全部邮件也算进来；问「上个月」同样会带上本月。这些说法本身就是区间。
 {
   const { parseSpan, resolveRange } = await import('../server/mcp-tools.js');
-  const now = new Date();
-  const Y = now.getUTCFullYear();
-  const M = now.getUTCMonth();
-  const iso = (y, m) => new Date(Date.UTC(y, m, 1)).toISOString();
+  const { zonedMidnight, zonedNow } = await import('../server/tz.js');
+  const { y: Y, m: M } = zonedNow();
+  // 边界按用户时区算，不是 UTC：期望值也用同一个函数生成，
+  // 这样在 UTC 的容器里跑和在东八区的开发机上跑结果一致。
+  const iso = (y, m) => zonedMidnight(y, m, 1).toISOString();
 
   const last = parseSpan('上个月', 'since');
-  ok('上个月 → 上月初到本月初',
+  ok('上个月 → 上月初到本月初（本地时区）',
     last.since === iso(Y, M - 1) && last.before === iso(Y, M), JSON.stringify(last));
 
   const ym = parseSpan('2025年10月', 'since');
   ok('「2025年10月」→ 整月区间',
-    ym.since === '2025-10-01T00:00:00.000Z' && ym.before === '2025-11-01T00:00:00.000Z', JSON.stringify(ym));
+    ym.since === iso(2025, 9) && ym.before === iso(2025, 10), JSON.stringify(ym));
 
   const dash = parseSpan('2025-10', 'since');
   ok('「2025-10」同上', dash.since === ym.since && dash.before === ym.before, JSON.stringify(dash));

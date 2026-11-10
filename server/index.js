@@ -24,6 +24,7 @@ import * as cache from './cache.js';
 import * as idle from './idle.js';
 import * as prefetch from './prefetch.js';
 import * as attachments from './attachments.js';
+import { assertTz, tzName } from './tz.js';
 
 // 版本号唯一来源：package.json（登录页、客户端 ID 等处都从这里取，避免多处手改漏掉）
 const APP_VERSION = (() => {
@@ -990,8 +991,17 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   fail(res, err);
 });
 
+// TZ 写错时 Node 不报错，会静默沿用系统默认（在 alpine 上就是 UTC），
+// 于是「上个月」算错却一切正常。宁可启动失败，也别让错误的时间边界悄悄上线。
+try {
+  assertTz();
+} catch (e) {
+  console.error(`[mailnest] ${e.message}`);
+  process.exit(1);
+}
+
 const server = app.listen(PORT, HOST, () => {
-  console.log(`[mailnest] listening on http://${HOST}:${PORT}  data=${process.env.MAILNEST_DATA || 'data/'}`);
+  console.log(`[mailnest] listening on http://${HOST}:${PORT}  data=${process.env.MAILNEST_DATA || 'data/'}  tz=${tzName()}`);
   // 重启后自动接上监听与正文预热：session cookie 有 14 天，用户不会因为重启而「重新登录」，
   // 不主动恢复的话 IDLE 要等下一次打开页面才启动，后台缓存也就一直不跑
   setTimeout(() => {
