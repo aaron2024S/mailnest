@@ -735,10 +735,23 @@ export function registerTools(server, ctx) {
         per,
       );
       if (!shown.length) {
+        // 「全失败」和「确实没有」是两件事，不能都说成「没有」：
+        // 前者要让模型知道可以重试，后者要让它敢确定地回答「没有」。
+        // 而且这两种都不该退回纯文本——同一个工具，有结果给 JSON、没结果给文本，
+        // 调用方按 JSON 解析就会直接崩（2026-11-10 线上实测）。
         const what = unreadOnly ? '未读邮件' : '邮件';
-        return text(failed.length
-          ? `没有查到${what}（部分账号查询失败：${failed.join('；')}）`
-          : `所有账号都没有${what}`);
+        if (failed.length === all.length) {
+          throw new Error(`没有查到${what}：${failed.length} 个账号都查询失败（${failed.join('；')}）。`
+            + '这不代表没有，等邮箱恢复后再试一次。');
+        }
+        return json({
+          total: 0,
+          messages: [],
+          hint: failed.length
+            ? `没有查到${what}（有 ${failed.length} 个账号查询失败：${failed.join('；')}），这不代表没有`
+            : `所有账号都没有${what}`,
+          ...(failed.length ? { failedAccounts: failed } : {}),
+        });
       }
       // 到这个位置说明没有任何时间/发件人条件（有的话上面已经走缓存那条路）
       const notes = [];
@@ -824,9 +837,12 @@ export function registerTools(server, ctx) {
       const shown = hits.slice(0, cap);
 
       if (!shown.length) {
-        if (failed.length) {
-          return text(`这次没搜到「${q}」：${failed.length} 个账号查询失败（${failed.join('；')}）。`
-            + '这不代表没有——等那个邮箱恢复后再搜一次。');
+        // 无一命中时也要给结构化结果：模型拿 total:0 才敢确定地说「没有」，
+        // 也给不出「到底搜了几个词」这种模糊回答。查询失败是另一回事——那是
+        // 「没查成」，必须走错误通道，否则会被当成「确实没有」（见下）。
+        if (failed.length === targets.length) {
+          throw new Error(`这次没搜到「${q}」：${failed.length} 个账号都查询失败（${failed.join('；')}）。`
+            + '这不代表没有这些邮件——等那个邮箱恢复后再搜一次。');
         }
         const hint = indexing
           ? '部分邮箱正在建立搜索索引，等几秒再搜一次可能会有结果。'
@@ -838,7 +854,13 @@ export function registerTools(server, ctx) {
           unreadOnly ? '只要未读' : null,
           describeRange(sinceIso, beforeIso) ? `时间：${describeRange(sinceIso, beforeIso)}` : null,
         ].filter(Boolean).join('，');
-        return text(`没搜到和「${q}」相关的邮件${scope ? `（${scope}）` : ''}。${hint}`);
+        return json({
+          query: q,
+          total: 0,
+          messages: [],
+          hint: `没搜到和「${q}」相关的邮件${scope ? `（${scope}）` : ''}。${hint}`,
+          ...(failed.length ? { failedAccounts: failed } : {}),
+        });
       }
       // 结构化返回：uid / 来源账号都在字段里，模型接「看第 N 封」时直接取用，
       // 文本层不再出现 uid=xxx 这类用户看不懂的东西

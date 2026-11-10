@@ -283,8 +283,17 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
 {
   const r = await tools.search_messages({ query: '购买', from: '华为' });
   const t = (r.content || []).map((c) => c.text).join('');
+  // 空结果也必须是 JSON：同一个工具「有结果给 JSON、没结果给纯文本」的话，
+  // 调用方（网关、模型）按 JSON 解析会直接崩。2026-11-10 线上实测踩到。
+  let j = null;
+  try { j = JSON.parse(t); } catch { /* 留给下面断言报错 */ }
   ok('search + from 无交集时明确说没搜到（不是返回全量）',
     t.includes('没搜到'), t.slice(0, 80));
+  ok('空结果仍是可解析的 JSON（不是一段纯文本）',
+    j !== null, t.slice(0, 80));
+  ok('空结果给 total:0 + messages:[]，模型才敢确定地说「没有」',
+    j && j.total === 0 && Array.isArray(j.messages) && j.messages.length === 0,
+    JSON.stringify(j && { total: j.total, n: (j.messages || []).length }));
 }
 
 // ---------- 分页不能重复也不能漏 ----------
