@@ -689,4 +689,27 @@ function sseCtx(over = {}) {
   ok('watch.selected 清理尺寸观察器', typeof captured.watch?.selected === 'function');
 }
 
+// 27) 回复引文从 HTML 版转纯文本：text/plain 备选版被发件方硬折行会把长 URL 拆断
+//     （Steam 收据邮件实测），引文必须跟阅读区看到的 HTML 版对得上
+{
+  const m = {
+    html: '<style>p{color:red}</style><!--[if mso]><p>x</p><![endif]-->'
+      + '<p>zjjncu，您好！</p>'
+      + '<p>感谢您近期在 Steam 上的交易：要<a href="https://store.steampowered.com/email/PurchaseReceipt?sparams=AAA-BBB-CCC">查看详情</a>。</p>'
+      + '<table><tr><td>订单号</td><td>#123456</td></tr><tr><td>日期</td><td>10月29日</td></tr></table>',
+    text: 'broken',
+  };
+  const q = M.quoteBody(m);
+  ok('引文不含 <style> 内容与条件注释', !q.includes('color:red') && !q.includes('mso'));
+  ok('长 URL 保持完整一行（不被折断）', q.includes('https://store.steampowered.com/email/PurchaseReceipt?sparams=AAA-BBB-CCC'), q);
+  ok('链接文本保留且 URL 补在后面', q.includes('查看详情 https://store.steampowered.com'), q);
+  ok('块级标签转换行（段落分开）', q.includes('zjjncu，您好！\n'), q);
+  ok('表格单元格并排成一行', q.includes('订单号  #123456'), q);
+  ok('无 HTML 时回退 text 原文', M.quoteBody({ text: '第一行\n第二行' }) === '第一行\n第二行');
+  ok('常见实体解码', M.quoteBody({ html: '<p>A&amp;B&nbsp;C&lt;D</p>' }) === 'A&B C<D');
+  ok('mailto 链接不补 href', M.quoteBody({ html: '<p>发<a href="mailto:a@b.c">邮件</a>给我</p>' }) === '发邮件给我');
+  ok('连续空行压成一个', !/\n{3,}/.test(M.quoteBody({ html: '<p>a</p><div></div><div></div><p>b</p>' })));
+  ok('回复引文按行加 > 前缀', M.quoteLines('a\nb') === '> a\n> b');
+}
+
 console.log(`\n全部通过：${pass} 项断言`);

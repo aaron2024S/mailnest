@@ -1204,6 +1204,33 @@ const app = createApp({
       this.compose.draftId = opts.draftId || null;
       this.compose.error = '';
     },
+    // 引文源文本：优先从（净化后的）HTML 版转纯文本。text/plain 备选版经常被发件方
+    // 硬折行 —— Steam 收据邮件把长 URL 拆成十几行，直接引用出去链接是断的、排版是碎的，
+    // 跟阅读区看到的 HTML 版也对不上。转换规则：块级标签转换行、表格单元格并排、
+    // 链接在文本后补 href（URL 保持完整一行）、实体解码、连续空行压成一个。
+    quoteBody(m) {
+      if (!m.html) return (m.text || '').trim();
+      const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: ' ', mdash: '—', ndash: '–', hellip: '…' };
+      return m.html
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/<a\s[^>]*?href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (w, href, inner) => {
+          const t = inner.replace(/<[^>]+>/g, '').trim();
+          if (!href || /^(#|mailto:)/i.test(href) || !t || t === href || t.includes(href)) return t;
+          return t + ' ' + href;
+        })
+        .replace(/<br[^>]*>/gi, '\n')
+        .replace(/<\/(p|div|tr|h[1-6]|li|blockquote|pre|table)>/gi, '\n')
+        .replace(/<li[^>]*>/gi, '· ')
+        .replace(/<\/t[dh]>\s*<t[dh][^>]*>/gi, '  ')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&(amp|lt|gt|quot|#39|nbsp|mdash|ndash|hellip);/g, (w, n) => ENT[n] || w)
+        .replace(/&#(\d+);/g, (w, n) => String.fromCodePoint(Number(n)))
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    },
+    quoteLines(t) { return t.split('\n').map((l) => '> ' + l).join('\n').slice(0, 4000); },
     reply(m, mode) {
       const acc = this.accounts.find((a) => a.id === m.accountId);
       if (mode === 'reply') {
@@ -1211,14 +1238,14 @@ const app = createApp({
           mode, accountId: m.accountId,
           to: m.from?.address || '',
           subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
-          text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${(m.text || '').split('\n').map((l) => '> ' + l).join('\n').slice(0, 4000)}`,
+          text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${this.quoteLines(this.quoteBody(m))}`,
           replyTo: m,
         });
       } else {
         this.openCompose({
           mode, accountId: acc ? acc.id : this.accounts[0]?.id,
           subject: m.subject.startsWith('Fwd:') ? m.subject : `Fwd: ${m.subject}`,
-          text: `\n\n------------------\n转发自 ${m.from?.address || ''}（${this.fullDate(m.date)}）：\n\n${(m.text || '').slice(0, 4000)}`,
+          text: `\n\n------------------\n转发自 ${m.from?.address || ''}（${this.fullDate(m.date)}）：\n\n${this.quoteBody(m).slice(0, 4000)}`,
         });
       }
       this.readerOpen = false;
@@ -1240,7 +1267,7 @@ const app = createApp({
         to: uniq[0],
         cc: uniq.slice(1).join(', '),
         subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
-        text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${(m.text || '').split('\n').map((l) => '> ' + l).join('\n').slice(0, 4000)}`,
+        text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${this.quoteLines(this.quoteBody(m))}`,
         replyTo: m,
       });
       this.readerOpen = false;
