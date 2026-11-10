@@ -1008,7 +1008,15 @@ export function registerTools(server, ctx) {
     run: async ({ account, folder, uid: msgUid, format }) => {
       const acc = resolveAccount(uid, account);
       const dir = normFolder(folder);
-      const m = await getMessage(uid, acc.id, dir, String(msgUid));
+      const m = await getMessage(uid, acc.id, dir, String(msgUid)).catch((e) => {
+        // 404 基本只有一个原因：uid 拿错了。uid 只在「同一个账号的同一个文件夹」内唯一，
+        // 把列表序号当 uid、或者换了账号/文件夹照抄旧的 uid，都会落到这里。
+        // 这句话是写给模型看的 —— 它得知道下一步该**重新查 uid**，而不是换个数字再猜一次
+        // （2026-11-10 线上：模型连猜几个 uid，五轮全撞 404，最后什么都没读出来）。
+        if (e?.status !== 404) throw e;
+        throw new Error(`在「${dir}」里没找到这封邮件。uid 只在同一个邮箱的同一个文件夹内有效，`
+          + '多半是位置对不上：先用 list_messages 重新查一次，再照返回的 uid 读。');
+      });
       const wantHtml = String(format || '').toLowerCase() === 'html';
       let body;
       if (wantHtml) {
