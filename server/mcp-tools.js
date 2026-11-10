@@ -156,6 +156,29 @@ function resolveRange(since, before, tz = tzName()) {
   return { sinceIso, beforeIso, ranged: !!(sinceIso || beforeIso) };
 }
 
+// 跨文件夹统计只算「收到的信」：已发送 / 草稿 / 垃圾箱 / 垃圾邮件里的内容
+// 不是用户问「上个月有哪些邮件」时想看的。
+// 实测不排除的话，2026-10 会从 4 封变成 9 封 —— 多出来的 5 封是自己发给自己的
+// 告警邮件（在「已发送」里），用户完全不会把它们当成「收到的邮件」。
+const NON_INBOUND_SPECIAL = new Set(['\\Sent', '\\Drafts', '\\Trash', '\\Junk']);
+// 国内服务商经常不返回 SPECIAL-USE，只能靠夹名兜底
+const NON_INBOUND_NAME = /(已发送|发件箱|草稿|已删除|废纸篓|垃圾邮件|\b(sent|drafts?|trash|deleted|junk|spam)\b)/i;
+
+function nonInboundFolders(uid, accountIds) {
+  const out = new Set();
+  for (const id of accountIds) {
+    for (const f of cache.getFolders(uid, id) || []) {
+      if (!f || !f.path) continue;
+      if (f.special) {
+        if (NON_INBOUND_SPECIAL.has(f.special)) out.add(f.path);
+      } else if (NON_INBOUND_NAME.test(`${f.name || ''} ${f.path}`)) {
+        out.add(f.path);
+      }
+    }
+  }
+  return [...out];
+}
+
 // 把解析出的边界写回给人看的一句话，让模型回答时能说明「查的是哪段」
 function describeRange(sinceIso, beforeIso, tz = tzName()) {
   // 说的是用户眼里的日期，所以按同一个时区取年月日；
@@ -359,6 +382,30 @@ function normFolder(f) {
     草稿: 'Drafts', 草稿箱: 'Drafts', drafts: 'Drafts',
   };
   return ALIAS[s.toLowerCase()] || s;
+}
+
+// 把「已发送」这类说法解析成该账号真实的 IMAP 路径。
+// normFolder 只能给出一个假定的标准名（'Sent'），而真实路径可能是中文的
+// 「已发送」（QQ/163 就是这样），也可能是 'Sent Items'（outlook）——
+// 直接拿 'Sent' 去查，永远查不到这个文件夹。
+const SPECIAL_OF = {
+  INBOX: '\\Inbox', SENT: '\\Sent', TRASH: '\\Trash', JUNK: '\\Junk', DRAFTS: '\\Drafts',
+};
+function resolveFolderPath(uid, accountId, input) {
+  const raw = String(input || '').trim();
+  if (!raw) return 'INBOX';
+  const want = normFolder(raw);
+  const list = cache.getFolders(uid, accountId) || [];
+  if (!list.length) return want;                       // 还没缓存过文件夹清单，只能照原样试
+  if (list.some((f) => f.path === raw)) return raw;    // 用户直接给了真实路径
+  if (list.some((f) => f.path === want)) return want;
+  const sp = SPECIAL_OF[want.toUpperCase()];
+  if (sp) {
+    const hit = list.find((f) => f.special === sp);
+    if (hit) return hit.path;
+  }
+  const byName = list.find((f) => String(f.name || '').toLowerCase() === raw.toLowerCase());
+  return byName ? byName.path : want;
 }
 
 // 发信附件参数：content 必须是 base64（agent 读本地文件后自己编码）。
@@ -604,9 +651,12 @@ export function registerTools(server, ctx) {
         //   ②「上个月有哪些邮件」——2026-10 一共 4 封，其中 2 封在 Steam 夹里，只查收件箱会漏一半。
         // 早先只给 ① 开了跨夹，② 仍然只查收件箱，用户看到的就是「上个月只有 2 封」。
         const crossFolder = !folder && (!!from || range.ranged);
-        const scopeDir = crossFolder ? null : dir;
-        const ids = targets.filter((a) => crossFolder || cache.folderSynced(uid, a.id, dir)).map((a) => a.id);
-        const notSynced = crossFolder ? [] : targets.filter((a) => !cache.folderSynced(uid, a.id, dir));
+        // 「已发送」在不同服务商的真实路径不一样（QQ 是「已发送」，outlook 是 Sent Items），
+        // 必须按账号各自解析；直接拿 normFolder 的 'Sent' 去查会一个都匹配不上。
+        const dirOf = new Map(targets.map((a) => [a.id, folder ? resolveFolderPath(uid, a.id, folder) : dir]));
+        const ids = targets.filter((a) => crossFolder || cache.folderSynced(uid, a.id, dirOf.get(a.id))).map((a) => a.id);
+        const notSynced = crossFolder ? [] : targets.filter((a) => !cache.folderSynced(uid, a.id, dirOf.get(a.id)));
+        const scopeDir = crossFolder ? null : dirOf.get(ids[0]);
         // 跨夹统计只覆盖「已经同步到本地」的夹。不说出来的话，偏小的 total 会被当成真实总数。
         const partialDirs = crossFolder
           ? targets
@@ -618,16 +668,22 @@ export function registerTools(server, ctx) {
             + '先用不带条件的 list_messages 打开一次让它同步，或稍等几秒再试');
         }
         const r = cache.listRange(uid, ids, {
-          folder: scopeDir, since: sinceIso, before: beforeIso, from: from || null,
+          folder: scopeDir,
+          // 跨夹时把「自己发出去的」那些夹排掉，否则「上个月有哪些邮件」会把
+          // 已发送里的告警信一起算进来，数字偏大且看不出原因
+          excludeFolders: crossFolder ? nonInboundFolders(uid, ids) : null,
+          since: sinceIso, before: beforeIso, from: from || null,
           unreadOnly: !!unreadOnly, page: pg, pageSize: per,
         });
         const byId = new Map(targets.map((a) => [a.id, a]));
         // 跨夹时每条都要带 folder，否则「回第 2 封看正文」定不到位置
-        const items = r.messages.map((m) => toItem(m, byId.get(m.account_id) || null, crossFolder ? m.folder : dir));
+        const items = r.messages.map((m) => toItem(m, byId.get(m.account_id) || null, crossFolder ? m.folder : scopeDir));
         const label = describeRange(sinceIso, beforeIso);
         return json({
           account: account ? { id: targets[0].id, email: targets[0].email } : undefined,
-          folder: crossFolder ? '（全部文件夹）' : dir,
+          folder: crossFolder ? '（全部文件夹）' : scopeDir,
+          // 说清楚统计口径，免得模型把「自己发出去的」也算进「收到的邮件」
+          ...(crossFolder ? { scope: '收到的邮件（不含已发送、草稿、垃圾箱）' } : {}),
           // 这里的 total 是「条件命中的总数」，不是文件夹总数——问「上月几封」照它答
           total: r.total,
           page: r.page,
@@ -650,14 +706,16 @@ export function registerTools(server, ctx) {
       // 指定账号（或本来就只有一个）：沿用原来的分页语义
       if (account || all.length === 1) {
         const acc = account ? resolveAccount(uid, account) : all[0];
-        const d = await listMessages(uid, acc.id, dir, { page: pg, pageSize: per, unreadOnly: !!unreadOnly });
+        // 实时拉取也要用真实路径：「已发送」在 QQ 是中文路径，normFolder 给的 'Sent' 查不到
+        const accDir = resolveFolderPath(uid, acc.id, dir);
+        const d = await listMessages(uid, acc.id, accDir, { page: pg, pageSize: per, unreadOnly: !!unreadOnly });
         return json({
           account: { id: acc.id, email: acc.email },
-          folder: dir,
+          folder: accDir,
           total: d.total,
           page: d.page,
           pageSize: d.pageSize,
-          messages: d.messages.map((m) => toItem(m, null, dir)),
+          messages: d.messages.map((m) => toItem(m, null, accDir)),
         });
       }
 
@@ -670,8 +728,9 @@ export function registerTools(server, ctx) {
       const { failed, total, perAccount, shown } = await collectAcrossAccounts(
         all,
         async (acc) => {
-          const d = await listMessages(uid, acc.id, dir, { page: 1, pageSize: per, unreadOnly: !!unreadOnly });
-          return { total: d.total, messages: d.messages.map((m) => toItem(m, acc, dir)) };
+          const accDir = resolveFolderPath(uid, acc.id, dir);
+          const d = await listMessages(uid, acc.id, accDir, { page: 1, pageSize: per, unreadOnly: !!unreadOnly });
+          return { total: d.total, messages: d.messages.map((m) => toItem(m, acc, accDir)) };
         },
         per,
       );
@@ -738,16 +797,18 @@ export function registerTools(server, ctx) {
       let indexing = false;
       const failed = [];
       for (const acc of targets) {
-        if (dir) {
+        // 每个账号的真实路径可能不同（QQ 叫「已发送」，outlook 叫 Sent Items）
+        const accDir = dir ? resolveFolderPath(uid, acc.id, dir) : null;
+        if (accDir) {
           const folders = await listFolders(uid, acc.id);
-          if (!folders.some((f) => f.path === dir)) {
-            throw new Error(`「${acc.email}」没有名为「${dir}」的文件夹，可用：${folders.slice(0, 12).map((f) => f.path).join('、')}`);
+          if (!folders.some((f) => f.path === accDir)) {
+            throw new Error(`「${acc.email}」没有名为「${accDir}」的文件夹，可用：${folders.slice(0, 12).map((f) => f.path).join('、')}`);
           }
         }
         try {
-          if (await ensureIndexed(uid, acc, dir) === 'partial') indexing = true;
+          if (await ensureIndexed(uid, acc, accDir) === 'partial') indexing = true;
           for (const m of cache.searchMessages(uid, acc.id, q, {
-            folder: dir, limit: cap, since: sinceIso, before: beforeIso,
+            folder: accDir, limit: cap, since: sinceIso, before: beforeIso,
             from: from || null, unreadOnly: !!unreadOnly,
           })) {
             hits.push({ acc, ...m });

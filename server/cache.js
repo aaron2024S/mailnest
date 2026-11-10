@@ -446,7 +446,7 @@ export function folderCounts(uid) {
 // 30 封里，翻页才能碰到，而调用方只请求第 1 页。缓存里本来就有全部信封，条件就该
 // 下推到 SQL：过滤在前、分页在后，total 也才是范围内真实数量。
 export function listRange(uid, accountIds, {
-  folder = null, since = null, before = null, from = null,
+  folder = null, excludeFolders = null, since = null, before = null, from = null,
   unreadOnly = false, page = 1, pageSize = 50,
 } = {}) {
   const db = getDb(uid);
@@ -458,6 +458,12 @@ export function listRange(uid, accountIds, {
     args.push(...accountIds);
   }
   if (folder) { where.push('folder = ?'); args.push(folder); }
+  // 跨文件夹统计要能排除「已发送/草稿/垃圾箱」这类夹：
+  // 问「上个月有哪些邮件」时，自己发出去的告警信不该算进「收到的邮件」。
+  if (Array.isArray(excludeFolders) && excludeFolders.length) {
+    where.push(`folder NOT IN (${excludeFolders.map(() => '?').join(',')})`);
+    args.push(...excludeFolders);
+  }
   // 时间直接比 ISO 字符串：信封里存的就是 toISOString()，字典序等价于时间序
   if (since) { where.push(`COALESCE(json_extract(envelope, '$.date'), '') >= ?`); args.push(since); }
   if (before) { where.push(`COALESCE(json_extract(envelope, '$.date'), '') < ?`); args.push(before); }

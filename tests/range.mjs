@@ -83,15 +83,40 @@ const trainFolder = [
   m(401, ['12306', '12306@rails.example'], '购票通知', '2026-04-03T02:00:00.000Z', READ),
   m(402, ['12306', '12306@rails.example'], '购票通知', '2026-04-20T02:00:00.000Z', READ),
 ];
+// 「已发送」：自己发出去的告警信。问「上个月有哪些邮件」时不该算进来——
+// 线上实测就是被这类信把 4 封撑成了 9 封。
+const sentQQ = [
+  m(501, ['我', 'user@example.com'], 'BMC Warning', '2026-10-23T07:16:00.000Z', READ),
+  m(502, ['我', 'user@example.com'], 'BMC Warning', '2026-10-23T07:04:00.000Z', READ),
+];
+// 有的服务商不返回 SPECIAL-USE，只能靠夹名认
+const sentOUT = [
+  m(601, ['我', 'work@example.net'], 'Re: 合同', '2026-10-11T02:00:00.000Z', READ),
+];
 
 cache.upsertEnvelopes(uid, QQ.id, 'INBOX', inboxQQ, 111);
 cache.upsertEnvelopes(uid, OUT.id, 'INBOX', inboxOUT, 222);
 cache.upsertEnvelopes(uid, OUT.id, 'Steam', steamFolder, 333);
 cache.upsertEnvelopes(uid, QQ.id, '12306订票', trainFolder, 444);
+cache.upsertEnvelopes(uid, QQ.id, '已发送', sentQQ, 555);
+cache.upsertEnvelopes(uid, OUT.id, 'Sent Items', sentOUT, 666);
 // 标记同步完成，否则带条件的查询会以「还没同步」为由拒绝
-for (const [acc, dir] of [[QQ, 'INBOX'], [OUT, 'INBOX'], [OUT, 'Steam'], [QQ, '12306订票']]) {
+for (const [acc, dir] of [[QQ, 'INBOX'], [OUT, 'INBOX'], [OUT, 'Steam'], [QQ, '12306订票'],
+  [QQ, '已发送'], [OUT, 'Sent Items']]) {
   cache.touchFolder(uid, acc.id, dir);
 }
+// IMAP LIST 的结果（含 \\Sent 这类特殊用途标记）。跨夹统计要靠它认出「已发送」。
+cache.putFolders(uid, QQ.id, [
+  { path: 'INBOX', name: '收件箱', delim: '/', special: null, subscribed: true },
+  { path: '12306订票', name: '12306订票', delim: '/', special: null, subscribed: true },
+  { path: '已发送', name: '已发送', delim: '/', special: '\\Sent', subscribed: true },
+]);
+cache.putFolders(uid, OUT.id, [
+  { path: 'INBOX', name: '收件箱', delim: '/', special: null, subscribed: true },
+  { path: 'Steam', name: 'Steam', delim: '/', special: null, subscribed: true },
+  // 没有 special，只能靠名字
+  { path: 'Sent Items', name: 'Sent Items', delim: '/', special: null, subscribed: true },
+]);
 
 // ---------- 用真实注册流程拿工具句柄（scope 拦截、异常转人话都走真代码） ----------
 const tools = {};
@@ -166,11 +191,24 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
   const r = await callList({ since: '上个月' });
   // 4 封：收件箱 3 封（含北京 10-01 07:00 那封，UTC 是 9-30）+ Steam 自定义夹 1 封。
   // 只查收件箱会答成 3 封；按 UTC 算边界会漏掉跨月那封。
+  // 「已发送」里那 3 封（2 封带 \Sent 标记、1 封只靠夹名认出）不算——那是自己发出去的。
   const { fmtZoned } = await import('../server/tz.js');
   ok('since=上个月 = 整月区间且跨全部文件夹（4 封），不把本月的算进来',
     !r.error && r.json.total === 4
     && (r.json.messages || []).every((x) => fmtZoned(x.date).slice(0, 7) === '2026-10'),
     JSON.stringify((r.json?.messages || []).map((x) => x.date)));
+  ok('跨夹不含「已发送」（线上真把 4 封撑成 9 封的那类 BMC Warning）',
+    !r.error && !(r.json.messages || []).some((x) => /BMC Warning|Re: 合同/.test(x.subject || '')),
+    JSON.stringify((r.json?.messages || []).map((x) => x.subject)));
+  ok('跨夹结果自带口径说明，模型不会把「发出去的」算进「收到的」',
+    !r.error && /不含已发送/.test(String(r.json.scope || '')), String(r.json?.scope));
+}
+
+{
+  // 排除只发生在「没指定文件夹」时；指名了「已发送」就该老老实实查那个夹
+  const r = await callList({ folder: '已发送', since: '上个月' });
+  ok('显式查「已发送」时不被排除（2 封）',
+    !r.error && r.json.total === 2, String(r.error || r.json?.total));
 }
 
 {
