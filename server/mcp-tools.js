@@ -64,17 +64,17 @@ const uidList = () => z.preprocess((v) => {
 // 这些边界都要落在用户所在时区（见 tz.js）。用 Date.UTC 直接造的话，
 // 东八区用户问「上个月」会拿到北京时间 1 号早上 8 点作起点，
 // 1 号 0-8 点收到的信会被算进上个月。
-function monthStart(y, m) {          // m 从 0 起，可以是负数/越界，内部会自己进位
-  return zonedMidnight(y, m, 1).toISOString();
+function monthStart(y, m, tz) {      // m 从 0 起，可以是负数/越界，内部会自己进位
+  return zonedMidnight(y, m, 1, tz).toISOString();
 }
 
-function parseSpan(v, label) {
+function parseSpan(v, label, tz = tzName()) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
   if (!s) return null;
   const now = new Date();
-  // 「今天」「今年」「上个月」都按用户时区算，不是 UTC
-  const { y: Y, m: M, d: D } = zonedNow();
+  // 「今天」「今年」「上个月」按调用方指定的时区算（默认跟随部署配置），不是 UTC
+  const { y: Y, m: M, d: D } = zonedNow(tz);
 
   // 单月 / 单年 —— 闭区间
   const mCn = /^(去年|前年|今年|明年)?\s*(\d{1,2})\s*月(?:份)?$/.exec(s);
@@ -82,28 +82,28 @@ function parseSpan(v, label) {
     const base = mCn[1] === '去年' ? Y - 1 : mCn[1] === '前年' ? Y - 2 : mCn[1] === '明年' ? Y + 1 : Y;
     const mm = Number(mCn[2]) - 1;
     if (mm < 0 || mm > 11) throw new Error(`${label} 的月份「${s}」不对，应该是 1 到 12 月`);
-    return { since: monthStart(base, mm), before: monthStart(base, mm + 1) };
+    return { since: monthStart(base, mm, tz), before: monthStart(base, mm + 1, tz) };
   }
   const mNum = /^(\d{4})\s*[年\-\/.]\s*(\d{1,2})\s*月?$/.exec(s);
   if (mNum) {
     const yy = Number(mNum[1]);
     const mm = Number(mNum[2]) - 1;
     if (mm < 0 || mm > 11) throw new Error(`${label} 的月份「${s}」不对，应该是 1 到 12 月`);
-    return { since: monthStart(yy, mm), before: monthStart(yy, mm + 1) };
+    return { since: monthStart(yy, mm, tz), before: monthStart(yy, mm + 1, tz) };
   }
   const yCn = /^(去年|前年|今年|明年)$/.exec(s);
   if (yCn) {
     const base = yCn[1] === '去年' ? Y - 1 : yCn[1] === '前年' ? Y - 2 : yCn[1] === '明年' ? Y + 1 : Y;
-    return { since: monthStart(base, 0), before: monthStart(base + 1, 0) };
+    return { since: monthStart(base, 0, tz), before: monthStart(base + 1, 0, tz) };
   }
   const yNum = /^(\d{4})\s*年$/.exec(s);
   if (yNum) {
     const yy = Number(yNum[1]);
-    return { since: monthStart(yy, 0), before: monthStart(yy + 1, 0) };
+    return { since: monthStart(yy, 0, tz), before: monthStart(yy + 1, 0, tz) };
   }
-  if (s === '上个月' || s === '上月') return { since: monthStart(Y, M - 1), before: monthStart(Y, M) };
-  if (s === '本月' || s === '这个月' || s === '当月') return { since: monthStart(Y, M), before: null };
-  if (s === '下个月' || s === '下月') return { since: monthStart(Y, M + 1), before: monthStart(Y, M + 2) };
+  if (s === '上个月' || s === '上月') return { since: monthStart(Y, M - 1, tz), before: monthStart(Y, M, tz) };
+  if (s === '本月' || s === '这个月' || s === '当月') return { since: monthStart(Y, M, tz), before: null };
+  if (s === '下个月' || s === '下月') return { since: monthStart(Y, M + 1, tz), before: monthStart(Y, M + 2, tz) };
 
   // 相对量：只给起点（「最近 7 天」本来就是到今天为止）
   const rel = /^(\d+)\s*(d|天|日|w|周|m|月|y|年)$/i.exec(s);
@@ -121,12 +121,21 @@ function parseSpan(v, label) {
     return { since: new Date(now.getTime() - 7 * 86400000).toISOString(), before: null };
   }
   if (s === '今天' || s === '今日') {
-    return { since: zonedMidnight(Y, M, D).toISOString(), before: null };
+    return { since: zonedMidnight(Y, M, D, tz).toISOString(), before: null };
   }
 
   // 具体日期：只当起点用（「2026-10-01 之后」），不做闭区间——
   // 除非调用方另外传了 before。
-  const t = Date.parse(s.length <= 10 ? `${s}T00:00:00Z` : s);
+  // 纯日期要按本地零点算，跟「2025-10」保持同一口径；直接用 Date.parse
+  // 会当成 UTC 零点，东八区等于从当天早上 8 点起算，边界当天的信就漏了。
+  const dateOnly = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(s);
+  if (dateOnly) {
+    return {
+      since: zonedMidnight(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), tz).toISOString(),
+      before: null,
+    };
+  }
+  const t = Date.parse(s);
   if (!Number.isFinite(t)) {
     throw new Error(`${label} 看不懂「${s}」。可以填 上个月、去年10月、2025年10月、2025-10、7d、30d，或 2026-10-01 这样的日期`);
   }
@@ -134,10 +143,10 @@ function parseSpan(v, label) {
 }
 
 // 把 since / before 两个参数合成一对边界。
-// 用法：range = resolveRange(since, before)
-function resolveRange(since, before) {
-  const a = parseSpan(since, 'since');
-  const b = parseSpan(before, 'before');
+// 用法：range = resolveRange(since, before, timezone)
+function resolveRange(since, before, tz = tzName()) {
+  const a = parseSpan(since, 'since', tz);
+  const b = parseSpan(before, 'before', tz);
   let sinceIso = a?.since || null;
   let beforeIso = b?.since || null;
   // 「上个月」「2025年10月」自带另一端：调用方只给了 since 也要补上 before，
@@ -148,10 +157,10 @@ function resolveRange(since, before) {
 }
 
 // 把解析出的边界写回给人看的一句话，让模型回答时能说明「查的是哪段」
-function describeRange(sinceIso, beforeIso) {
-  // 说的是用户眼里的日期，所以按本地时区取年月日；
+function describeRange(sinceIso, beforeIso, tz = tzName()) {
+  // 说的是用户眼里的日期，所以按同一个时区取年月日；
   // 直接截 ISO 前 10 位拿到的是 UTC 日期，东八区会整体差一天。
-  const d = (iso) => (iso ? fmtZoned(iso) : null);
+  const d = (iso) => (iso ? fmtZoned(iso, tz) : null);
   if (sinceIso && beforeIso) return `${d(sinceIso)} 至 ${d(beforeIso)}（不含右端）`;
   if (sinceIso) return `${d(sinceIso)} 之后`;
   if (beforeIso) return `${d(beforeIso)} 之前`;

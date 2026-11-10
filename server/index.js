@@ -991,14 +991,9 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   fail(res, err);
 });
 
-// TZ 写错时 Node 不报错，会静默沿用系统默认（在 alpine 上就是 UTC），
-// 于是「上个月」算错却一切正常。宁可启动失败，也别让错误的时间边界悄悄上线。
-try {
-  assertTz();
-} catch (e) {
-  console.error(`[mailnest] ${e.message}`);
-  process.exit(1);
-}
+// TZ 写错不拦启动（容器起不来会像镜像坏了），但要在日志里说一句 ——
+// 不然「上个月」算错半天，一切看着都正常，最难查。
+assertTz();
 
 const server = app.listen(PORT, HOST, () => {
   console.log(`[mailnest] listening on http://${HOST}:${PORT}  data=${process.env.MAILNEST_DATA || 'data/'}  tz=${tzName()}`);

@@ -30,7 +30,11 @@ const user = store.createUser({ username: 'unit', password: 'password123', role:
   ok('返回记录带 scope', JSON.stringify(out.record.scopes) === '["read"]');
 
   const stored = store.system().mcpTokens[0];
-  ok('落盘只有哈希，没有明文', !JSON.stringify(stored).includes(out.token.split('_').pop()), JSON.stringify(Object.keys(stored)));
+  // 不能写 out.token.split('_').pop()：secret 是 base64url，本身就带 `_`，
+  // 切出来只剩尾巴几个字符，拿它去 includes 几乎必然命中 → 随机挂。
+  // id 是固定 8 位 hex，按整串正则取才稳。
+  const secret = /^mn_mcp_[0-9a-f]{8}_(.+)$/.exec(out.token)[1];
+  ok('落盘只有哈希，没有明文', !JSON.stringify(stored).includes(secret), JSON.stringify(Object.keys(stored)));
   ok('落盘 hash 是 64 位 hex', /^[0-9a-f]{64}$/.test(stored.hash));
 
   const v = tok.verifyToken(out.token);

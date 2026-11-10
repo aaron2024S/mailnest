@@ -12,13 +12,13 @@ COPY public ./public
 ENV NODE_ENV=production
 ENV PORT=8006
 ENV MAILNEST_DATA=/app/data
-# 「今天」「上个月」「去年10月」按哪个时区算。容器默认 UTC，不设的话
-# 东八区用户问「上个月」会从北京时间 1 号早上 8 点算起。用标准 TZ，
-# 容器里 date、日志、第三方库的本地时间也跟着对齐；换时区就覆盖这一个变量。
-ENV TZ=Asia/Shanghai
+# 时区不设默认值：镜像不能替全世界决定东八区还是别的。
+# 不设 TZ 就是 UTC；要按本地时间解释「今天/上个月/去年10月」，
+# 启动时加 -e TZ=Asia/Shanghai（或 compose 里的 environment）。
+# 设错了不会崩，日志里会提醒并按 UTC 算。
 
-# alpine 不带 tzdata，此时系统级时区会退回 UTC（应用自己走 Intl 不受影响，
-# 但日志和 date 命令会显示 UTC，排查时容易看错）。
+# alpine 不带 tzdata，装了才能在设 TZ 时让容器里的 date、日志也跟上
+# （应用自己走 Intl，本来就不依赖系统时区库）。
 RUN apk add --no-cache tzdata \
  && mkdir -p /app/data && chown -R node:node /app
 USER node

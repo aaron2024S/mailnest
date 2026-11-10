@@ -9,17 +9,43 @@
 // 用标准 TZ 环境变量，而不是自造一个 MAILNEST_TZ：
 // 容器、Node、运维脚本、NAS 面板都认这个名字，用户不用记第二套。
 //
-// 但只读 TZ 还不够。进程的本地时区（new Date(y, m, 1) 那套）依赖系统时区库，
-// alpine 默认没装 tzdata，此时 musl 会悄悄按 UTC 处理；而 TZ 写成非法名时
-// Node 也不报错，直接沿用系统默认。两种情况的共同点是「不报错、结果错」。
-// 所以我们不用进程本地时区，一律走 Intl 显式指定时区（ICU 自带时区数据，
-// 与系统库无关），并在启动时校验一次，写错就当场失败。
-const DEFAULT_TZ = 'Asia/Shanghai';
+// 用进程本地时区（new Date(y, m, 1) 那套）是不行的：它依赖系统时区库，
+// alpine 默认没装 tzdata，musl 会悄悄按 UTC 处理。所以一律走 Intl 显式
+// 指定时区 —— ICU 自带时区数据，跟系统库无关，容器里也准。
+//
+// 这是个需要显式配置的项：镜像不预设任何地域，也不猜（猜错了比空着更糟）。
+// 谁部署谁设 TZ，设错了不崩，日志里提醒一句然后按运行环境时区算。
+const TZ_HINT = '要填 IANA 时区名，例如 Asia/Shanghai、Asia/Tokyo、Europe/London、America/New_York';
+
+// 没配 TZ 就用 UTC：中性、确定，也正是容器的实际时区。
+// 不去用 Intl.DateTimeFormat().resolvedOptions().timeZone 猜系统时区 ——
+// 实测 Windows 上它会返回 'Etc/Unknown'，既不是可读的时区名，也不能拿来解释
+// 「上个月」到底怎么算的。时区必须由部署者显式指定。
+const FALLBACK_TZ = 'UTC';
+
+const validCache = new Map();
+function isValidTz(tz) {
+  if (validCache.has(tz)) return validCache.get(tz);
+  let ok = true;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); } catch { ok = false; }
+  validCache.set(tz, ok);
+  return ok;
+}
 
 export function tzName() {
   const v = String(process.env.TZ || '').trim();
-  return v || DEFAULT_TZ;
+  if (!v) return FALLBACK_TZ;
+  if (isValidTz(v)) return v;
+  // 写错了：不拦启动（容器起不来更像镜像坏了），但绝不静默——
+  // 否则「上个月」算错却一切正常，比报错难查得多。
+  if (warnedTz !== v) {
+    warnedTz = v;
+    console.warn(`[mailnest] TZ=${v} 不是合法时区名，改按 ${FALLBACK_TZ} 计算。${TZ_HINT}`);
+  }
+  return FALLBACK_TZ;
 }
+let warnedTz = null;
+
 
 let cachedName = null;
 let cachedFmt = null;
@@ -72,17 +98,10 @@ export function zonedNow(tz = tzName()) {
   return partsOf(new Date(), tz);
 }
 
-// 启动时校验：TZ 写错不能等到用户问「上个月」才炸，也不能悄悄按 UTC 算
-export function assertTz(tz = tzName()) {
-  let valid = true;
-  try { fmt(tz); } catch { valid = false; }
-  if (!valid) {
-    throw new Error(
-      `TZ 时区名不合法：${JSON.stringify(tz)}。`
-      + '要填 IANA 时区名，例如 Asia/Shanghai、Asia/Tokyo、Europe/London、America/New_York。',
-    );
-  }
-  return tz;
+// 启动时调一次：让「TZ 写错」在日志第一行就露出来，而不是等用户问「上个月」
+// 才发现差了半天。不抛错——容器起不来会被当成镜像坏了，反而没人去看原因。
+export function assertTz() {
+  return tzName();
 }
 
 // 给人看的区间说明：说的是本地时间

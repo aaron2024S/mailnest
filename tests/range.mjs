@@ -20,6 +20,9 @@ const ok = (name, cond, extra = '') => {
 const DIR = path.resolve('.range-test');
 fs.rmSync(DIR, { recursive: true, force: true });
 process.env.MAILNEST_DATA = DIR;
+// 夹具里的时间都是按东八区写的（跨月那封、「上个月」4 封……），
+// 这里把口径钉死，换台机器跑结果也一致。时区段会临时改它再改回来。
+if (!process.env.TZ) process.env.TZ = 'Asia/Shanghai';
 
 const store = await import('../server/store.js');
 const cache = await import('../server/cache.js');
@@ -283,28 +286,38 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
 }
 
 // ---------- 时区配置本身 ----------
-// 用标准 TZ，不用自造变量；写错必须当场失败而不是悄悄按 UTC 算。
+// 用标准 TZ，不搞第二套变量；镜像不给默认值，谁部署谁设。
 {
   const { tzName, assertTz } = await import('../server/tz.js');
   const prev = process.env.TZ;
+  const UNSET = 'UTC';   // 没配 TZ 就是 UTC（不猜系统时区）
+  const warned = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => warned.push(a.join(' '));
+  try {
+    delete process.env.TZ;
+    ok('不设 TZ 时按 UTC（不预设地域，也不猜系统时区）',
+      tzName() === UNSET, String(tzName()));
 
-  delete process.env.TZ;
-  ok('不设 TZ 时默认 Asia/Shanghai', tzName() === 'Asia/Shanghai', String(tzName()));
+    process.env.TZ = 'Europe/London';
+    ok('TZ 可以覆盖运行环境时区', tzName() === 'Europe/London', String(tzName()));
 
-  process.env.TZ = 'Europe/London';
-  ok('TZ 可以覆盖默认值', tzName() === 'Europe/London', String(tzName()));
+    process.env.TZ = '';
+    ok('TZ 设成空串时按没设处理', tzName() === UNSET, JSON.stringify(tzName()));
 
-  process.env.TZ = '';
-  ok('TZ 设成空串时退回默认值（不是空字符串当时区）',
-    tzName() === 'Asia/Shanghai', JSON.stringify(tzName()));
-
-  process.env.TZ = 'Asia/Shanghia';   // 少一个 n，最常见的拼错
-  let msg = '';
-  try { assertTz(); } catch (e) { msg = String(e.message); }
-  ok('时区名拼错时 assertTz 明确报错（Node 自己只会静默按系统默认）',
-    /时区名不合法/.test(msg), msg.slice(0, 40));
-
-  if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev;
+    // 写错不拦启动（容器起不来像镜像坏了），但必须回落到一个确定的时区，
+    // 不能让非法值一路传到 Intl 抛 RangeError。
+    process.env.TZ = 'Asia/Shanghia';   // 少一个 n，最常见的拼错
+    let threw = false;
+    let got = '';
+    try { got = assertTz(); } catch { threw = true; }
+    ok('时区名拼错时不抛错、回落到 UTC', !threw && got === UNSET, `threw=${threw} got=${got}`);
+    ok('回落时打一条提醒（否则算错半天没人知道）',
+      /不是合法时区名/.test(warned.join('')), warned.join('').slice(0, 40));
+  } finally {
+    console.warn = origWarn;
+    if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev;
+  }
 }
 
 // ---------- 不带条件时保持原行为 ----------
