@@ -41,11 +41,44 @@ const optStr = () => z.preprocess((v) => {
 const splitList = (v) => (Array.isArray(v) ? v : String(v).split(/[,，;；、\s]+/))
   .map((x) => String(x).trim()).filter(Boolean);
 
+// 拆地址串。不能用简单的 split(/[,;]/)：收件人常写成 "Smith, John" <j@x.com>
+// 或 John Smith <j@x.com>，按标点/空白硬拆会把一个人拆成两三个无效地址，
+// 发信时直接投递失败，而且看起来像是用户填错了。
+// 规则：引号内不拆；串里有 <地址> 结构时只按标点拆（空格属于显示名），
+// 纯地址串（a@b.com c@d.com）才按空白拆。
+function splitAddrs(v) {
+  if (Array.isArray(v)) return v.map((x) => (x === null || x === undefined ? '' : String(x).trim())).filter(Boolean);
+  if (v === null || v === undefined) return [];
+  const s = String(v);
+  const sep = s.includes('<') ? /[,，;；、]/ : /[,，;；、\s]/;
+  const out = [];
+  let cur = '';
+  let quote = false;
+  for (const ch of s) {
+    if (ch === '"') { quote = !quote; cur += ch; continue; }
+    if (!quote && sep.test(ch)) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
 const addrList = (required) => z.preprocess((v) => {
   if (v === null || v === undefined) return undefined;
-  const list = splitList(v);
+  const list = splitAddrs(v);
   return list.length ? list : undefined;
 }, required ? z.array(z.string()).min(1) : z.array(z.string()).optional());
+
+// 和 addrList 的区别：空数组/空串会被保留下来，表示「明确清空这一栏」。
+// 改草稿时需要区分「没提收件人」（保持原样）和「把收件人删掉」（清空）。
+const addrListClearable = () => z.preprocess((v) => {
+  if (v === null || v === undefined) return undefined;
+  return splitAddrs(v);
+}, z.array(z.string()).optional());
 
 const uidList = () => z.preprocess((v) => {
   if (v === null || v === undefined) return undefined;
@@ -424,6 +457,34 @@ function checkAttachSize(list) {
       throw new Error(`附件总体积超过 20MB（当前约 ${Math.round(total / 1024 / 1024)}MB），请压缩或分多封发送`);
     }
   }
+}
+
+// 草稿的对外表示。带上 canSend 和正文摘要，是因为「有多份草稿」时模型要能
+// 直接判断哪份能发、哪份是空壳，而不是把 id 和标题丢给用户让他自己挑。
+function draftView(uid, d, byId) {
+  const accs = byId || new Map(listAccounts(uid).map((a) => [a.id, a]));
+  const acc = accs.get(d.accountId);
+  const text = String(d.text || '');
+  const to = splitAddrs(d.to);
+  return {
+    id: d.id,
+    account: acc ? { id: acc.id, email: acc.email } : null,
+    to: d.to || '',
+    cc: d.cc || '',
+    bcc: d.bcc || '',
+    subject: d.subject || '(无主题)',
+    excerpt: text.replace(/\s+/g, ' ').trim().slice(0, 80),
+    length: text.length,
+    updatedAt: new Date(Number(d.updatedAt) || Date.now()).toISOString(),
+    canSend: !!acc && to.length > 0,
+    // 两个问题可能同时存在（没账号也没收件人），一起说清楚，别互相盖掉
+    ...(() => {
+      const problems = [];
+      if (!to.length) problems.push('还没有收件人，补上才能发');
+      if (!acc) problems.push('对应的邮箱账号已被删除，发不出去');
+      return problems.length ? { problem: problems.join('；') } : {};
+    })(),
+  };
 }
 
 // 回复发给谁。Reply-To 优先——很多营销/工单/通知用 noreply@ 发信，却把真正的
@@ -1324,28 +1385,83 @@ export function registerTools(server, ctx) {
     name: 'save_draft',
     scope: 'send',
     title: '保存草稿',
-    description: '把一封没写完的邮件存成草稿，用户可在网页端继续编辑或直接发送。',
+    description: '新写一封没写完的邮件并存成草稿（不是发出去）。改已有草稿请用 update_draft，'
+      + '用这个会另存一份新的。',
     annotations: { readOnlyHint: false, destructiveHint: false },
     schema: {
-      account: optStr().describe('用哪个账号保存（显示名/邮箱地址/id）'),
-      to: z.array(z.string()).optional().describe('收件人'),
+      account: optStr().describe('用哪个账号保存（显示名/邮箱地址/id）；只有一个账号时可省略'),
+      to: addrList().describe('收件人'),
+      cc: addrList().describe('抄送'),
+      bcc: addrList().describe('密送'),
       subject: z.string().optional().describe('主题'),
       text: z.string().min(1).describe('正文'),
     },
-    run: async ({ account, to, subject, text: body }) => {
+    run: async ({ account, to, cc, bcc, subject, text: body }) => {
       // 草稿允许在没配账号时先存下来（发送时再校验账号），所以这里不能直接 resolveAccount
       const all = listAccounts(uid);
       let accId = '';
       if (account) accId = resolveAccount(uid, account).id;
       else if (all.length === 1) accId = all[0].id;
-      else if (all.length > 1) throw new Error(`有 ${all.length} 个账号，请用 account 指定保存到哪个：${all.map((a) => a.email).join('、')}`);
+      else if (all.length > 1) {
+        const names = all.map((a) => a.email).join('、');
+        throw new Error(`有 ${all.length} 个账号，请先确认用哪个邮箱保存草稿：${names}`
+          + '（选一个再让我存，我不会替你挑）');
+      }
       const d = saveDraft(uid, {
         accountId: accId,
-        to: Array.isArray(to) ? to.join(', ') : (to || ''),
+        to: (to || []).join(', '),
+        cc: (cc || []).join(', '),
+        bcc: (bcc || []).join(', '),
         subject: subject || '(无主题)',
         text: body,
       });
-      return text(`已保存草稿（编号 ${d.id}），可在网页端「草稿」里继续编辑；要发的时候跟我说一声。`);
+      return json(draftView(uid, d));
+    },
+  });
+
+  define(server, ctx, {
+    name: 'update_draft',
+    scope: 'send',
+    title: '修改草稿',
+    description: '修改一份已有草稿。只传要改的字段，没传的保持原样；'
+      + '把 to/cc/bcc 传空字符串表示清空那一栏。改之前先用 list_drafts 拿到草稿 id。',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    schema: {
+      draftId: z.string().min(1).describe('要改哪份草稿，从 list_drafts 拿'),
+      account: optStr().describe('改到另一个邮箱账号下'),
+      to: addrListClearable().describe('收件人（传空串表示清空）'),
+      cc: addrListClearable().describe('抄送（传空串表示清空）'),
+      bcc: addrListClearable().describe('密送（传空串表示清空）'),
+      subject: z.string().optional().describe('新主题'),
+      text: z.string().optional().describe('新的完整正文（不是追加，是替换）'),
+    },
+    run: async ({ draftId, account, to, cc, bcc, subject, text: body }) => {
+      const id = String(draftId || '').trim();
+      const orig = listDrafts(uid).find((x) => x.id === id);
+      if (!orig) {
+        const hint = listDrafts(uid).map((x) => `${x.id}「${x.subject}」`).join('、');
+        throw new Error(`找不到草稿「${id}」。${hint ? `现有草稿：${hint}` : '当前没有草稿，可以先 save_draft'}`);
+      }
+      // 只把真正传了的字段写回去。用 undefined 判断，不能用真值判断——
+      // 空字符串代表「清空这一栏」，跟「没提这个字段」是两件事。
+      const next = { ...orig };
+      const changed = [];
+      if (to !== undefined) { next.to = to.join(', '); changed.push('收件人'); }
+      if (cc !== undefined) { next.cc = cc.join(', '); changed.push('抄送'); }
+      if (bcc !== undefined) { next.bcc = bcc.join(', '); changed.push('密送'); }
+      if (subject !== undefined && subject !== orig.subject) { next.subject = subject || '(无主题)'; changed.push('主题'); }
+      if (body !== undefined && body !== orig.text) {
+        if (!String(body).trim()) throw new Error('正文不能改成空的。要作废这份草稿请用 delete_draft');
+        next.text = body; changed.push('正文');
+      }
+      if (account !== undefined) {
+        next.accountId = resolveAccount(uid, account).id; changed.push('账号');
+      }
+      if (!changed.length) {
+        throw new Error('没看出要改什么。要改哪一项就说清楚（收件人/抄送/主题/正文），或者直接说新内容');
+      }
+      const d = saveDraft(uid, next);   // 带原 id → 覆盖同一份，不会多出一份
+      return json({ ...draftView(uid, d), changed, message: `已修改草稿「${d.subject}」的${changed.join('、')}。` });
     },
   });
 
@@ -1353,18 +1469,33 @@ export function registerTools(server, ctx) {
     name: 'list_drafts',
     scope: 'read',
     title: '列出草稿',
-    description: '列出所有没发出去的草稿（含 id、账号、收件人、主题）。草稿存在 MailNest 本地，不占邮箱服务器的 Drafts。',
+    description: '列出没发出去的草稿，可按账号或关键词（主题/收件人）过滤。'
+      + '草稿存在 MailNest 本地，不占邮箱服务器的 Drafts。',
     annotations: { readOnlyHint: true },
-    schema: {},
-    run: async () => {
-      const drafts = listDrafts(uid);
-      if (!drafts.length) return text('当前没有草稿。');
-      const lines = drafts.map((d) => {
-        const acc = listAccounts(uid).find((a) => a.id === d.accountId);
-        const who = acc?.email || (d.accountId ? '账号已删除' : '未指定账号');
-        return `- 编号 ${d.id}（${who}）→ ${(d.to || '(无收件人)')}「${d.subject}」，正文 ${String(d.text || '').length} 字`;
+    schema: {
+      account: optStr().describe('只看某个账号的草稿'),
+      subject: optStr().describe('按主题或收件人关键词过滤'),
+      limit: z.coerce.number().int().min(1).max(100).optional().describe('最多列几份，默认全部'),
+    },
+    run: async ({ account, subject, limit }) => {
+      const accs = listAccounts(uid);
+      const byId = new Map(accs.map((a) => [a.id, a]));
+      let drafts = listDrafts(uid);
+      if (account) {
+        const acc = resolveAccount(uid, account);
+        drafts = drafts.filter((d) => d.accountId === acc.id);
+      }
+      const kw = String(subject || '').trim().toLowerCase();
+      if (kw) {
+        drafts = drafts.filter((d) => `${d.subject || ''} ${d.to || ''}`.toLowerCase().includes(kw));
+      }
+      const total = drafts.length;
+      if (limit) drafts = drafts.slice(0, limit);
+      return json({
+        total,
+        drafts: drafts.map((d) => draftView(uid, d, byId)),
+        ...(total > drafts.length ? { note: `共 ${total} 份，只列了最新 ${drafts.length} 份` } : {}),
       });
-      return text(`共 ${drafts.length} 份草稿：\n${lines.join('\n')}\n\n继续编辑请在网页端「草稿」操作；要发哪一份跟我说编号。`);
     },
   });
 
@@ -1372,7 +1503,7 @@ export function registerTools(server, ctx) {
     name: 'send_draft',
     scope: 'send',
     title: '发送草稿',
-    description: '把一份已有草稿直接发出去（按草稿里存的收件人/主题/正文），发送成功后草稿自动删除。',
+    description: '把一份已有草稿直接发出去（按草稿里存的收件人/抄送/主题/正文），发送成功后草稿自动删除。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
       draftId: z.string().min(1).describe('草稿 id，从 list_drafts 拿'),
@@ -1383,12 +1514,29 @@ export function registerTools(server, ctx) {
       if (!d) throw new Error(`找不到草稿「${id}」，可用 list_drafts 查看现有草稿`);
       const acc = listAccounts(uid).find((a) => a.id === d.accountId);
       if (!acc) throw new Error('这份草稿对应的邮箱账号已被删除，无法发送');
-      const to = String(d.to || '').split(/[,;，；]/).map((s) => s.trim()).filter(Boolean);
-      if (!to.length) throw new Error('这份草稿没有收件人，请让用户在网页端补上后再发');
-      await sendMail(uid, acc, { to, subject: d.subject || '(无主题)', text: d.text });
+      // 用 splitAddrs 而不是 split(/[,;]/)：草稿里存的是 "Smith, John" <j@x.com>
+      // 这种带逗号的显示名，硬拆会拆成两个无效地址，投递直接失败。
+      const to = splitAddrs(d.to);
+      const cc = splitAddrs(d.cc);
+      const bcc = splitAddrs(d.bcc);
+      if (!to.length) {
+        throw new Error('这份草稿还没有收件人。先告诉我发给谁，我把收件人补进这份草稿再发'
+          + '（不用重新存一份）');
+      }
+      await sendMail(uid, acc, { to, cc, bcc, subject: d.subject || '(无主题)', text: d.text });
       deleteDraft(uid, id);
       syncSentCache(uid, acc.id);
-      return text(`草稿「${d.subject}」已通过「${acc.email}」发送给 ${to.join(', ')}，草稿已删除。`);
+      return json({
+        ok: true,
+        from: acc.email,
+        to,
+        cc,
+        bcc: bcc.length,
+        subject: d.subject || '(无主题)',
+        draftDeleted: true,
+        message: `草稿「${d.subject}」已通过「${acc.email}」发送给 ${to.join(', ')}`
+          + `${cc.length ? `，抄送 ${cc.join(', ')}` : ''}，草稿已删除。`,
+      });
     },
   });
 
@@ -1407,9 +1555,9 @@ export function registerTools(server, ctx) {
         throw new Error(`找不到草稿「${id}」，可用 list_drafts 查看现有草稿`);
       }
       deleteDraft(uid, id);
-      return text(`已删除草稿「${id}」。`);
+      return json({ ok: true, deleted: id, message: `已删除草稿「${id}」。` });
     },
   });
 }
 
-export const TOOL_COUNT = 21;
+export const TOOL_COUNT = 22;

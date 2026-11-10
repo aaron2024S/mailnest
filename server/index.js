@@ -874,9 +874,16 @@ api.get('/drafts', guard, (req, res) => {
 
 api.post('/drafts', guard, (req, res) => {
   const d = req.body || {};
-  res.json({ draft: saveDraft(req.user.id, {
-    id: d.id, accountId: d.accountId, to: d.to, cc: d.cc, subject: d.subject, text: d.text, html: d.html,
-  }) });
+  // 草稿 id 由前端传回（编辑时），但它是能拼进文件路径的字符串，
+  // 交给 saveDraft 校验；不合法时回 400，别让它变成 500。
+  try {
+    res.json({ draft: saveDraft(req.user.id, {
+      id: d.id, accountId: d.accountId, to: d.to, cc: d.cc, bcc: d.bcc,
+      subject: d.subject, text: d.text, html: d.html,
+    }) });
+  } catch (e) {
+    res.status(400).json({ error: e.message || '草稿保存失败' });
+  }
 });
 
 api.delete('/drafts/:id', guard, (req, res) => {

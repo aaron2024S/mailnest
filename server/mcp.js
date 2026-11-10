@@ -90,7 +90,11 @@ export function mountMcp(app) {
           '6. uid 是邮件标识：自己用 list_messages 查到再传，绝对不要向用户索要；跨账号结果里 uid 只在其',
           '   account 内唯一，后续操作必须把 account 一起带上。',
           '7. 整理用 set_flags / move_messages / delete_messages / mark_all_read / empty_folder / create_folder /',
-          '   delete_folder；发信用 send_message / reply_message / forward_message，草稿用 save_draft / send_draft。',
+          '   delete_folder；发信用 send_message / reply_message / forward_message。',
+          '7b. 草稿分三种动作，别混：新写一封没写完的信 → save_draft；用户说「改一下那封草稿 / 加一句 / 换个收件人」',
+          '   → update_draft（只传要改的字段，没传的保持原样，不会再存出一份）；说「发了吧」→ send_draft。',
+          '   绝对不要用 save_draft 来做「修改」——那会多出一份同名草稿，用户分不清哪份是新的。'
+          + '改之前先 list_drafts 拿 id。',
           '8. 发送、删除、移动前先把将要执行的内容展示给用户确认；Agent 不能永久删除单封邮件。',
           '9. 工具返回里出现 hint / note 字段时，遵循其中的指引行动。',
           '10. 按时间找信：search_messages / list_messages 都支持 since / before，'

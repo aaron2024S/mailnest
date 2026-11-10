@@ -311,11 +311,12 @@ ok('initialized 通知被接受', r.status >= 200 && r.status < 300, String(r.st
 r = await rpcCall(readToken, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
 const tools = r.data?.result?.tools || [];
 const names = tools.map((t) => t.name).sort();
-ok('工具数量 21', tools.length === 21, `${tools.length}: ${names.join(',')}`);
+ok('工具数量 22', tools.length === 22, `${tools.length}: ${names.join(',')}`);
 const expect = ['create_folder', 'delete_folder', 'delete_draft', 'delete_messages', 'empty_folder',
   'forward_message', 'list_accounts', 'list_drafts', 'list_folders', 'list_messages',
   'mark_all_read', 'move_messages', 'read_attachment', 'read_message', 'reply_message',
-  'save_draft', 'search_messages', 'send_draft', 'send_message', 'set_flags', 'unread_count'];
+  'save_draft', 'search_messages', 'send_draft', 'send_message', 'set_flags', 'unread_count',
+  'update_draft'];
 ok('工具名齐全', expect.every((n) => names.includes(n)), names.join(','));
 ok('每个工具有描述', tools.every((t) => t.description && t.description.length > 8), '');
 
@@ -397,8 +398,14 @@ ok('send_message 带 attachments 参数 schema 通过', r.data?.result?.isError 
 
 // 草稿流：save → list → send（不存在的 id 报错）→ delete
 r = await callTool(sendToken, 'save_draft', { subject: 'MCP 测试草稿', text: 'hello' });
-ok('save_draft 成功', !r.data?.result?.isError && /已保存草稿/.test(r.data?.result?.content?.[0]?.text || ''), r.data?.result?.content?.[0]?.text);
-const draftId = (r.data.result.content[0].text.match(/编号 ([^）\s]+)/) || [])[1];
+// 返回统一成 JSON（和 list_messages/search_messages 一样），
+// 这样「存完拿到哪份」不需要靠正则从中文里抠 id。
+const savedDraft = (() => { try { return JSON.parse(r.data?.result?.content?.[0]?.text || '{}'); } catch { return {}; } })();
+const draftId = savedDraft.id;
+ok('save_draft 返回可解析 JSON 且带草稿 id',
+  !r.data?.result?.isError && /^d_[a-z0-9]+$/.test(String(draftId || '')), JSON.stringify(savedDraft).slice(0, 120));
+ok('草稿自述能不能发（没写收件人时 canSend 为假）',
+  savedDraft.canSend === false && /收件人/.test(String(savedDraft.problem || '')), JSON.stringify(savedDraft.problem));
 ok('用户文案不漏内部参数名', !/list_messages|unreadOnly|read_message|send_draft|account=|uid=/.test(r.data.result.content[0].text), r.data.result.content[0].text);
 
 // 认证结果是给判断钓鱼用的 SPF/DKIM/DMARC 原始报文，动辄两三百字。它曾整段拼在正文前面，
@@ -459,7 +466,13 @@ ok('用户文案不漏内部参数名', !/list_messages|unreadOnly|read_message|
 }
 
 r = await callTool(sendToken, 'list_drafts');
-ok('list_drafts 能列出刚存的草稿', !r.data?.result?.isError && (r.data?.result?.content?.[0]?.text || '').includes(draftId), r.data?.result?.content?.[0]?.text);
+const draftList = (() => { try { return JSON.parse(r.data?.result?.content?.[0]?.text || '{}'); } catch { return {}; } })();
+ok('list_drafts 返回结构化列表并含刚存的草稿',
+  !r.data?.result?.isError && Array.isArray(draftList.drafts)
+  && draftList.drafts.some((d) => d.id === draftId), JSON.stringify(draftList).slice(0, 160));
+ok('list_drafts 每份草稿带 canSend 和正文摘要',
+  (draftList.drafts || []).every((d) => typeof d.canSend === 'boolean' && typeof d.excerpt === 'string'),
+  JSON.stringify((draftList.drafts || [])[0] || {}).slice(0, 120));
 
 r = await callTool(sendToken, 'send_draft', { draftId: 'd_nope' });
 ok('send_draft 不存在的 id 给可读错误', r.data?.result?.isError === true

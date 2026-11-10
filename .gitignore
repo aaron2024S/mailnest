@@ -17,4 +17,7 @@ logo-preview.html
 .render-*.mjs
 .push-retry.sh
 .mcp-test/
+.draft-test/
+.send-test/
+.range-test/
 .mcp-test-unit/

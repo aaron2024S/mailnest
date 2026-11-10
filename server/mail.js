@@ -811,6 +811,16 @@ function draftsDir(uid) {
   return path.join(userDir(uid), 'drafts');
 }
 
+// 草稿 id 会从 HTTP 请求体和 MCP 参数里来，直接拼进文件路径会被穿越
+// （id="../../../别人的uid/accounts"）。只认自己生成的那种形状。
+const DRAFT_ID_RE = /^d_[a-z0-9]{6,24}$/;
+
+function draftFile(uid, id) {
+  const s = String(id === null || id === undefined ? '' : id);
+  if (!DRAFT_ID_RE.test(s)) throw new Error('草稿编号不合法');
+  return path.join(draftsDir(uid), `${s}.json`);
+}
+
 export function listDrafts(uid) {
   const dir = draftsDir(uid);
   if (!fs.existsSync(dir)) return [];
@@ -823,14 +833,13 @@ export function saveDraft(uid, draft) {
   const dir = draftsDir(uid);
   fs.mkdirSync(dir, { recursive: true });
   const id = draft.id || 'd_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const file = draftFile(uid, id);        // 传进来的 id 也要过校验
   const doc = { ...draft, id, updatedAt: Date.now() };
-  fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(doc));
+  fs.writeFileSync(file, JSON.stringify(doc));
   return doc;
 }
 
 export function deleteDraft(uid, id) {
-  const file = path.join(draftsDir(uid), `${id}.json`);
-  if (!file.startsWith(draftsDir(uid))) throw new Error('bad id');
-  fs.rmSync(file, { force: true });
+  fs.rmSync(draftFile(uid, id), { force: true });
   return { ok: true };
 }
