@@ -411,6 +411,38 @@ ok('用户文案不漏内部参数名', !/list_messages|unreadOnly|read_message|
   ok('异常时附的原文有上限', raw.raw.length <= 201, String(raw.raw.length));
 }
 
+// 邮件页脚（免责声明 / 版权 / 「在网页上查看」）和八九百字的追踪链接，在手机上能把正文挤出屏幕。
+// 2026-11-10 用户贴的 Steam 登录码邮件：1582 字里只有 380 字是正文，其余全是页脚。
+{
+  const { trimBoilerplate, shortenLongUrls } = await import('../server/mcp-tools.js');
+  const steam = [
+    'zjjncu，您好！',
+    '登录代码 ABCDF',
+    '祝您愉快， Steam 团队',
+    '--',
+    '此通知已发送至与您的 Steam 帐户关联的电子邮件地址。',
+    '这封电子邮件由系统自动生成，请勿回复。',
+    '© Valve Corporation 保留所有权利。',
+    '--',
+    `在网页上查看此消息： https://store.steampowered.com/email/code?snr=${'A1b2C3'.repeat(60)}`,
+  ].join('\n');
+  const cut = trimBoilerplate(steam);
+  ok('页脚整段切掉，正文和落款留着',
+    /登录代码 ABCDF/.test(cut) && /祝您愉快/.test(cut)
+      && !/保留所有权利|系统自动生成|在网页上查看|^\s*--\s*$/m.test(cut), cut);
+
+  // 判据不足 2 行时一个字不动 —— 正文里一句「请勿回复」不该吃掉后半封邮件
+  const one = '会议纪要如下。\n\n本文档请勿回复。';
+  ok('只命中 1 行页脚句式时不切', trimBoilerplate(one) === one, trimBoilerplate(one));
+  const mid = '这段提到保留所有权利。\n第二段正文';
+  ok('正文中间的页脚句式不误伤', trimBoilerplate(mid) === mid, trimBoilerplate(mid));
+
+  const long = `请先访问 https://help.steampowered.com/wizard/HelpUnauthorizedLogin?snr=${'a'.repeat(200)} 验证`;
+  const short = shortenLongUrls(long);
+  ok('超长链接收成前 60 字', short.length < 120 && /^请先访问 https:\/\/help\.steampowered\.com/.test(short), short);
+  ok('正常链接原样不动', shortenLongUrls('见 https://a.com/x') === '见 https://a.com/x', 'ok');
+}
+
 r = await callTool(sendToken, 'list_drafts');
 ok('list_drafts 能列出刚存的草稿', !r.data?.result?.isError && (r.data?.result?.content?.[0]?.text || '').includes(draftId), r.data?.result?.content?.[0]?.text);
 

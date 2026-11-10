@@ -83,6 +83,50 @@ function htmlToText(html) {
     .trim();
 }
 
+// ---- 正文收拾 ------------------------------------------------------------
+// 邮件页脚对读信的人没有信息量，在手机上却能把正文挤出屏幕。Steam 这封登录码邮件就是典型：
+//   「--」分隔线 + 「此通知已发送至…」 + 「这封电子邮件由系统自动生成，请勿回复」 +
+//   「© Valve Corporation 保留所有权利」 + 「--」 + 「在网页上查看此消息：<八九百字的追踪链接>」
+// 五行噪声围着两行正文。这里只从**尾部**往下数，命中 ≥2 行才切——宁漏不误：
+// 正文中间出现「版权所有」这种句子不会被误删。
+const FOOTER_PATTERNS = [
+  /此(通知|邮件|电子邮件|消息).{0,6}(发送至|由系统|自动生成)/,
+  /(邮件|通知|消息)(由|系)系统(自动)?(发送|生成)/,
+  /(请勿|不要)(直接)?回复/,
+  /(保留所有权利|全部?商标)/,
+  /©|\(c\)\s*\d{4}/i,
+  /在(网页|浏览器)上?(查看|打开)/,
+  /view (this )?(email|message)? ?in (your )?browser/i,
+  /(unsubscribe|opt.?out|退订|取消订阅)/i,
+  /您(所以|之所以)?(会)?收到(这封|此)/,
+  /this (email|message) was sent to|you (are|'re) receiving this/i,
+];
+
+// 整行只有一个重复的分隔符：`--`、`——`、`____`、`====`。单独的一个「-」不算。
+const isSeparator = (line) => /^\s*([-–—_=*~])\1{1,}\s*$/.test(line);
+
+export function trimBoilerplate(body) {
+  const lines = String(body || '').split('\n');
+  let cut = lines.length;   // 保留 [0, cut)
+  let noise = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i].trim();
+    if (!l || isSeparator(l)) { cut = i; continue; }
+    if (FOOTER_PATTERNS.some((re) => re.test(l))) { noise += 1; cut = i; continue; }
+    break;   // 碰到真内容，停
+  }
+  const kept = noise >= 2 ? lines.slice(0, cut) : lines;
+  // 收尾的空行和分隔线永远没有意义，无论切没切都剥掉
+  while (kept.length && (!kept[kept.length - 1].trim() || isSeparator(kept[kept.length - 1].trim()))) kept.pop();
+  return kept.join('\n').trim();
+}
+
+// 行内超长链接（追踪链接、带一大串参数的登录链接）在手机上读不出信息，也点不动。
+// 收成前 60 字，保留域名和路径开头。100 字以下的不动——正常链接还能用。
+export function shortenLongUrls(text) {
+  return String(text || '').replace(/https?[:：]\/\/[^\s，。；）)】」"]{100,}/gi, (u) => `${u.slice(0, 60)}…`);
+}
+
 // 账号参数允许多种写法：id、邮箱地址、显示名，且对显示名/地址做宽松匹配
 //（用户嘴里的「QQ邮箱」「163」这种称呼不一定和备注一字不差）。只有一个账号时可以完全省略。
 function accountLabel(a) {
@@ -527,7 +571,9 @@ export function registerTools(server, ctx) {
     description: `读取一封邮件的正文（纯文本）和基础信头。正文超过 ${BODY_LIMIT} 字会截断并标注；`
       + '附件只列清单（带编号），要看附件内容再调 read_attachment。查未读数/列邮件清单不要用本工具 —— '
       + '那是 list_accounts（自带未读数）和 list_messages（unreadOnly=true）的事。'
-      + 'uid 自己用 list_messages 查，不要向用户索要。信头里的认证结果可用于判断钓鱼邮件。',
+      + 'uid 自己用 list_messages 查，不要向用户索要。正文只给有用的部分：邮件自带的页脚'
+      + '（免责声明/版权/退订/「在网页上查看」）和超长追踪链接已去掉；信头校验只在异常时提示，'
+      + '异常时会附原始认证结果，可用于判断钓鱼邮件。',
     annotations: { readOnlyHint: true },
     schema: {
       account: z.string().optional().describe('账号显示名、邮箱地址或 id（如「QQ邮箱」）'),
@@ -540,6 +586,8 @@ export function registerTools(server, ctx) {
       const m = await getMessage(uid, acc.id, dir, String(msgUid));
       let body = String(m.text || '').trim();
       if (!body && m.html) body = htmlToText(m.html);
+      // 先收拾页脚和超长追踪链接，再判截断——否则正文额度全花在版权声明上
+      body = trimBoilerplate(shortenLongUrls(body));
       const truncated = body.length > BODY_LIMIT;
       if (truncated) body = body.slice(0, BODY_LIMIT);
 
@@ -572,7 +620,9 @@ export function registerTools(server, ctx) {
       if (auth?.suspicious) warn.push(`⚠ 信头校验未通过：${auth.brief}。`);
       const tail = [
         ...warn,
-        auth ? (auth.suspicious ? `原始认证结果：${auth.raw}` : `信头校验：${auth.brief}`) : '',
+        // 校验全通过时不写这一行：用户两次反馈「正文里怎么夹着认证结果」，而全通过是零信息量。
+        // 只有异常时才有话要说（warn 已经带了 ⚠ 一句，这里补原始报文给模型复核）。
+        auth?.suspicious ? `原始认证结果：${auth.raw}` : '',
       ].filter(Boolean).join('\n');
 
       return text(`${head}\n\n${body || '(这封邮件没有可显示的正文)'}`
