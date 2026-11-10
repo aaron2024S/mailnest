@@ -54,16 +54,54 @@ const uidList = () => z.preprocess((v) => {
   return list.length ? list : undefined;
 }, z.array(z.number().int().positive()).min(1));
 
-// 时间过滤：既收具体日期，也收相对说法。用户嘴里是「上个月」「最近一周」，
+// 时间过滤：既收具体日期，也收相对说法。用户嘴里是「上个月」「去年 10 月」，
 // 而这一层原来只能传关键词——想按时间问就只能把几千封拉下来自己比。
-function parseWhen(v, label) {
+//
+// 关键区别：有些说法本身就是**一段**（上个月、2025年10月、去年），必须同时给出
+// 两端边界；只给 since 会让「去年 10 月」变成「2025-10 之后的所有邮件」，答案全错。
+// 所以这里返回 { since, before }，而不是单个时间点。
+function monthStart(y, m) {          // m 从 0 起，可以是负数/越界，Date.UTC 会自己进位
+  return new Date(Date.UTC(y, m, 1)).toISOString();
+}
+
+function parseSpan(v, label) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
   if (!s) return null;
   const now = new Date();
-  if (s === '上个月' || s === '上月') {
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString();
+  const Y = now.getUTCFullYear();
+  const M = now.getUTCMonth();
+
+  // 单月 / 单年 —— 闭区间
+  const mCn = /^(去年|前年|今年|明年)?\s*(\d{1,2})\s*月(?:份)?$/.exec(s);
+  if (mCn) {
+    const base = mCn[1] === '去年' ? Y - 1 : mCn[1] === '前年' ? Y - 2 : mCn[1] === '明年' ? Y + 1 : Y;
+    const mm = Number(mCn[2]) - 1;
+    if (mm < 0 || mm > 11) throw new Error(`${label} 的月份「${s}」不对，应该是 1 到 12 月`);
+    return { since: monthStart(base, mm), before: monthStart(base, mm + 1) };
   }
+  const mNum = /^(\d{4})\s*[年\-\/.]\s*(\d{1,2})\s*月?$/.exec(s);
+  if (mNum) {
+    const yy = Number(mNum[1]);
+    const mm = Number(mNum[2]) - 1;
+    if (mm < 0 || mm > 11) throw new Error(`${label} 的月份「${s}」不对，应该是 1 到 12 月`);
+    return { since: monthStart(yy, mm), before: monthStart(yy, mm + 1) };
+  }
+  const yCn = /^(去年|前年|今年|明年)$/.exec(s);
+  if (yCn) {
+    const base = yCn[1] === '去年' ? Y - 1 : yCn[1] === '前年' ? Y - 2 : yCn[1] === '明年' ? Y + 1 : Y;
+    return { since: monthStart(base, 0), before: monthStart(base + 1, 0) };
+  }
+  const yNum = /^(\d{4})\s*年$/.exec(s);
+  if (yNum) {
+    const yy = Number(yNum[1]);
+    return { since: monthStart(yy, 0), before: monthStart(yy + 1, 0) };
+  }
+  if (s === '上个月' || s === '上月') return { since: monthStart(Y, M - 1), before: monthStart(Y, M) };
+  if (s === '本月' || s === '这个月' || s === '当月') return { since: monthStart(Y, M), before: null };
+  if (s === '下个月' || s === '下月') return { since: monthStart(Y, M + 1), before: monthStart(Y, M + 2) };
+
+  // 相对量：只给起点（「最近 7 天」本来就是到今天为止）
   const rel = /^(\d+)\s*(d|天|日|w|周|m|月|y|年)$/i.exec(s);
   if (rel) {
     const n = Number(rel[1]);
@@ -73,16 +111,49 @@ function parseWhen(v, label) {
     else if (u === 'w' || u === '周') d.setUTCDate(d.getUTCDate() - n * 7);
     else if (u === 'm' || u === '月') d.setUTCMonth(d.getUTCMonth() - n);
     else d.setUTCFullYear(d.getUTCFullYear() - n);
-    return d.toISOString();
+    return { since: d.toISOString(), before: null };
   }
+  if (s === '最近一周' || s === '这一周' || s === '本周') {
+    return { since: new Date(now.getTime() - 7 * 86400000).toISOString(), before: null };
+  }
+  if (s === '今天' || s === '今日') {
+    const t0 = new Date(Date.UTC(Y, M, now.getUTCDate())).toISOString();
+    return { since: t0, before: null };
+  }
+
+  // 具体日期：只当起点用（「2026-10-01 之后」），不做闭区间——
+  // 除非调用方另外传了 before。
   const t = Date.parse(s.length <= 10 ? `${s}T00:00:00Z` : s);
   if (!Number.isFinite(t)) {
-    throw new Error(`${label} 看不懂「${s}」。可以填 7d、30d、3m、1y、上个月，或 2026-10-01 这样的日期`);
+    throw new Error(`${label} 看不懂「${s}」。可以填 上个月、去年10月、2025年10月、2025-10、7d、30d，或 2026-10-01 这样的日期`);
   }
-  return new Date(t).toISOString();
+  return { since: new Date(t).toISOString(), before: null };
 }
 
-// 时间范围过滤（list_messages 走的是 IMAP/缓存混用，统一在这一层过一遍）
+// 把 since / before 两个参数合成一对边界。
+// 用法：range = resolveRange(since, before)
+function resolveRange(since, before) {
+  const a = parseSpan(since, 'since');
+  const b = parseSpan(before, 'before');
+  let sinceIso = a?.since || null;
+  let beforeIso = b?.since || null;
+  // 「上个月」「2025年10月」自带另一端：调用方只给了 since 也要补上 before，
+  // 否则「去年 10 月」会退化成「2025-10 之后」，把今年的邮件也算进去。
+  if (a?.before && !beforeIso) beforeIso = a.before;
+  if (b?.before && !sinceIso) sinceIso = b.since;
+  return { sinceIso, beforeIso, ranged: !!(sinceIso || beforeIso) };
+}
+
+// 把解析出的边界写回给人看的一句话，让模型回答时能说明「查的是哪段」
+function describeRange(sinceIso, beforeIso) {
+  const d = (iso) => (iso ? String(iso).slice(0, 10) : null);
+  if (sinceIso && beforeIso) return `${d(sinceIso)} 至 ${d(beforeIso)}（不含右端）`;
+  if (sinceIso) return `${d(sinceIso)} 之后`;
+  if (beforeIso) return `${d(beforeIso)} 之前`;
+  return null;
+}
+
+// 时间范围过滤（IMAP 直拉那条路没有 SQL 可用，只能在这一层过一遍）
 function inRange(date, sinceIso, beforeIso) {
   if (!sinceIso && !beforeIso) return true;
   const t = Date.parse(String(date || ''));
@@ -228,7 +299,7 @@ function resolveAccount(uid, ref) {
   throw new Error(`找不到账号「${key}」。account 可以填显示名、邮箱地址或 id，拿不准可先调 list_accounts。可用账号：${all.map(accountLabel).join('、')}`);
 }
 
-export { resolveAccount };
+export { resolveAccount, parseSpan, resolveRange };
 
 // 跨账号汇总：单个账号失败只记一笔，不拖垮整次查询（Outlook 掉 token 是常态）；
 // 合并后按时间倒序，只留最新的 per 条。抽出来是为了能脱离 IMAP 单独测。
@@ -473,13 +544,18 @@ export function registerTools(server, ctx) {
       page: z.coerce.number().int().min(1).optional().describe('页码，从 1 开始（跨账号只支持第一页）'),
       pageSize: z.coerce.number().int().min(1).max(PAGE_MAX).optional().describe(`每页条数，最多 ${PAGE_MAX}，默认 20`),
       unreadOnly: z.boolean().optional().describe('只列未读邮件（默认 false 列全部）'),
-      since: optStr().describe('只要这个时间之后（含）的邮件：7d、30d、上个月、2026-10-01 都行'),
-      before: optStr().describe('只要这个时间之前（不含）的邮件，写法同 since'),
+      from: optStr().describe('按发件人筛：填名字或地址的一部分都行（如「华为」「steampowered」）。'
+        + '用户问「有没有来自 X 的邮件」时用它，比把 X 丢进关键词搜更准——'
+        + '搜关键词会连正文里提到的都算进去（账单正文里出现「华为京东自营」就会命中）'),
+      since: optStr().describe('只要这段时间里的邮件：上个月、去年10月、2025年10月、7d、2026-10-01 都行'),
+      before: optStr().describe('截止时间（不含），写法同 since；只给 since 时按 since 自带的区间算'),
     },
-    run: async ({ account, folder, page, pageSize, unreadOnly, since, before }) => {
+    run: async ({ account, folder, page, pageSize, unreadOnly, since, before, from }) => {
       const dir = normFolder(folder);
-      const sinceIso = parseWhen(since, 'since');
-      const beforeIso = parseWhen(before, 'before');
+      const range = resolveRange(since, before);
+      const sinceIso = range.sinceIso;
+      const beforeIso = range.beforeIso;
+      const needFilter = range.ranged || !!from;
       const per = Math.min(Math.max(1, pageSize || 20), PAGE_MAX);
       const pg = Math.max(1, page || 1);
       const toItem = (m, acc, folderPath) => {
@@ -504,28 +580,59 @@ export function registerTools(server, ctx) {
       const all = listAccounts(uid);
       if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
 
+      // 带条件（时间范围 / 发件人）时走本地缓存：过滤在 SQL 里、分页在过滤之后。
+      // IMAP 那条路是按序号取「最新第 N 页」，过滤只能落在这一页内——
+      // 实测问「2025 年 10 月的邮件」返回 0 封，因为那些邮件根本不在最新 30 封里。
+      if (needFilter) {
+        const targets = account ? [resolveAccount(uid, account)] : all;
+        // 只按发件人问「有没有来自 X 的邮件」时，如果用户没指定文件夹，就该搜全部文件夹：
+        // 实测这个邮箱把 Steam 的 104 封全放在自定义夹「Steam」里，只查收件箱会答成「只有几封」。
+        const crossFolder = !!from && !folder;
+        const scopeDir = crossFolder ? null : dir;
+        const ids = targets.filter((a) => crossFolder || cache.folderSynced(uid, a.id, dir)).map((a) => a.id);
+        const notSynced = crossFolder ? [] : targets.filter((a) => !cache.folderSynced(uid, a.id, dir));
+        if (!ids.length) {
+          throw new Error('这些邮箱的「' + dir + '」还没同步到本地，暂时不能按条件筛选；'
+            + '先用不带条件的 list_messages 打开一次让它同步，或稍等几秒再试');
+        }
+        const r = cache.listRange(uid, ids, {
+          folder: scopeDir, since: sinceIso, before: beforeIso, from: from || null,
+          unreadOnly: !!unreadOnly, page: pg, pageSize: per,
+        });
+        const byId = new Map(targets.map((a) => [a.id, a]));
+        // 跨夹时每条都要带 folder，否则「回第 2 封看正文」定不到位置
+        const items = r.messages.map((m) => toItem(m, byId.get(m.account_id) || null, crossFolder ? m.folder : dir));
+        const label = describeRange(sinceIso, beforeIso);
+        return json({
+          account: account ? { id: targets[0].id, email: targets[0].email } : undefined,
+          folder: crossFolder ? '（全部文件夹）' : dir,
+          // 这里的 total 是「条件命中的总数」，不是文件夹总数——问「上月几封」照它答
+          total: r.total,
+          page: r.page,
+          pageSize: r.pageSize,
+          ...(from ? { from } : {}),
+          ...(label ? { range: label } : {}),
+          messages: items,
+          ...(notSynced.length
+            ? { note: `${notSynced.map(accountLabel).join('、')} 的「${dir}」还没同步完，上面的数字不含这些账号` }
+            : {}),
+          ...(r.total > items.length
+            ? { note2: `共 ${r.total} 封，本页显示 ${items.length} 封，往后翻用 page=${pg + 1}` }
+            : {}),
+        });
+      }
+
       // 指定账号（或本来就只有一个）：沿用原来的分页语义
       if (account || all.length === 1) {
         const acc = account ? resolveAccount(uid, account) : all[0];
         const d = await listMessages(uid, acc.id, dir, { page: pg, pageSize: per, unreadOnly: !!unreadOnly });
-        const kept = d.messages.filter((m) => inRange(m.date, sinceIso, beforeIso));
-        const ranged = !!(sinceIso || beforeIso);
         return json({
           account: { id: acc.id, email: acc.email },
           folder: dir,
-          // 带时间范围时 total 必须是「范围内的数量」。以前这里直接给文件夹总数，
-          // 问「上个月几封」拿回 total=91、实际只有 4 封，模型会照 91 答。
-          total: ranged ? kept.length : d.total,
-          ...(ranged ? { folderTotal: d.total } : {}),
+          total: d.total,
           page: d.page,
           pageSize: d.pageSize,
-          messages: kept.map((m) => toItem(m, null, dir)),
-          ...(ranged
-            ? {
-              note: `按时间过滤：本页匹配 ${kept.length} 封（该文件夹共 ${d.total} 封）；`
-                + '范围内更早的邮件要往后翻页，要精确总数请缩小时间范围',
-            }
-            : {}),
+          messages: d.messages.map((m) => toItem(m, null, dir)),
         });
       }
 
@@ -549,14 +656,8 @@ export function registerTools(server, ctx) {
           ? `没有查到${what}（部分账号查询失败：${failed.join('；')}）`
           : `所有账号都没有${what}`);
       }
-      const ranged = shown.filter((m) => inRange(m.date, sinceIso, beforeIso));
-      const hasRange = !!(sinceIso || beforeIso);
-      // 两个 note 以前是两个展开键，同名会互相覆盖——时间过滤的说明被总数说明悄悄顶掉。
+      // 到这个位置说明没有任何时间/发件人条件（有的话上面已经走缓存那条路）
       const notes = [];
-      if (hasRange) {
-        notes.push(`按时间过滤：本页匹配 ${ranged.length} 封（合并结果原 ${shown.length} 封）；`
-          + '范围内更早的邮件要往后翻页');
-      }
       if (total > shown.length) {
         notes.push(`共 ${total} 封，只列了最新的 ${shown.length} 封；要更多请带 account 或调大 pageSize`);
       }
@@ -570,10 +671,9 @@ export function registerTools(server, ctx) {
         // 分账号计数：用户问「XX邮箱有没有/有几封」时，答案就在这一行，不用重查也能答对数字
         perAccount,
         folder: dir,
-        total: hasRange ? ranged.length : total,
-        ...(hasRange ? { folderTotal: total } : {}),
+        total,
         pageSize: per,
-        messages: ranged,
+        messages: shown,
         ...(notes.length ? { note: notes.join('；') } : {}),
         ...(failed.length ? { failedAccounts: failed } : {}),
       });
@@ -592,13 +692,17 @@ export function registerTools(server, ctx) {
       account: optStr().describe('账号显示名、邮箱地址或 id；省略则搜索全部账号'),
       folder: optStr().describe('只搜某个文件夹（路径从 list_folders 拿）；省略则搜所有文件夹'),
       limit: z.coerce.number().int().min(1).max(50).optional().describe('最多返回多少封，默认 20'),
-      since: optStr().describe('只要这个时间之后（含）的邮件：7d、30d、上个月、2026-10-01 都行'),
-      before: optStr().describe('只要这个时间之前（不含）的邮件，写法同 since'),
+      from: optStr().describe('只留发件人是这个的（名字或地址片段，如「华为」「steampowered」）；'
+        + '问「有没有来自 X 的邮件」时用它，能排除掉只是正文提到 X 的邮件'),
+      unreadOnly: z.boolean().optional().describe('只返回未读的（问「有没有新邮件」时用）'),
+      since: optStr().describe('只要这段时间里的邮件：上个月、去年10月、2025年10月、7d、2026-10-01 都行'),
+      before: optStr().describe('截止时间（不含），写法同 since'),
     },
-    run: async ({ query, account, folder, limit, since, before }) => {
+    run: async ({ query, account, folder, limit, since, before, from, unreadOnly }) => {
       const q = String(query).trim();
-      const sinceIso = parseWhen(since, 'since');
-      const beforeIso = parseWhen(before, 'before');
+      const range = resolveRange(since, before);
+      const sinceIso = range.sinceIso;
+      const beforeIso = range.beforeIso;
       const all = listAccounts(uid);
       if (!all.length) throw new Error('还没有添加任何邮箱账号，请先在 MailNest 网页端添加一个');
       const targets = account ? [resolveAccount(uid, account)] : all;
@@ -617,7 +721,10 @@ export function registerTools(server, ctx) {
         }
         try {
           if (await ensureIndexed(uid, acc, dir) === 'partial') indexing = true;
-          for (const m of cache.searchMessages(uid, acc.id, q, { folder: dir, limit: cap, since: sinceIso, before: beforeIso })) {
+          for (const m of cache.searchMessages(uid, acc.id, q, {
+            folder: dir, limit: cap, since: sinceIso, before: beforeIso,
+            from: from || null, unreadOnly: !!unreadOnly,
+          })) {
             hits.push({ acc, ...m });
           }
         } catch (e) {
@@ -639,7 +746,13 @@ export function registerTools(server, ctx) {
           ? '部分邮箱正在建立搜索索引，等几秒再搜一次可能会有结果。'
           : '可以换一个更接近平台/发件人的词再搜（例如「火车票」换成「12306」），'
             + '也可以放宽时间范围，或者用 list_messages 逐页翻。';
-        return text(`没搜到和「${q}」相关的邮件${dir ? `（范围：${dir}）` : ''}。${hint}`);
+        const scope = [
+          dir ? `范围：${dir}` : null,
+          from ? `发件人含「${from}」` : null,
+          unreadOnly ? '只要未读' : null,
+          describeRange(sinceIso, beforeIso) ? `时间：${describeRange(sinceIso, beforeIso)}` : null,
+        ].filter(Boolean).join('，');
+        return text(`没搜到和「${q}」相关的邮件${scope ? `（${scope}）` : ''}。${hint}`);
       }
       // 结构化返回：uid / 来源账号都在字段里，模型接「看第 N 封」时直接取用，
       // 文本层不再出现 uid=xxx 这类用户看不懂的东西

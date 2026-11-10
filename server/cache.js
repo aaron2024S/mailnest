@@ -440,6 +440,62 @@ export function folderCounts(uid) {
   return getDb(uid).prepare('SELECT account_id, path, total, unseen FROM folders').all();
 }
 
+// ---------- 按条件列表（时间范围 / 发件人 / 未读） ----------
+// 为什么不能沿用 IMAP 分页：listMessages 是按序号取「最新第 N 页」，过滤只能落在
+// 那一页里。实测「2025 年 10 月的邮件」返回 0 封——因为 2025-10 的邮件根本不在最新
+// 30 封里，翻页才能碰到，而调用方只请求第 1 页。缓存里本来就有全部信封，条件就该
+// 下推到 SQL：过滤在前、分页在后，total 也才是范围内真实数量。
+export function listRange(uid, accountIds, {
+  folder = null, since = null, before = null, from = null,
+  unreadOnly = false, page = 1, pageSize = 50,
+} = {}) {
+  const db = getDb(uid);
+  const where = [];
+  const args = [];
+  if (Array.isArray(accountIds)) {
+    if (!accountIds.length) return { total: 0, page, pageSize, messages: [] };
+    where.push(`account_id IN (${accountIds.map(() => '?').join(',')})`);
+    args.push(...accountIds);
+  }
+  if (folder) { where.push('folder = ?'); args.push(folder); }
+  // 时间直接比 ISO 字符串：信封里存的就是 toISOString()，字典序等价于时间序
+  if (since) { where.push(`COALESCE(json_extract(envelope, '$.date'), '') >= ?`); args.push(since); }
+  if (before) { where.push(`COALESCE(json_extract(envelope, '$.date'), '') < ?`); args.push(before); }
+  if (from) {
+    const pat = `%${likeEscape(String(from).toLowerCase())}%`;
+    where.push(`( lower(COALESCE(json_extract(envelope, '$.from.name'), '')) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(json_extract(envelope, '$.from.address'), '')) LIKE ? ESCAPE '\\' )`);
+    args.push(pat, pat);
+  }
+  if (unreadOnly) {
+    // flags 存的是 JSON 数组（["\\Seen"]），必须用 json_each 逐项比，
+    // 不能对整串 LIKE——那样 'Seen' 也会被 'Unseen' 之类误命中
+    where.push("NOT EXISTS (SELECT 1 FROM json_each(messages.flags) WHERE json_each.value = '\\Seen')");
+  }
+  const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM messages ${w}`).all(...args)[0].n;
+  const rows = db.prepare(`
+    SELECT account_id, folder, uid, envelope, flags FROM messages
+    ${w}
+    ORDER BY COALESCE(json_extract(envelope, '$.date'), '') DESC, uid DESC
+    LIMIT ? OFFSET ?
+  `).all(...args, pageSize, (page - 1) * pageSize);
+  return {
+    total, page, pageSize,
+    messages: rows.map((r) => ({
+      ...JSON.parse(r.envelope), flags: JSON.parse(r.flags), account_id: r.account_id, folder: r.folder,
+    })),
+  };
+}
+
+// 某个文件夹在缓存里是否够用（未同步完的夹子不能用来回答「某月有几封」——
+// 会给出偏小的数字，而且看起来像准确答案）
+export function folderSynced(uid, accountId, folderPath) {
+  const row = getDb(uid).prepare('SELECT synced_at, total FROM folders WHERE account_id = ? AND path = ?')
+    .get(accountId, folderPath);
+  return !!(row && row.synced_at != null);
+}
+
 // ---------- 文件夹清单缓存 ----------
 // 左栏的文件夹列表以前每次都现场 IMAP LIST——outlook 冷连接慢（国内经常 10s+），
 // 一超时左栏这个账号就是空的。现在落库：命中直接回，后台静默刷新，失败也不影响显示。
@@ -465,7 +521,9 @@ function likeEscape(s) {
   return String(s).replace(/[\\%_]/g, (m) => `\\${m}`);
 }
 
-export function searchMessages(uid, accountId, query, { folder = null, limit = 20, since = null, before = null } = {}) {
+export function searchMessages(uid, accountId, query, {
+  folder = null, limit = 20, since = null, before = null, from = null, unreadOnly = false,
+} = {}) {
   const q = String(query || '').trim();
   if (!q) return [];
   limit = Math.min(Math.max(1, limit | 0), 50);
@@ -473,6 +531,10 @@ export function searchMessages(uid, accountId, query, { folder = null, limit = 2
   // 时间范围：调用方给的是 ISO 串（由 mcp-tools 统一把「上个月」「30d」这类说法换算好），
   // 信封里的 date 也是 ISO，直接按字符串比较即可（同格式、同 UTC）。
   const range = { since: since || null, before: before || null };
+  const extra = {
+    from: from ? `%${likeEscape(String(from).toLowerCase())}%` : null,
+    unreadOnly: !!unreadOnly,
+  };
   const warnFts = (e) => {
     // 兜底可以，但绝不能静默：上一次这行没有输出，`f MATCH ?` 的语法错误被吞了几个月，
     // 所有人都以为在用索引，其实每次都在 LIKE 扫全库。
@@ -488,7 +550,7 @@ export function searchMessages(uid, accountId, query, { folder = null, limit = 2
     const strict = ftsQuery(q, false);
     if (strict) {
       try {
-        const rows = searchFts(db, accountId, folder, q, strict, limit, range);
+        const rows = searchFts(db, accountId, folder, q, strict, limit, range, extra);
         if (rows.length) return rows;
       } catch (e) { warnFts(e); }
     }
@@ -499,11 +561,27 @@ export function searchMessages(uid, accountId, query, { folder = null, limit = 2
     if (cjkLen >= 4) {
       const loose = ftsQuery(q, true);
       if (loose && loose !== strict) {
-        try { return searchFts(db, accountId, folder, q, loose, limit, range); } catch (e) { warnFts(e); }
+        try { return searchFts(db, accountId, folder, q, loose, limit, range, extra); } catch (e) { warnFts(e); }
       }
     }
   }
-  return searchLike(db, accountId, folder, q, limit, range);
+  return searchLike(db, accountId, folder, q, limit, range, extra);
+}
+
+// 发件人 / 未读这两个条件 FTS 与 LIKE 两条路都要用，抽出来拼在 WHERE 末尾。
+// alias 传 'm.'（FTS 的 messages 有别名）或 'messages.'（LIKE 直查表名）。
+function extraWhere(alias, extra = {}, args = []) {
+  const parts = [];
+  if (extra.from) {
+    parts.push(`( lower(COALESCE(json_extract(${alias}envelope, '$.from.name'), '')) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(json_extract(${alias}envelope, '$.from.address'), '')) LIKE ? ESCAPE '\\' )`);
+    args.push(extra.from, extra.from);
+  }
+  if (extra.unreadOnly) {
+    // flags 是 JSON 数组（["\\Seen"]），必须 json_each 逐项比，不能整串 LIKE
+    parts.push(`NOT EXISTS (SELECT 1 FROM json_each(${alias}flags) AS fj WHERE fj.value = '\\Seen')`);
+  }
+  return parts.length ? ` AND ${parts.join(' AND ')}` : '';
 }
 
 function withSnippet(q, row) {
@@ -526,10 +604,12 @@ function withSnippet(q, row) {
   return out;
 }
 
-function searchFts(db, accountId, folder, q, match, limit, range = {}) {
+function searchFts(db, accountId, folder, q, match, limit, range = {}, extra = {}) {
   // ⚠ FTS5 的 MATCH 左侧必须是表名，不能写别名：原来写的是 `f MATCH ?`（f 是别名），
   // 每条搜索都抛 `no such column: f`，而调用方的 try/catch 把它吞了、静默退回 LIKE 全表扫。
   // 结果：全文索引建了却从没用上，几万封邮件每次搜索都在扫 JSON。2026-11-10 定位。
+  const args = [match, accountId, folder, folder, range.since, range.since, range.before, range.before];
+  const more = extraWhere('m.', extra, args);
   const rows = db.prepare(`
     SELECT m.folder, m.uid, m.envelope, m.flags, m.body
     FROM msg_fts f
@@ -538,14 +618,18 @@ function searchFts(db, accountId, folder, q, match, limit, range = {}) {
     WHERE msg_fts MATCH ? AND k.account_id = ? AND (? IS NULL OR k.folder = ?)
       AND (? IS NULL OR COALESCE(json_extract(m.envelope, '$.date'), '') >= ?)
       AND (? IS NULL OR COALESCE(json_extract(m.envelope, '$.date'), '') < ?)
+      ${more}
     ORDER BY COALESCE(json_extract(m.envelope, '$.date'), '') DESC, m.uid DESC
     LIMIT ?
-  `).all(match, accountId, folder, folder, range.since, range.since, range.before, range.before, limit);
+  `).all(...args, limit);
   return rows.map((r) => withSnippet(q, r));
 }
 
-function searchLike(db, accountId, folder, q, limit, range = {}) {
+function searchLike(db, accountId, folder, q, limit, range = {}, extra = {}) {
   const pat = `%${likeEscape(q.toLowerCase())}%`;
+  const args = [accountId, folder, folder, range.since, range.since, range.before, range.before,
+    pat, pat, pat, pat, pat];
+  const more = extraWhere('messages.', extra, args);
   const rows = db.prepare(`
     SELECT folder, uid, envelope, flags, body,
            lower(json_extract(envelope, '$.subject'))                                   AS s,
@@ -563,10 +647,10 @@ function searchLike(db, accountId, folder, q, limit, range = {}) {
          OR lower(json_extract(envelope, '$.from.address')) LIKE ? ESCAPE '\\'
          OR lower(json_extract(envelope, '$.to')) LIKE ? ESCAPE '\\'
          OR lower(coalesce(json_extract(body, '$.text'), '')) LIKE ? ESCAPE '\\' )
+      ${more}
     ORDER BY COALESCE(json_extract(envelope, '$.date'), '') DESC, uid DESC
     LIMIT ?
-  `).all(accountId, folder, folder, range.since, range.since, range.before, range.before,
-    pat, pat, pat, pat, pat, limit);
+  `).all(...args, limit);
   return rows.map((r) => withSnippet(q, r));
 }
 

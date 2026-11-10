@@ -501,6 +501,54 @@ ok('GET /mcp → 405', getRes.status === 405, String(getRes.status));
 r = await req('GET', '/api/agent/tokens', null, false);
 ok('未登录不能列出令牌', r.status === 401, String(r.status));
 
+// ---------- 2026-11-10 回归：时间说法必须解析成「一段」而不是「一个点」 ----------
+// 事故现场：问「2025 年 10 月的邮件」，只把 2025-10-01 当成 since，于是把 2025-11
+// 之后的全部邮件也算进来；问「上个月」同样会带上本月。这些说法本身就是区间。
+{
+  const { parseSpan, resolveRange } = await import('../server/mcp-tools.js');
+  const now = new Date();
+  const Y = now.getUTCFullYear();
+  const M = now.getUTCMonth();
+  const iso = (y, m) => new Date(Date.UTC(y, m, 1)).toISOString();
+
+  const last = parseSpan('上个月', 'since');
+  ok('上个月 → 上月初到本月初',
+    last.since === iso(Y, M - 1) && last.before === iso(Y, M), JSON.stringify(last));
+
+  const ym = parseSpan('2025年10月', 'since');
+  ok('「2025年10月」→ 整月区间',
+    ym.since === '2025-10-01T00:00:00.000Z' && ym.before === '2025-11-01T00:00:00.000Z', JSON.stringify(ym));
+
+  const dash = parseSpan('2025-10', 'since');
+  ok('「2025-10」同上', dash.since === ym.since && dash.before === ym.before, JSON.stringify(dash));
+
+  const lastOct = parseSpan('去年10月', 'since');
+  ok('「去年10月」解析到上一年同月',
+    lastOct.since === iso(Y - 1, 9) && lastOct.before === iso(Y - 1, 10), JSON.stringify(lastOct));
+
+  const lastYear = parseSpan('去年', 'since');
+  ok('「去年」→ 整年区间',
+    lastYear.since === iso(Y - 1, 0) && lastYear.before === iso(Y, 0), JSON.stringify(lastYear));
+
+  const rel = parseSpan('7d', 'since');
+  ok('「7d」只给起点', !!rel.since && rel.before === null, JSON.stringify(rel));
+
+  const day = parseSpan('2025-10-01', 'since');
+  ok('具体日期只给起点', day.since === '2025-10-01T00:00:00.000Z' && day.before === null, JSON.stringify(day));
+
+  const both = resolveRange('2025年10月', null);
+  ok('resolveRange 自动补右端', both.sinceIso === ym.since && both.beforeIso === ym.before, JSON.stringify(both));
+
+  const explicit = resolveRange('2025-01-01', '2025-07-01');
+  ok('显式给两端时以调用方为准',
+    explicit.sinceIso === '2025-01-01T00:00:00.000Z' && explicit.beforeIso === '2025-07-01T00:00:00.000Z',
+    JSON.stringify(explicit));
+
+  let threw = false;
+  try { parseSpan('前年十三月'.replace('十三', '13'), 'since'); } catch { threw = true; }
+  ok('13 月要报错而不是静默', threw);
+}
+
 cleanup();
 await new Promise((res) => setTimeout(res, 250));
 try { fs.rmSync(DATA, { recursive: true, force: true }); } catch { /* Windows 上偶发占用 */ }

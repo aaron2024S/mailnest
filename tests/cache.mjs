@@ -536,3 +536,61 @@ test('整串搜不到时放宽成逐字 AND 兜底', () => {
   const r = cache.searchMessages(uid, A, '信用卡账单');
   assert.equal(r.length, 1, '整串不连续时应放宽命中');
 });
+
+// ---------- 2026-11-10 回归：按时间/发件人筛选，过滤必须在分页之前 ----------
+// 事故现场：list_messages 先按 IMAP 序号取「最新第 1 页」，再在那一页里按日期过滤。
+// 问「2025 年 10 月的邮件」，那些信根本不在最新 30 封里 → 恒返回 0 封，
+// 而调用方无法分辨「真的没有」和「翻页没翻到」。改成 SQL 先过滤再分页。
+test('listRange：过滤在分页之前，总数是范围内真实数量', () => {
+  const A = 'a_rng01';
+  const mk = (uid, subject, date) => mkMsg(uid, subject, date);
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [
+    mk(1, '今年的信', '2026-11-01T00:00:00.000Z'),
+    mk(2, '今年的信2', '2026-10-15T00:00:00.000Z'),
+    ...Array.from({ length: 30 }, (_, i) => mk(100 + i, `充数 ${i}`, `2026-09-${String(i % 28 + 1).padStart(2, '0')}T00:00:00.000Z`)),
+    mk(200, '去年十月的账单', '2025-10-18T02:00:00.000Z'),
+    mk(201, '去年十月的机票', '2025-10-02T02:00:00.000Z'),
+    mk(202, '去年十一月的信', '2025-11-05T02:00:00.000Z'),
+  ]);
+  const r = cache.listRange(uid, [A], {
+    since: '2025-10-01T00:00:00.000Z', before: '2025-11-01T00:00:00.000Z', page: 1, pageSize: 10,
+  });
+  // 33 封「今年」的排前面，这一页原本根本碰不到 2025-10
+  assert.equal(r.total, 2, 'total 必须是范围内的真实封数');
+  assert.deepEqual(r.messages.map((m) => m.uid).sort(), [200, 201]);
+});
+
+test('listRange：from 按发件人筛，不把正文提到的算进来', () => {
+  const A = 'a_rng02';
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [
+    { uid: 1, from: { name: '华为开发者联盟', address: 'news@notice02.device.com' }, to: [], subject: '审核通过', date: '2026-11-10T00:00:00.000Z', flags: ['\\Seen'], size: 1, hasAttachment: false },
+    { uid: 2, from: { name: '华为开发者联盟', address: 'noreply@notice01.device.com' }, to: [], subject: '新通知', date: '2026-11-09T00:00:00.000Z', flags: [], size: 1, hasAttachment: false },
+    { uid: 3, from: { name: '招商银行信用卡', address: 'ccsvc@message.cmbchina.com' }, to: [], subject: '电子账单', date: '2026-10-18T00:00:00.000Z', flags: [], size: 1, hasAttachment: false },
+  ]);
+  // 账单正文里提到「华为京东自营」，搜关键词会命中，但发件人不是华为
+  cache.putBody(uid, A, 'INBOX', 3, { text: '京东支付-华为京东自营旗舰店 ¥854.10', html: '' });
+
+  assert.equal(cache.searchMessages(uid, A, '华为').length, 3, '关键词搜索会连正文一起命中（这是预期行为）');
+  const bySender = cache.listRange(uid, [A], { from: '华为' });
+  assert.equal(bySender.total, 2, 'from 只按发件人算');
+  assert.ok(bySender.messages.every((m) => m.uid !== 3));
+
+  const unreadFrom = cache.listRange(uid, [A], { from: '华为', unreadOnly: true });
+  assert.equal(unreadFrom.total, 1, 'from + unreadOnly 只留未读');
+  assert.equal(unreadFrom.messages[0].uid, 2);
+
+  assert.equal(cache.listRange(uid, [A], { from: 'steampowered' }).total, 0);
+});
+
+test('searchMessages 支持 from / unreadOnly', () => {
+  const A = 'a_rng03';
+  cache.syncFolderFull(uid, A, 'INBOX', 1, [
+    { uid: 1, from: { name: 'Stack Overflow', address: 'noreply@stackoverflow.com' }, to: [], subject: 'Weekly digest', date: '2026-11-01T00:00:00.000Z', flags: [], size: 1, hasAttachment: false },
+    { uid: 2, from: { name: '招行', address: 'ccsvc@cmbchina.com' }, to: [], subject: 'Stack 相关账单', date: '2026-10-01T00:00:00.000Z', flags: ['\\Seen'], size: 1, hasAttachment: false },
+  ]);
+  assert.equal(cache.searchMessages(uid, A, 'Stack').length, 2);
+  assert.equal(cache.searchMessages(uid, A, 'Stack', { from: 'stackoverflow' }).length, 1);
+  const unread = cache.searchMessages(uid, A, 'Stack', { unreadOnly: true });
+  assert.equal(unread.length, 1);
+  assert.equal(unread[0].uid, 1);
+});
