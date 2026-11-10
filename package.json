@@ -1,6 +1,6 @@
 {
   "name": "mailnest",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "type": "module",
   "description": "MailNest — self-hosted multi-account webmail",
