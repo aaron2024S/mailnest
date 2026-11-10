@@ -496,6 +496,23 @@ export function folderSynced(uid, accountId, folderPath) {
   return !!(row && row.synced_at != null);
 }
 
+// 跨文件夹查询时用：这个账号还有哪些夹没同步完。
+// 跨夹统计的 total 只覆盖「已同步」的夹；不把差额说出来，用户会把它当成真实总数。
+// 未知的夹（folder_lists 里没有）无从判断，不在这里报——宁可少报也不误报。
+export function unsyncedFolders(uid, accountId) {
+  const db = getDb(uid);
+  const row = db.prepare('SELECT folders FROM folder_lists WHERE account_id = ?').get(accountId);
+  if (!row) return [];
+  let all = [];
+  try { all = JSON.parse(row.folders).map((f) => f.path).filter(Boolean); } catch { return []; }
+  if (!all.length) return [];
+  const synced = new Set(
+    db.prepare('SELECT path FROM folders WHERE account_id = ? AND synced_at IS NOT NULL')
+      .all(accountId).map((r) => r.path),
+  );
+  return all.filter((p) => !synced.has(p));
+}
+
 // ---------- 文件夹清单缓存 ----------
 // 左栏的文件夹列表以前每次都现场 IMAP LIST——outlook 冷连接慢（国内经常 10s+），
 // 一超时左栏这个账号就是空的。现在落库：命中直接回，后台静默刷新，失败也不影响显示。

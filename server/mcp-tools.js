@@ -585,12 +585,20 @@ export function registerTools(server, ctx) {
       // 实测问「2025 年 10 月的邮件」返回 0 封，因为那些邮件根本不在最新 30 封里。
       if (needFilter) {
         const targets = account ? [resolveAccount(uid, account)] : all;
-        // 只按发件人问「有没有来自 X 的邮件」时，如果用户没指定文件夹，就该搜全部文件夹：
-        // 实测这个邮箱把 Steam 的 104 封全放在自定义夹「Steam」里，只查收件箱会答成「只有几封」。
-        const crossFolder = !!from && !folder;
+        // 不指名文件夹时，两类问法都该搜全部文件夹：
+        //   ①「有没有来自 X 的邮件」——这个邮箱把 Steam 的 104 封全放在自定义夹，只查收件箱会答成「只有几封」；
+        //   ②「上个月有哪些邮件」——2026-10 一共 4 封，其中 2 封在 Steam 夹里，只查收件箱会漏一半。
+        // 早先只给 ① 开了跨夹，② 仍然只查收件箱，用户看到的就是「上个月只有 2 封」。
+        const crossFolder = !folder && (!!from || range.ranged);
         const scopeDir = crossFolder ? null : dir;
         const ids = targets.filter((a) => crossFolder || cache.folderSynced(uid, a.id, dir)).map((a) => a.id);
         const notSynced = crossFolder ? [] : targets.filter((a) => !cache.folderSynced(uid, a.id, dir));
+        // 跨夹统计只覆盖「已经同步到本地」的夹。不说出来的话，偏小的 total 会被当成真实总数。
+        const partialDirs = crossFolder
+          ? targets
+            .map((a) => [a, cache.unsyncedFolders(uid, a.id)])
+            .filter(([, fs]) => fs.length)
+          : [];
         if (!ids.length) {
           throw new Error('这些邮箱的「' + dir + '」还没同步到本地，暂时不能按条件筛选；'
             + '先用不带条件的 list_messages 打开一次让它同步，或稍等几秒再试');
@@ -615,6 +623,9 @@ export function registerTools(server, ctx) {
           messages: items,
           ...(notSynced.length
             ? { note: `${notSynced.map(accountLabel).join('、')} 的「${dir}」还没同步完，上面的数字不含这些账号` }
+            : {}),
+          ...(partialDirs.length
+            ? { note3: `${partialDirs.map(([a, fs]) => `${accountLabel(a)} 还有 ${fs.length} 个文件夹没同步完`).join('；')}，上面的数字只算了已同步的文件夹` }
             : {}),
           ...(r.total > items.length
             ? { note2: `共 ${r.total} 封，本页显示 ${items.length} 封，往后翻用 page=${pg + 1}` }

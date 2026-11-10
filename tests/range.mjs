@@ -69,6 +69,8 @@ const steamFolder = [
   m(301, ['Steam Support', 'noreply@steam.example'], '购买回执', '2026-06-01T02:00:00.000Z', READ),
   m(302, ['Steam Support', 'noreply@steam.example'], '购买回执', '2026-06-05T02:00:00.000Z', READ),
   m(303, ['Steam Support', 'noreply@steam.example'], '新设备访问', '2026-09-01T02:00:00.000Z', UNREAD),
+  // 上个月的一封，故意放在自定义夹里：「上个月有哪些邮件」不指名文件夹时也该算上它
+  m(304, ['Steam Support', 'noreply@steam.example'], '感谢您在 Steam 上的购买！', '2026-10-15T02:00:00.000Z', READ),
 ];
 // 12306 也在自定义夹
 const trainFolder = [
@@ -117,8 +119,8 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
 
 {
   const r = await callList({ from: 'Steam' });
-  ok('from=Steam 跨文件夹汇总（收件箱 + 自定义夹）= 4 封',
-    !r.error && r.json.total === 4, JSON.stringify(r.json?.total));
+  ok('from=Steam 跨文件夹汇总（收件箱 + 自定义夹）= 5 封',
+    !r.error && r.json.total === 5, JSON.stringify(r.json?.total));
   ok('跨文件夹时每条都带回 folder，后续「看第 2 封」才定得到位',
     !r.error && r.json.messages.every((x) => x.folder), JSON.stringify(r.json?.messages?.map((x) => x.folder)));
 }
@@ -156,8 +158,9 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
 
 {
   const r = await callList({ since: '上个月' });
-  ok('since=上个月 = 整月区间（2026-10 的 2 封），不把本月的算进来',
-    !r.error && r.json.total === 2 && (r.json.messages || []).every((x) => String(x.date).slice(0, 7) === '2026-10'),
+  // 3 封：收件箱 2 封 + Steam 自定义夹 1 封。只查收件箱会答成 2 封。
+  ok('since=上个月 = 整月区间且跨全部文件夹（3 封），不把本月的算进来',
+    !r.error && r.json.total === 3 && (r.json.messages || []).every((x) => String(x.date).slice(0, 7) === '2026-10'),
     JSON.stringify((r.json?.messages || []).map((x) => x.date)));
 }
 
@@ -169,15 +172,16 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
 
 {
   const r = await callList({ since: '2026-01-01', before: '2026-05-01' });
-  ok('只给时间不给文件夹时按收件箱算（不会偷偷去翻别的夹）：0 封',
-    !r.error && r.json.total === 0, JSON.stringify(r.json?.total));
+  // 这 2 封都在「12306订票」夹里；纯时间问句如果只查收件箱，用户会得到「那段时间没邮件」
+  ok('只给时间不给文件夹时也跨全部文件夹：2026 年 1-4 月 2 封（在自定义夹里）',
+    !r.error && r.json.total === 2, JSON.stringify(r.json?.total));
 }
 
 // ---------- 发件人 + 时间 ----------
 {
   const r = await callList({ from: 'Steam', since: '上个月' });
-  ok('from + since 组合：上个月 Steam 1 封',
-    !r.error && r.json.total === 1 && allFrom(r.json, 'steam'), JSON.stringify(r.json?.total));
+  ok('from + since 组合：上个月 Steam 2 封',
+    !r.error && r.json.total === 2 && allFrom(r.json, 'steam'), JSON.stringify(r.json?.total));
 }
 
 {
@@ -190,13 +194,63 @@ const allFrom = (j, pat) => sendersOf(j).every((s) => s.toLowerCase().includes(p
 {
   const r = await callList({ from: 'Steam', pageSize: 2 });
   ok('total 是条件命中的真实封数，不是本页条数',
-    !r.error && r.json.total === 4 && r.json.messages.length === 2, `${r.json?.total}/${r.json?.messages?.length}`);
+    !r.error && r.json.total === 5 && r.json.messages.length === 2, `${r.json?.total}/${r.json?.messages?.length}`);
   ok('还有更多时提示怎么翻页', !r.error && !!r.json.note2, JSON.stringify(r.json?.note2));
 }
 
 {
   const r = await callList({ from: 'Steam', pageSize: 2, page: 2 });
   ok('第二页接得上', !r.error && r.json.messages.length === 2, String(r.json?.messages?.length));
+}
+
+// ---------- 指定账号（用户常问「QQ邮箱里有没有华为的邮件」） ----------
+{
+  const r = await callList({ from: '华为', account: 'QQ邮箱' });
+  ok('account + from：QQ邮箱里的华为邮件 2 封',
+    !r.error && r.json.total === 2 && allFrom(r.json, 'huawei'), JSON.stringify(r.json?.total));
+}
+
+{
+  const r = await callList({ from: '华为', account: 'outlook' });
+  ok('account + from：outlook 里没有华为的，返回 0 而不是另一个账号的',
+    !r.error && r.json.total === 0, JSON.stringify(r.json?.total));
+}
+
+{
+  const r = await callList({ since: '2025年10月', account: 'outlook' });
+  ok('account + since：outlook 去年 10 月 1 封（那封在 outlook 收件箱）',
+    !r.error && r.json.total === 1, JSON.stringify(r.json?.total));
+}
+
+// ---------- 搜索也要支持同一套条件 ----------
+{
+  const r = await tools.search_messages({ query: '购买', from: 'Steam' });
+  const t = (r.content || []).map((c) => c.text).join('');
+  const j = JSON.parse(t);
+  ok('search + from：「购买」只回 Steam 发的，不把正文提到购买的也算进来',
+    Array.isArray(j.messages) && j.messages.length > 0
+    && j.messages.every((x) => String(x.from || '').toLowerCase().includes('steam')),
+    JSON.stringify((j.messages || []).map((x) => x.from)));
+}
+
+{
+  const r = await tools.search_messages({ query: '购买', from: '华为' });
+  const t = (r.content || []).map((c) => c.text).join('');
+  ok('search + from 无交集时明确说没搜到（不是返回全量）',
+    t.includes('没搜到'), t.slice(0, 80));
+}
+
+// ---------- 分页不能重复也不能漏 ----------
+{
+  const seen = [];
+  let total = null;
+  for (let p = 1; p <= 3; p++) {
+    const r = await callList({ from: 'Steam', pageSize: 2, page: p });
+    total = r.json.total;
+    seen.push(...r.json.messages.map((x) => `${x.account}|${x.folder}|${x.uid}`));
+  }
+  ok('翻页不重复（3 页 × 2 条，实际 5 封，去重后仍是 5）',
+    new Set(seen).size === 5 && seen.length === 5, `total=${total} got=${seen.length} uniq=${new Set(seen).size}`);
 }
 
 // ---------- 不带条件时保持原行为 ----------
