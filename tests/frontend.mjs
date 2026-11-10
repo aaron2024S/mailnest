@@ -712,4 +712,41 @@ function sseCtx(over = {}) {
   ok('回复引文按行加 > 前缀', M.quoteLines('a\nb') === '> a\n> b');
 }
 
+// 28) 回复全部：按钮必须常显（此前按收件人数 >1 隐藏，单收件人邮件看不到）；收件人合并逻辑
+{
+  const idx = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const line = idx.split('\n').find((l) => l.includes('replyAll(selected)'));
+  ok('阅读区「回复全部」按钮存在', !!line);
+  ok('「回复全部」不再按收件人数隐藏（无 v-if）', !!line && !line.includes('v-if'), line);
+
+  const ctx = {
+    accounts: [{ id: 'a1', email: 'me@outlook.com' }],
+    toasts: [], opened: null,
+    toast(t) { this.toasts.push(t); },
+    openCompose(o) { this.opened = o; },
+    fullDate: M.fullDate, quoteBody: M.quoteBody, quoteLines: M.quoteLines, replyAll: M.replyAll,
+  };
+  ctx.replyAll({
+    accountId: 'a1', subject: '感谢您在 Steam 上的购买!',
+    from: { address: 'noreply@steampowered.com', name: 'Steam Support' },
+    to: [{ address: 'me@outlook.com' }, { address: 'other@x.com' }],
+    cc: [{ address: 'cc@x.com' }, { address: 'ME@outlook.com' }],
+    date: new Date('2026-10-29T10:11:00+08:00'), html: '<p>您好</p>', text: '您好',
+  });
+  ok('回复全部：主收件人是原发件人', ctx.opened?.to === 'noreply@steampowered.com', ctx.opened?.to);
+  ok('回复全部：其他收件人+抄送进 cc、去自己、去重', ctx.opened?.cc === 'other@x.com, cc@x.com', ctx.opened?.cc);
+  ok('回复全部：主题补 Re:', ctx.opened?.subject === 'Re: 感谢您在 Steam 上的购买!', ctx.opened?.subject);
+  ok('回复全部：引文带原邮件内容', /您好/.test(ctx.opened?.text || ''));
+
+  const ctx2 = {
+    accounts: [{ id: 'a1', email: 'me@outlook.com' }],
+    toasts: [], opened: null,
+    toast(t) { this.toasts.push(t); },
+    openCompose(o) { this.opened = o; },
+    fullDate: M.fullDate, quoteBody: M.quoteBody, quoteLines: M.quoteLines, replyAll: M.replyAll,
+  };
+  ctx2.replyAll({ accountId: 'a1', subject: 'x', from: { address: 'me@outlook.com' }, to: [{ address: 'me@outlook.com' }], cc: [], date: new Date(), text: 'x' });
+  ok('回复全部：只有自己时明确提示且不打开写信', !ctx2.opened && /没有其他收件人/.test(ctx2.toasts[0] || ''), String(ctx2.toasts[0]));
+}
+
 console.log(`\n全部通过：${pass} 项断言`);
