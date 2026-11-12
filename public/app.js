@@ -219,7 +219,15 @@ const app = createApp({
     emailDoc() {
       const h = this.selected?.html || '';
       if (!h) return '';
-      return '<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank">'
+      // 邮件按「白纸」恒定渲染，不随系统主题翻转。有些营销邮件自带暗色适配：
+      // @media (prefers-color-scheme: dark) 命中系统深色时把文字改浅（白底白字）、
+      // 或用 light-dark()/color-scheme 声明随主题变色。对策两招：
+      // ① 把 prefers-color-scheme: dark 换成永不匹配的假值 → 邮件永远取亮色分支；
+      // ② 文档根 !important 强制 color-scheme: light（写在正文之后，压住邮件自带声明），
+      //    light-dark()、Canvas 系统色、默认前景/背景全部锁死在亮色侧。
+      // 自带完整深底浅字的邮件（Steam 这类内联样式）不受影响，照原作者的样子渲染。
+      const body = h.replace(/prefers-color-scheme\s*:\s*dark/gi, 'prefers-color-scheme: mailnest-light');
+      return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"><base target="_blank">'
         + '<style>html,body{margin:0;padding:0;background:#fff;color:#24292f;'
         + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;word-break:break-word}'
         + 'img{max-width:100%;height:auto}'
@@ -229,7 +237,8 @@ const app = createApp({
         + 'table:not([style]):not([width]) td,table:not([style]):not([width]) th{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
         + 'table:not([style]):not([width]) th{background:#f5f6f8}'
         + 'blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
-        + '</style></head><body>' + h + '</body></html>';
+        + '</style></head><body>' + body
+        + '<style>:root{color-scheme:light!important}</style></body></html>';
     },
   },
 

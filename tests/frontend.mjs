@@ -685,6 +685,12 @@ function sseCtx(over = {}) {
   ok('emailDoc 保留邮件原始 HTML（含 style，模板布局不受影响）', doc.includes('<style>p{color:red}</style>'));
   ok('emailDoc 保留裸表格补边框规则（且不碰带 width 属性的模板布局表）', doc.includes('table:not([style]):not([width])'));
   ok('纯文本邮件（无 html）emailDoc 为空串走 r-text 分支', C.emailDoc.call({ selected: { text: 'x' } }) === '');
+  // 深色系统主题下邮件自带 @media (prefers-color-scheme: dark) 会白底白字 —— 必须废掉深色分支并锁死亮色
+  const darkMail = '<style>@media (prefers-color-scheme: dark){p{color:#fff}}@media (PREFERS-COLOR-SCHEME: DARK){div{color:#eee}}</style><p>hi</p>';
+  const docDark = C.emailDoc.call({ selected: { html: darkMail } });
+  ok('emailDoc 废掉 prefers-color-scheme: dark 媒体查询（含大小写变体）', !/prefers-color-scheme\s*:\s*dark/i.test(docDark) && docDark.includes('prefers-color-scheme: mailnest-light'));
+  ok('emailDoc 文档根强制 color-scheme: light（压 light-dark()/系统色/自带声明）', docDark.includes(':root{color-scheme:light!important}') && docDark.includes('<meta name="color-scheme" content="light">'));
+  ok('emailDoc 亮色守卫写在正文之后（级联压住邮件自带 color-scheme 声明）', docDark.lastIndexOf('color-scheme:light!important') > docDark.lastIndexOf('<p>hi</p>'));
   ok('fitFrame 高度自适应方法存在', typeof M.fitFrame === 'function');
   ok('watch.selected 清理尺寸观察器', typeof captured.watch?.selected === 'function');
 }
