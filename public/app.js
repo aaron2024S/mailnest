@@ -231,6 +231,10 @@ const app = createApp({
         + '<style>html,body{margin:0;padding:0;background:#fff;color:#24292f;'
         + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;word-break:break-word}'
         + 'img{max-width:100%;height:auto}'
+        // 定宽模板（width=600/800 属性）超出阅读面板会出横向滚动条，看信得来回拖：
+        // 表格一律 max-width:100% —— 只在超出时收缩（列挤窄、文字换行），永远不拉伸，
+        // 窄表不受影响，Ubisoft 那次「width:100% 压碎定宽模板」的教训只针对拉伸方向
+        + 'table{max-width:100%}'
         // 「裸表格补边框」只针对真·裸表（无 style 也无 width 属性）：模板布局表用
         // width="600" 属性定宽、无 style，若按选择器补 width:100% 会覆盖属性把布局打碎
         + 'table:not([style]):not([width]){border-collapse:collapse;margin:10px 0}'
@@ -1235,11 +1239,24 @@ const app = createApp({
         .replace(/<[^>]+>/g, '')
         .replace(/&(amp|lt|gt|quot|#39|nbsp|mdash|ndash|hellip);/g, (w, n) => ENT[n] || w)
         .replace(/&#(\d+);/g, (w, n) => String.fromCodePoint(Number(n)))
+        // &nbsp; 解码成 \u00a0：营销邮件拿它垫空段/缩进，若不归一成普通空格，
+        // 行尾清理和空行压缩都认不出来，引文会变成一大片只有「>」的空壳行
+        .replace(/\u00a0/g, ' ')
         .replace(/[ \t]+\n/g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
     },
-    quoteLines(t) { return t.split('\n').map((l) => '> ' + l).join('\n').slice(0, 4000); },
+    // 逐行加「> 」；行尾空白去掉，连续空行/首尾空行压成一个「>」（营销邮件成堆的
+    // &nbsp; 垫空段若原样引用，会出现一大片空「>」行，视觉上像引用了一堆空壳）
+    quoteLines(t) {
+      const out = [];
+      for (const l of t.split('\n').map((x) => x.replace(/[ \t\u00a0]+$/, ''))) {
+        if (l === '' && (out.length === 0 || out[out.length - 1] === '')) continue;
+        out.push(l);
+      }
+      while (out.length && out[out.length - 1] === '') out.pop();
+      return out.map((l) => (l === '' ? '>' : '> ' + l)).join('\n').slice(0, 4000);
+    },
     reply(m, mode) {
       const acc = this.accounts.find((a) => a.id === m.accountId);
       if (mode === 'reply') {

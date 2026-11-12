@@ -684,6 +684,7 @@ function sseCtx(over = {}) {
   ok('emailDoc 重置 body 边距并铺白底', /html,body\{margin:0;padding:0;background:#fff/.test(doc));
   ok('emailDoc 保留邮件原始 HTML（含 style，模板布局不受影响）', doc.includes('<style>p{color:red}</style>'));
   ok('emailDoc 保留裸表格补边框规则（且不碰带 width 属性的模板布局表）', doc.includes('table:not([style]):not([width])'));
+  ok('emailDoc 表格 max-width:100%（定宽模板超面板时收缩，不出横向滚动条）', doc.includes('table{max-width:100%}'));
   ok('纯文本邮件（无 html）emailDoc 为空串走 r-text 分支', C.emailDoc.call({ selected: { text: 'x' } }) === '');
   // 深色系统主题下邮件自带 @media (prefers-color-scheme: dark) 会白底白字 —— 必须废掉深色分支并锁死亮色
   const darkMail = '<style>@media (prefers-color-scheme: dark){p{color:#fff}}@media (PREFERS-COLOR-SCHEME: DARK){div{color:#eee}}</style><p>hi</p>';
@@ -715,7 +716,10 @@ function sseCtx(over = {}) {
   ok('常见实体解码', M.quoteBody({ html: '<p>A&amp;B&nbsp;C&lt;D</p>' }) === 'A&B C<D');
   ok('mailto 链接不补 href', M.quoteBody({ html: '<p>发<a href="mailto:a@b.c">邮件</a>给我</p>' }) === '发邮件给我');
   ok('连续空行压成一个', !/\n{3,}/.test(M.quoteBody({ html: '<p>a</p><div></div><div></div><p>b</p>' })));
+  ok('&nbsp; 垫空段归一成空格（可被行尾清理和空行压缩识别）', M.quoteBody({ html: '<p>&nbsp;&nbsp;&nbsp;</p><p>a</p>' }) === 'a');
   ok('回复引文按行加 > 前缀', M.quoteLines('a\nb') === '> a\n> b');
+  ok('quoteLines 空行压成单个 >、首尾空行去掉',
+    M.quoteLines('a\n \n\u00a0\nb\n\n') === '> a\n>\n> b', JSON.stringify(M.quoteLines('a\n \n\u00a0\nb\n\n')));
 }
 
 // 28) 回复全部：按钮必须常显（此前按收件人数 >1 隐藏，单收件人邮件看不到）；收件人合并逻辑
