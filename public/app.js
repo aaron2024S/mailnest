@@ -189,6 +189,10 @@ const app = createApp({
       syncing: false,
 
       compose: { open: false, accountId: '', to: '', cc: '', subject: '', text: '', quoteHtml: '', quoteText: '', attachments: [], sending: false, showCc: false, mode: 'new', replyTo: null, draftId: null, error: '' },
+      // 本地草稿：存在服务端 drafts/ 目录（不往邮件服务器 APPEND），重新打开时要
+      // 能连原文引用、附件、回复关系一起还原
+      drafts: [],
+      draftBusy: false,
       quickReplyText: '',
       sendingQuick: false,
 
@@ -197,7 +201,7 @@ const app = createApp({
       railOpen: false,
       readerOpen: false,
       readerMoveOpen: false,
-      modals: { settings: false, users: false },
+      modals: { settings: false, users: false, drafts: false },
       settingsTab: 'accounts',
       addForm: { open: false, email: '', displayName: '', password: '', preset: null, color: PALETTE[0], imapHost: '', imapPort: 993, smtpHost: '', smtpPort: 465, testing: false, saving: false, message: '', ok: false },
       // Agent 接入：只存令牌元信息，明文只在创建那一次响应里出现
@@ -452,6 +456,7 @@ const app = createApp({
       this.view = 'app';
       await this.loadAllFoldersAndUnread();
       this.pickAccount('all');
+      this.loadDrafts();
       this.connectEvents();
     },
 
@@ -1309,7 +1314,8 @@ const app = createApp({
       // 原文引用（Outlook 式）：quoteHtml 原样渲染进正文，quoteText 是给纯文本客户端的兜底
       this.compose.quoteHtml = opts.quoteHtml || '';
       this.compose.quoteText = opts.quoteText || '';
-      this.compose.attachments = [];
+      // 从草稿恢复时要连附件一起带回来，否则「存了草稿」等于把附件丢了
+      this.compose.attachments = (opts.attachments || []).slice();
       this.compose.draftId = opts.draftId || null;
       this.compose.error = '';
     },
@@ -1488,6 +1494,8 @@ const app = createApp({
         await this.api('/api/send', { method: 'POST', body });
         this.compose.open = false;
         this.toast('已发送', 'ok');
+        // 发出去的同时服务端已经把这份草稿删了（body.draftId），本地列表跟上
+        this.loadDrafts();
         this.refreshAll();
       } catch (e) {
         this.compose.error = e.message;
@@ -1516,24 +1524,101 @@ const app = createApp({
         this.toast(e.message, 'error');
       } finally { this.sendingQuick = false; }
     },
-    async saveComposeDraft() {
+    // ---------- 本地草稿 ----------
+    async loadDrafts() {
       try {
-        const d = await this.api('/api/drafts', {
-          method: 'POST',
-          body: { id: this.compose.draftId, accountId: this.compose.accountId, to: this.compose.to, cc: this.compose.cc, subject: this.compose.subject, text: this.compose.text },
-        });
-        this.compose.draftId = d.draft.id;
-        this.toast('草稿已保存（仅存本机）', 'ok');
+        const d = await this.api('/api/drafts');
+        this.drafts = d.drafts || [];
+      } catch { /* 草稿列表拉不到不影响收发信，静默即可 */ }
+    },
+    openDrafts() {
+      this.modals.drafts = true;
+      this.loadDrafts();
+    },
+    draftTitle(d) { return d.subject || '(无主题)'; },
+    // 草稿里值得提醒的附加内容：有原文引用、有附件，列表上要能看出来，
+    // 否则「继续编辑」后才发现附件早没了
+    draftMeta(d) {
+      const bits = [];
+      if (d.hasQuote || d.quoteHtml || d.quoteText) bits.push('含原文');
+      const n = (d.attachments || []).length;
+      if (n) bits.push(`${n} 个附件`);
+      const acc = this.accounts.find((a) => a.id === d.accountId);
+      bits.push(acc ? acc.displayName : '账号已删除');
+      return bits.join(' · ');
+    },
+    // 列表是轻量的（不含附件内容/原文 HTML），点开某份再取全文
+    async openDraft(d) {
+      let full;
+      try {
+        full = (await this.api(`/api/drafts/${encodeURIComponent(d.id)}`)).draft;
+      } catch (e) { this.toast(e.message, 'error'); return; }
+      const acc = this.accounts.find((a) => a.id === full.accountId);
+      if (!acc) this.toast('这份草稿的邮箱账号已被删除，请先选一个发件人', 'warn');
+      this.modals.drafts = false;
+      this.openCompose({
+        // 老草稿可能没存 inReplyTo：这时候不能挂着「回复」的牌子却发成一封新信
+        mode: full.mode === 'reply' && !full.inReplyTo ? 'new' : (full.mode || 'new'),
+        accountId: acc ? acc.id : (this.accounts[0] ? this.accounts[0].id : ''),
+        to: full.to || '',
+        cc: full.cc || '',
+        subject: full.subject || '',
+        text: full.text || '',
+        // 原文引用、附件、回复关系都原样还原：草稿是「没写完的信」，不是「一段文字」
+        quoteHtml: full.quoteHtml || '',
+        quoteText: full.quoteText || '',
+        attachments: full.attachments || [],
+        replyTo: full.inReplyTo ? { messageId: full.inReplyTo, references: full.references || full.inReplyTo } : null,
+        draftId: full.id,
+      });
+    },
+    async deleteDraft(d) {
+      if (!confirm(`删除草稿「${this.draftTitle(d)}」？删除后无法恢复。`)) return;
+      try {
+        await this.api(`/api/drafts/${encodeURIComponent(d.id)}`, { method: 'DELETE' });
+        this.drafts = this.drafts.filter((x) => x.id !== d.id);
+        if (this.compose.draftId === d.id) this.compose.draftId = null;
+        this.toast('草稿已删除', 'ok');
       } catch (e) { this.toast(e.message, 'error'); }
     },
+    async saveComposeDraft() {
+      if (this.draftBusy) return false;
+      this.draftBusy = true;
+      try {
+        const c = this.compose;
+        const d = await this.api('/api/drafts', {
+          method: 'POST',
+          body: {
+            id: c.draftId, accountId: c.accountId, to: c.to, cc: c.cc, subject: c.subject,
+            text: c.text,
+            // 这三样以前没存，导致「存草稿 → 再打开」原文引用和附件全丢，回复也变成新邮件
+            quoteHtml: c.quoteHtml || '', quoteText: c.quoteText || '',
+            mode: c.mode,
+            inReplyTo: c.replyTo?.messageId || '',
+            references: c.replyTo?.references || '',
+            attachments: c.attachments,
+          },
+        });
+        c.draftId = d.draft.id;
+        this.loadDrafts();
+        if (d.droppedAttachments) {
+          this.toast(`草稿已保存，但附件超过 20MB 没存进去（${d.droppedAttachments} 个）`, 'warn');
+        } else {
+          this.toast('草稿已保存（仅存本机）', 'ok');
+        }
+        return true;
+      } catch (e) { this.toast(e.message, 'error'); return false; }
+      finally { this.draftBusy = false; }
+    },
     closeCompose() {
-      // 有任何实质内容（正文/收件人/主题）就弹三选确认，而不是浏览器 confirm
+      // 有任何实质内容（正文/原文引用/附件/收件人/主题）就弹三选确认，而不是浏览器 confirm
       const c = this.compose;
-      if (c.text || c.to || c.cc || c.subject) { this.composeAskClose = true; return; }
+      if (c.text || c.quoteHtml || c.attachments.length || c.to || c.cc || c.subject) { this.composeAskClose = true; return; }
       this.compose.open = false;
     },
     async saveAndCloseCompose() {
-      await this.saveComposeDraft();
+      // 存失败就别关窗口：一关内容就没了，用户还以为存上了
+      if (!await this.saveComposeDraft()) return;
       this.composeAskClose = false;
       this.compose.open = false;
     },
@@ -1885,7 +1970,7 @@ const app = createApp({
         if (this.ctx.open || this.navCtx.open) { this.closeCtx(); this.closeNavCtx(); return; }
         if (this.composeAskClose) { this.composeAskClose = false; return; }
         if (this.compose.open) { this.closeCompose(); return; }
-        if (this.modals.settings || this.modals.users) { this.modals.settings = false; this.modals.users = false; return; }
+        if (this.modals.settings || this.modals.users || this.modals.drafts) { this.modals.settings = false; this.modals.users = false; this.modals.drafts = false; return; }
         if (this.searchMode) { this.exitSearch(); return; }
         if (this.readerOpen) { this.readerOpen = false; }
         return;
@@ -1906,7 +1991,7 @@ const app = createApp({
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       // 有了浮层/写信窗就不抢单键快捷键
-      if (this.compose.open || this.modals.settings || this.modals.users) return;
+      if (this.compose.open || this.modals.settings || this.modals.users || this.modals.drafts) return;
       const k = e.key;
       // 只绑 j/k，不碰 ↑/↓：阅读区长邮件要能正常用方向键滚动正文
       if (k === 'j' || k === 'k') { e.preventDefault(); this.stepMessage(k === 'j' ? 1 : -1); return; }

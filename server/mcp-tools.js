@@ -466,6 +466,7 @@ function draftView(uid, d, byId) {
   const acc = accs.get(d.accountId);
   const text = String(d.text || '');
   const to = splitAddrs(d.to);
+  const files = Array.isArray(d.attachments) ? d.attachments : [];
   return {
     id: d.id,
     account: acc ? { id: acc.id, email: acc.email } : null,
@@ -475,6 +476,10 @@ function draftView(uid, d, byId) {
     subject: d.subject || '(无主题)',
     excerpt: text.replace(/\s+/g, ' ').trim().slice(0, 80),
     length: text.length,
+    // 带没带原文引用、有没有附件：模型据此判断「这封直接发就行」还是「还缺东西」，
+    // 不然只能靠 excerpt 猜
+    hasQuote: !!d.quoteHtml,
+    attachments: files.length,
     updatedAt: new Date(Number(d.updatedAt) || Date.now()).toISOString(),
     canSend: !!acc && to.length > 0,
     // 两个问题可能同时存在（没账号也没收件人），一起说清楚，别互相盖掉
@@ -486,6 +491,21 @@ function draftView(uid, d, byId) {
     })(),
   };
 }
+
+// 草稿 → 外发 HTML。写信框是纯文本，所以这里只需「转义 + 换行转 <br>」，跟网页端
+// composeHtml 保持同一套；引用的原邮件 HTML 原样接在后面（存草稿前已收进 .mnq 作用域）。
+// 不把成品 html 存进草稿：模型随时会 update_draft 改正文，存下来的 html 立刻过期，
+// 发出去的就是改之前那版 —— 只在发送这一刻拼。
+function draftHtml(d) {
+  const esc = (s) => String(s == null ? '' : s)
+    .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const parts = [];
+  const own = esc(d.text).replace(/\n/g, '<br>');
+  if (own) parts.push(`<div style="font:14px/1.7 system-ui,'Segoe UI','Microsoft YaHei',sans-serif;color:#24292f">${own}</div>`);
+  if (d.quoteHtml) parts.push(String(d.quoteHtml));
+  return parts.join('') || undefined;
+}
+
 
 // 回复发给谁。Reply-To 优先——很多营销/工单/通知用 noreply@ 发信，却把真正的
 // 回信地址放在 Reply-To；只回 From 等于寄给一个不收信的机器人，用户看不出没送达。
@@ -1512,7 +1532,8 @@ export function registerTools(server, ctx) {
     name: 'send_draft',
     scope: 'send',
     title: '发送草稿',
-    description: '把一份已有草稿直接发出去（按草稿里存的收件人/抄送/主题/正文），发送成功后草稿自动删除。',
+    description: '把一份已有草稿直接发出去（按草稿里存的收件人/抄送/主题/正文），发送成功后草稿自动删除。'
+      + '网页端存的草稿还会带原文引用和附件，都按存下来的原样一起发出。',
     annotations: { readOnlyHint: false, destructiveHint: true },
     schema: {
       draftId: z.string().min(1).describe('草稿 id，从 list_drafts 拿'),
@@ -1532,7 +1553,20 @@ export function registerTools(server, ctx) {
         throw new Error('这份草稿还没有收件人。先告诉我发给谁，我把收件人补进这份草稿再发'
           + '（不用重新存一份）');
       }
-      await sendMail(uid, acc, { to, cc, bcc, subject: d.subject || '(无主题)', text: d.text });
+      // 网页端存的草稿可能带着引用的原文和附件：text/html 都要按存下来的原样发，
+      // 只发 text 会让回信变成「没有原文的空回复」，附件更是直接消失
+      const plain = [String(d.text || '').replace(/\s+$/, ''), d.quoteText ? String(d.quoteText) : '']
+        .filter(Boolean).join('\n\n');
+      const files = Array.isArray(d.attachments) ? d.attachments : [];
+      await sendMail(uid, acc, {
+        to, cc, bcc,
+        subject: d.subject || '(无主题)',
+        text: plain,
+        html: draftHtml(d),
+        inReplyTo: d.inReplyTo || undefined,
+        references: d.references || undefined,
+        attachments: files,
+      });
       deleteDraft(uid, id);
       syncSentCache(uid, acc.id);
       return json({
@@ -1541,10 +1575,12 @@ export function registerTools(server, ctx) {
         to,
         cc,
         bcc: bcc.length,
+        attachments: files.length,
         subject: d.subject || '(无主题)',
         draftDeleted: true,
         message: `草稿「${d.subject}」已通过「${acc.email}」发送给 ${to.join(', ')}`
-          + `${cc.length ? `，抄送 ${cc.join(', ')}` : ''}，草稿已删除。`,
+          + `${cc.length ? `，抄送 ${cc.join(', ')}` : ''}`
+          + `${files.length ? `，带 ${files.length} 个附件` : ''}，草稿已删除。`,
       });
     },
   });

@@ -317,10 +317,17 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
   background:var(--accent);color:#fff;font-weight:600;font-size:13px;cursor:pointer;}
 .compose-foot .send-btn:hover{background:var(--accent-hi);}
 .compose-foot .send-btn:disabled{opacity:.6;}
-.chips{display:flex;flex-wrap:wrap;gap:5px;}
+.chips{display:flex;flex-wrap:wrap;gap:5px;min-width:0;max-height:58px;overflow-y:auto;}
 .chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;background:var(--accent-soft);color:var(--accent);
   border-radius:99px;padding:2px 8px;}
 .chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0;font-size:12px;line-height:1;}
+/* 写信框底部的附件条：文件名过长截断，尺寸次要、移除按钮常显 */
+.att-chip{max-width:200px;}
+.att-chip .att-name{max-width:118px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.att-chip .att-size{color:var(--text-3);font-size:10.5px;flex:none;}
+.att-chip .att-x{display:inline-flex;align-items:center;flex:none;opacity:.7;}
+.att-chip .att-x:hover{opacity:1;}
+.att-total{font-size:10.5px;color:var(--text-3);align-self:center;}
 
 /* ---- 模态 ---- */
 .overlay{position:fixed;inset:0;background:rgba(10,14,20,.45);z-index:50;display:grid;place-items:center;padding:20px;}
@@ -362,6 +369,14 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .acct-row .icon-btn{width:28px;height:28px;}
 .acct-row .icon-btn:disabled{opacity:.45;cursor:default;}
 .acct-row .acct-ok{color:var(--ok);}
+/* 草稿列表：一行一份，点整行继续编辑；右侧垃圾桶只删这一份 */
+.draft-row{display:flex;align-items:center;gap:10px;padding:11px 6px;border-bottom:1px solid var(--surface-3);cursor:pointer;border-radius:8px;}
+.draft-row:hover{background:var(--hover);}
+.draft-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
+.draft-main b{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.draft-main span{font-size:11.5px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.draft-main span.muted{color:var(--text-3);}
+.draft-row .icon-btn{flex:none;}
 /* 本地缓存概览：一个总量 + 明细行，别再塞成卡片 */
 .cache-head{display:flex;flex-direction:column;gap:2px;padding:14px 4px;border-bottom:1px solid var(--surface-3);}
 .cache-head b{font-size:22px;line-height:1.2;letter-spacing:-.01em;}

@@ -229,6 +229,49 @@ ok('E2 删除返回 JSON 而不是一句中文', !r.err && r.json?.ok === true &
 r = await call('delete_draft', { draftId: d4 });
 ok('E2 删两次报找不到', r.err && /找不到草稿/.test(r.text), r.text.slice(0, 80));
 
+// ---------- F. 网页端存的草稿：原文引用 / 附件 / 回复关系 ----------
+// 这几样是网页端 reply() → saveComposeDraft 写进去的，MCP 只管发。
+// 以前草稿只存正文，于是「存草稿 → 再打开」原文引用和附件全丢，发出去成了空回复。
+const dReply = mail.saveDraft(uid, {
+  accountId: ACC1.id,
+  to: 'boss@example.com',
+  subject: 'Re: 报价单',
+  text: '收到，明天回您。',
+  quoteHtml: '<div class="mnq" style="margin-top:14px"><p>原邮件正文 Q3 报价</p></div>',
+  quoteText: '在 2026年11月13日 10:00，客户 写道：\n\n> 原邮件正文 Q3 报价',
+  mode: 'reply',
+  inReplyTo: '<orig-123@example.com>',
+  references: '<orig-123@example.com>',
+  attachments: [{
+    filename: '报价单.pdf', contentType: 'application/pdf',
+    size: 11, content: Buffer.from('hello world').toString('base64'),
+  }],
+});
+
+const lq = await call('list_drafts', { subject: '报价单' });
+const dv = lq.json?.drafts?.[0];
+ok('F1 带原文/附件的草稿能列出来，并标出这两项',
+  !lq.err && dv?.hasQuote === true && dv?.attachments === 1, JSON.stringify(dv));
+
+const before3 = received.length;
+r = await call('send_draft', { draftId: dReply.id });
+ok('F2 这种草稿也能直接发', !r.err && r.json?.ok === true, r.text.slice(0, 160));
+{
+  const p = await simpleParser(await waitRaw(before3));
+  const html = String(p.html || '');
+  ok('F3 发出去的 HTML 带原文，且保留 .mnq 作用域（样式不外溢）',
+    /原邮件正文 Q3 报价/.test(html) && /class="mnq"/.test(html), html.slice(0, 200));
+  ok('F4 发出去的 HTML 里也有用户自己写的那段',
+    /收到，明天回您/.test(html), html.slice(0, 200));
+  ok('F5 纯文本兜底带上引文（不支持 HTML 的客户端也能看懂）',
+    /原邮件正文 Q3 报价/.test(String(p.text || '')), String(p.text || '').slice(0, 120));
+  ok('F6 附件真的发出去了（不是只存在草稿里）',
+    (p.attachments?.length || 0) === 1 && p.attachments[0].filename === '报价单.pdf',
+    JSON.stringify(p.attachments?.map((a) => a.filename)));
+  ok('F7 回信头对得上原文（In-Reply-To 没丢，客户端里不会变成孤立的信）',
+    /orig-123@example.com/.test(String(p.inReplyTo || '')), String(p.inReplyTo || ''));
+}
+
 server.close();
 console.log(failed ? `\n有失败：${pass + failed} 项断言，${failed} 项失败` : `\n全部通过：${pass} 项断言`);
 process.exit(failed ? 1 : 0);

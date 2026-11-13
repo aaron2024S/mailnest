@@ -209,6 +209,14 @@
         </div>
         <button class="btn-primary" @click="openCompose()"><svg class="i"><use href="#i-compose"/></svg><span>新建邮件</span></button>
         <nav class="nav">
+          <!-- 本地草稿入口：以前草稿只写不读，存完就再也找不回来（只能靠 Agent 调 MCP） -->
+          <button class="nav-item nav-drafts" v-if="drafts.length" @click="openDrafts"
+                  :title="`本机存了 ${drafts.length} 份没发出去的草稿`">
+            <svg class="i"><use href="#i-draft"/></svg>
+            <span class="lbl">草稿</span>
+            <span class="count">{{ drafts.length }}</span>
+          </button>
+          <div class="nav-sep" v-if="drafts.length && accounts.length>1"></div>
           <!-- 全部收件箱：跨账号汇总的常驻入口。此前只有「账号菜单 → 所有账号」那一下能看到汇总，
                点进任何账号的文件夹后就再也回不来（allFolder 一旦赋值没有清空路径）。 -->
           <button class="nav-item nav-all" v-if="accounts.length>1"
@@ -533,7 +541,17 @@
       <div class="compose-foot">
         <button class="icon-btn" @click="pickFiles" title="添加附件"><svg class="i"><use href="#i-clip"/></svg></button>
         <input type="file" ref="fileInput" multiple style="display:none" @change="onFiles">
-        <span class="muted" style="font-size:11.5px" v-if="compose.attachments.length">{{ compose.attachments.length }} 个附件 · {{ fmtSize(totalAttachSize) }}</span>
+        <!-- 附件逐个显示 + 可移除：草稿恢复回来的一堆附件，总得能挑掉不想要的那个 -->
+        <div class="chips" v-if="compose.attachments.length">
+          <span class="chip att-chip" v-for="(a,i) in compose.attachments" :key="a.filename + i" :title="a.filename">
+            <span class="att-name">{{ a.filename }}</span>
+            <span class="att-size">{{ fmtSize(a.size) }}</span>
+            <button class="att-x" title="移除这个附件" @click="compose.attachments.splice(i,1)">
+              <svg class="i" style="width:11px;height:11px"><use href="#i-x"/></svg>
+            </button>
+          </span>
+          <span class="att-total" v-if="compose.attachments.length > 1">共 {{ fmtSize(totalAttachSize) }}</span>
+        </div>
         <span style="flex:1"></span>
         <span class="muted" style="font-size:11.5px;margin-right:8px" v-if="compose.error">{{ compose.error }}</span>
         <button class="send-btn" @click="sendCompose" :disabled="compose.sending">
@@ -551,6 +569,36 @@
         <button class="close-ask-btn ghost" @click="composeAskClose=false">继续编辑</button>
         <button class="close-ask-btn ghost" @click="discardCompose">不保存</button>
         <button class="close-ask-btn primary" @click="saveAndCloseCompose">存草稿并关闭</button>
+      </div>
+    </div>
+
+    <!-- 本地草稿：存在本机 drafts/ 目录，点一条就回到写信框接着写 -->
+    <div class="overlay" v-if="modals.drafts" @click.self="modals.drafts=false">
+      <div class="modal">
+        <div class="modal-head">
+          <h3>草稿</h3>
+          <button class="icon-btn" @click="modals.drafts=false"><svg class="i"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal-body">
+          <div class="empty" v-if="!drafts.length">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use href="#i-draft"/></svg>
+            <div>还没有草稿</div>
+          </div>
+          <div class="draft-row" v-for="d in drafts" :key="d.id" @click="openDraft(d)">
+            <div class="draft-main">
+              <b>{{ draftTitle(d) }}</b>
+              <span>{{ d.to || '还没填收件人' }}</span>
+              <span class="muted">{{ draftMeta(d) }} · {{ fullDate(d.updatedAt) }}</span>
+            </div>
+            <button class="icon-btn" title="删除草稿" @click.stop="deleteDraft(d)">
+              <svg class="i" style="width:15px;height:15px"><use href="#i-trash"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span class="muted" style="flex:1;font-size:11.5px">草稿只存在这台机器上，不占邮箱里的「草稿箱」</span>
+          <button class="btn-ghost" style="width:auto;padding:0 14px" @click="modals.drafts=false">关闭</button>
+        </div>
       </div>
     </div>
 

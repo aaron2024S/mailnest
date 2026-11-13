@@ -828,4 +828,90 @@ function sseCtx(over = {}) {
   ok('引用块：头部信息区在容器之外（不被邮件配色影响）', block.indexOf('-----原始邮件-----') < block.indexOf('class="mnq"'));
 }
 
+// 30) 草稿：存下去要能把「这封没写完的信」原样拿回来
+//     以前只存 收件人/抄送/主题/正文 —— 原文引用、附件、回复关系全丢：重开只剩自己那
+//     几行字，发出去还是一封「没有原文的空回复」，附件直接消失。
+{
+  const compose = () => ({
+    open: true, draftId: null, accountId: 'a1', to: 'x@y.com', cc: 'c@y.com',
+    subject: 'Re: 报价', text: '收到，明天回您。',
+    quoteHtml: '<div class="mnq"><p>原邮件正文</p></div>',
+    quoteText: '在 11月13日，客户 写道：\n\n> 原邮件正文',
+    attachments: [{ filename: 'a.pdf', contentType: 'application/pdf', size: 11, content: 'aGVsbG8=' }],
+    mode: 'reply', replyTo: { messageId: '<m1@x>', references: '<m0@x> <m1@x>' }, sending: false, error: '',
+  });
+
+  const ctx = {
+    compose: compose(), draftBusy: false, drafts: [], calls: [], toasts: [],
+    async api(url, opts) {
+      ctx.calls.push({ url, body: opts?.body });
+      return { draft: { id: opts?.body?.id || 'd_new1' } };
+    },
+    loadDrafts() {},
+    toast(t, type) { ctx.toasts.push({ t, type }); },
+    saveComposeDraft: M.saveComposeDraft,
+  };
+  const saved = await M.saveComposeDraft.call(ctx);
+  const body = ctx.calls[0].body;
+  ok('草稿：原文引用一起存（不然重开就没了）',
+    /原邮件正文/.test(body.quoteHtml) && /原邮件正文/.test(body.quoteText), String(body.quoteHtml));
+  ok('草稿：附件一起存', body.attachments.length === 1 && body.attachments[0].filename === 'a.pdf');
+  ok('草稿：回复关系一起存（重开再发仍串在同一线程里）',
+    body.inReplyTo === '<m1@x>' && body.references === '<m0@x> <m1@x>' && body.mode === 'reply',
+    JSON.stringify({ i: body.inReplyTo, r: body.references, m: body.mode }));
+  ok('草稿：保存成功返回 true，并说明只存本机', saved === true && /仅存本机/.test(ctx.toasts.at(-1).t));
+  ok('草稿：保存后记住 draftId（再存是覆盖同一份，不会越存越多份）', ctx.compose.draftId === 'd_new1');
+
+  // 存失败必须别关窗口 —— 关了内容就真没了，用户还以为存上了
+  const fail = {
+    compose: compose(), draftBusy: false, composeAskClose: true, toasts: [],
+    async api() { throw new Error('磁盘已满'); },
+    toast(t) { this.toasts.push(t); },
+    loadDrafts() {},
+    saveComposeDraft: M.saveComposeDraft, saveAndCloseCompose: M.saveAndCloseCompose,
+  };
+  await M.saveAndCloseCompose.call(fail);
+  ok('草稿：存失败时不关窗口，并把原因说出来',
+    fail.compose.open === true && fail.composeAskClose === true && /磁盘已满/.test(fail.toasts[0] || ''),
+    JSON.stringify({ open: fail.compose.open, toasts: fail.toasts }));
+
+  // 打开草稿：列表是轻量的，点开走单份全文接口，字段逐个还原
+  const o = {
+    accounts: [{ id: 'a1', displayName: '163邮箱' }], toasts: [], opened: null, url: '',
+    modals: { drafts: true },
+    async api(url) {
+      o.url = url;
+      return {
+        draft: {
+          id: 'd_1', accountId: 'a1', to: 'x@y.com', cc: 'c@y.com', subject: 'Re: 报价', text: '收到',
+          quoteHtml: '<div class="mnq"><p>原邮件正文</p></div>', quoteText: '> 原邮件正文',
+          attachments: [{ filename: 'a.pdf', size: 11, content: 'aGVsbG8=' }],
+          mode: 'reply', inReplyTo: '<m1@x>', references: '<m0@x> <m1@x>',
+        },
+      };
+    },
+    toast(t) { o.toasts.push(t); },
+    openCompose(opts) { o.opened = opts; },
+    openDrafts: M.openDrafts, openDraft: M.openDraft,
+  };
+  await M.openDraft.call(o, { id: 'd_1', attachments: [] });
+  ok('打开草稿：原文引用还原', /原邮件正文/.test(o.opened.quoteHtml) && /原邮件正文/.test(o.opened.quoteText));
+  ok('打开草稿：附件还原（连内容一起，能直接发）', o.opened.attachments.length === 1 && o.opened.attachments[0].content === 'aGVsbG8=');
+  ok('打开草稿：回复关系还原', o.opened.replyTo?.messageId === '<m1@x>' && o.opened.replyTo?.references === '<m0@x> <m1@x>');
+  ok('打开草稿：draftId 带回来，改完再存还是同一份', o.opened.draftId === 'd_1' && o.opened.mode === 'reply');
+  ok('打开草稿：取的是单份全文（列表不背附件 base64）', /\/api\/drafts\/d_1$/.test(o.url), o.url);
+
+  // 只有原文引用、正文还没写就关窗口，也算「还没发送」，不能静默丢掉
+  const q = { compose: { open: true, text: '', quoteHtml: '<div class="mnq">x</div>', quoteText: '', attachments: [], to: '', cc: '', subject: '' }, composeAskClose: false, closeCompose: M.closeCompose };
+  M.closeCompose.call(q);
+  ok('草稿：只有原文没有正文时关闭也要确认', q.composeAskClose === true);
+
+  const idx = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  ok('侧栏有草稿入口（以前存进去就再也找不回来，只能靠 Agent 调接口）',
+    /nav-drafts/.test(idx) && /@click="openDrafts"/.test(idx));
+  ok('草稿列表点一条就能回写信框继续写', /@click="openDraft\(d\)"/.test(idx));
+  ok('写信框的附件可逐个移除', /compose\.attachments\.splice\(i,1\)/.test(idx));
+}
+
+
 console.log(`\n全部通过：${pass} 项断言`);

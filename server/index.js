@@ -868,19 +868,69 @@ api.post('/send', guard, async (req, res) => {
   }
 });
 
+// 列表只回轻量字段：附件是 base64、原文是一整段 HTML，几十份草稿全带上会让首屏
+// 多出好几 MB。真正要编辑某份时再单独取全文（GET /drafts/:id）。
+function draftSummary(d) {
+  return {
+    id: d.id, accountId: d.accountId, to: d.to, cc: d.cc, subject: d.subject,
+    mode: d.mode || 'new', updatedAt: d.updatedAt,
+    hasQuote: !!d.quoteHtml,
+    attachments: (Array.isArray(d.attachments) ? d.attachments : []).map((a) => ({
+      filename: a.filename, size: a.size, contentType: a.contentType,
+    })),
+  };
+}
+
 api.get('/drafts', guard, (req, res) => {
-  res.json({ drafts: listDrafts(req.user.id) });
+  res.json({ drafts: listDrafts(req.user.id).map(draftSummary) });
 });
+
+api.get('/drafts/:id', guard, (req, res) => {
+  const d = listDrafts(req.user.id).find((x) => x.id === req.params.id);
+  if (!d) return res.status(404).json({ error: '草稿不存在或已被删除' });
+  res.json({ draft: d });
+});
+
+// 草稿里的附件是 base64 直接落盘的。超过这个总量（与发信 20MB 上限一致）就不随草稿
+// 保存，但必须在响应里如实告诉前端「附件没存进去」—— 悄悄丢掉等于骗用户。
+const DRAFT_ATTACH_MAX = 20 * 1024 * 1024;
+
+// 只留发送真正用得上的四个字段，顺便把形状固定下来（外面传什么都别原样落盘）
+function cleanAttachments(list) {
+  return (Array.isArray(list) ? list : []).map((a) => ({
+    filename: String(a?.filename || 'attachment').slice(0, 200),
+    contentType: String(a?.contentType || 'application/octet-stream').slice(0, 120),
+    size: Number(a?.size) || 0,
+    content: String(a?.content || ''),
+  })).filter((a) => a.content);
+}
 
 api.post('/drafts', guard, (req, res) => {
   const d = req.body || {};
   // 草稿 id 由前端传回（编辑时），但它是能拼进文件路径的字符串，
   // 交给 saveDraft 校验；不合法时回 400，别让它变成 500。
   try {
-    res.json({ draft: saveDraft(req.user.id, {
-      id: d.id, accountId: d.accountId, to: d.to, cc: d.cc, bcc: d.bcc,
-      subject: d.subject, text: d.text, html: d.html,
-    }) });
+    let attachments = cleanAttachments(d.attachments);
+    let droppedAttachments = 0;
+    if (attachments.reduce((n, a) => n + a.size, 0) > DRAFT_ATTACH_MAX) {
+      droppedAttachments = attachments.length;
+      attachments = [];
+    }
+    res.json({
+      draft: saveDraft(req.user.id, {
+        id: d.id, accountId: d.accountId, to: d.to, cc: d.cc, bcc: d.bcc,
+        subject: d.subject, text: d.text,
+        // 回信带出来的原文（Outlook 式）：不存的话，关掉窗口再打开就只剩自己写的那几行，
+        // 引文没了但收件人还以为在回上一封 —— 这是草稿最坑的一处
+        quoteHtml: d.quoteHtml || '', quoteText: d.quoteText || '',
+        // 回复关系一并存：重开草稿再发仍然是一封「回信」（Message-ID 串得上，
+        // 客户端里不会变成凭空冒出来的新线程），转发也要记住自己是怎么来的
+        mode: d.mode || 'new',
+        inReplyTo: d.inReplyTo || '', references: d.references || '',
+        attachments,
+      }),
+      droppedAttachments: droppedAttachments || undefined,
+    });
   } catch (e) {
     res.status(400).json({ error: e.message || '草稿保存失败' });
   }
