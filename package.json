@@ -16,12 +16,13 @@
     "test:mcp": "node tests/mcp.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "express": "^4.19.2",
     "imapflow": "^1.0.164",
+    "juice": "^12.2.3",
     "mailparser": "^3.7.1",
     "nodemailer": "^6.9.14",
     "sanitize-html": "^2.13.1"

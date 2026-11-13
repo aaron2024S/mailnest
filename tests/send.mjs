@@ -209,6 +209,32 @@ const send = async (opts) => {
   ok('普通 HTML 正文不产生多余内嵌附件', (parsed.attachments || []).length === 0, String((parsed.attachments || []).length));
 }
 
+// ---------- 外发正文的 CSS 内联（经典 Outlook 用 Word 引擎，只认内联样式） ----------
+{
+  const raw = await send({
+    to: ['a@example.com'],
+    subject: '回复：报价单',
+    text: '收到',
+    html: '<div style="color:#24292f">我新写的正文</div>'
+      + '<div class="mnq"><style>.mnq{background:#000;color:#fff} .b td{border:1px solid #444;padding:8px}'
+      + '@media (max-width:600px){.b td{display:block!important}}</style>'
+      + '<table class="b" width="600"><tr><td>促销码</td><td>CLUB-W6VX</td></tr></table>'
+      // Outlook 专属的 VML 只写在条件注释里，内联时绝不能把它吃掉
+      + '<!--[if mso]><v:roundrect arcsize="8%">按钮</v:roundrect><![endif]--></div>',
+  });
+  const parsed = await simpleParser(raw);
+  const html = String(parsed.html || '');
+  ok('外发正文：<style> 规则算进元素的内联 style（Outlook 才认）',
+    /<td style="[^"]*border:\s*1px solid #444/.test(html), html.slice(0, 320));
+  ok('外发正文：原文 body 级配色只落在引用块容器上',
+    /class="mnq"[^>]*style="[^"]*background:\s*#000/.test(html), html.slice(0, 320));
+  ok('外发正文：用户新写的正文没被原文配色染掉',
+    /<div style="color:\s*#24292f">我新写的正文<\/div>/.test(html), html.slice(0, 240));
+  ok('外发正文：媒体查询保留（现代客户端仍响应式）', /@media[^{]*600px/.test(html), html.slice(-360));
+  ok('外发正文：已被内联的普通规则不再留在 <style> 里', !/\.b td\{/.test(html), html.slice(0, 360));
+  ok('外发正文：Outlook 条件注释（VML）原样保留', /\[if mso\]/.test(html) && /v:roundrect/.test(html), html.slice(-300));
+}
+
 server.close();
 console.log(`\n${failed ? '失败' : '全部通过'}：${pass} 项断言${failed ? `，失败 ${failed} 项` : ''}`);
 if (failed) process.exit(1);

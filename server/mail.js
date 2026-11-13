@@ -4,6 +4,7 @@ import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { simpleParser } from 'mailparser';
 import sanitizeHtml from 'sanitize-html';
+import juice from 'juice';
 import { findAccount, listAccounts, saveAccounts } from './store.js';
 import { refreshAccessToken } from './oauth.js';
 import * as attachments from './attachments.js';
@@ -763,6 +764,38 @@ async function reembedInlineImages(uid, html) {
   };
 }
 
+// ---------- 外发 HTML 的 Outlook 兼容处理 ----------
+// 客户端这边渲染没问题，问题是「收件人用什么看」。经典 Outlook 从 2007 年起用 Word 的
+// HTML 引擎：它忽略 <style> 块、忽略 max-width、不认类选择器，只认元素上的内联样式和
+// 表格属性。所以引用原邮件时要把 <style> 算进每个元素的 style 属性里（媒体查询保留，
+// 现代客户端仍能响应式），表格再补 border/cellpadding 这类属性 —— 否则对方看到的
+// 表格就是没有边框、宽度全乱的一堆字。
+//
+// 注意：作用域（.mnq）不能省。原文的 body{background:#000} 若直接内联，会被写到整封
+// 信的 body 上，用户新写的正文也一起变黑底白字；有 .mnq 包裹层时内联到那个 div 上。
+const INLINE_CSS_MAX_BYTES = 3 * 1024 * 1024;
+
+function inlineCssForMail(html) {
+  if (!html || html.length > INLINE_CSS_MAX_BYTES) return html;
+  try {
+    return juice(html, {
+      preserveMediaQueries: true,
+      preserveFontFaces: true,
+      preserveKeyFrames: true,
+      preserveImportant: true,
+      applyAttributesTableElements: true,
+      applyWidthAttributes: true,
+      applyHeightAttributes: true,
+      inlinePseudoElements: false,
+    });
+  } catch (e) {
+    // 邮件里的 CSS 千奇百怪（Word 的 mso-*、残缺规则、奇怪的 @supports）。
+    // 解析不了就按原样发：现代客户端仍能正确显示，总比整封信发不出去强。
+    console.log(`[mailnest] 外发正文内联样式失败，按原样发送：${e.message}`);
+    return html;
+  }
+}
+
 export async function sendMail(uid, account, opts) {
   const { to, cc, bcc, subject, text, html, inReplyTo, references, attachments = [] } = opts;
   const token = isOAuth(account) ? await accessTokenFor(uid, account) : null;
@@ -770,7 +803,8 @@ export async function sendMail(uid, account, opts) {
   // 引用原邮件时，内嵌图（cid）在正文里已被换成 /api/attachment?...&inline=1 的本机地址。
   // 原样发出去，收件人那边相对路径必然 404（顺带把账号/文件夹/uid 泄露进外发源码），
   // 所以发送前重新内嵌成 cid: 附件 —— 对方才看得到 logo、签名图、报价单截图。
-  const embedded = await reembedInlineImages(uid, html);
+  // 顺序：先内联样式（juice 会重新序列化 DOM），再换图片地址，避免两步互相踩。
+  const embedded = await reembedInlineImages(uid, inlineCssForMail(html));
   const mail = {
     from: `"${account.displayName || account.email}" <${account.email}>`,
     to: Array.isArray(to) ? to.join(', ') : to,
