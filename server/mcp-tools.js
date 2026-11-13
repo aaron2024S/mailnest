@@ -500,8 +500,17 @@ function draftHtml(d) {
   const esc = (s) => String(s == null ? '' : s)
     .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const parts = [];
-  const own = esc(d.text).replace(/\n/g, '<br>');
-  if (own) parts.push(`<div style="font:14px/1.7 system-ui,'Segoe UI','Microsoft YaHei',sans-serif;color:#24292f">${own}</div>`);
+  // 网页端存的草稿带 bodyHtml（可能含表格/加粗），优先用它；只有 text 的
+  // 老草稿或 Agent 新建的草稿才退回「纯文本转段落」
+  const rich = String(d.bodyHtml || '').trim();
+  if (rich) {
+    parts.push('<style>.mnq-body p{margin:0 0 10px}.mnq-body table{border-collapse:collapse;margin:10px 0}'
+      + '.mnq-body td,.mnq-body th{border:1px solid #c9d1d9;padding:6px 10px;vertical-align:top}</style>');
+    parts.push(`<div class="mnq-body" style="font:14px/1.7 system-ui,'Segoe UI','Microsoft YaHei',sans-serif;color:#24292f">${rich}</div>`);
+  } else {
+    const own = esc(d.text).replace(/\n/g, '<br>');
+    if (own) parts.push(`<div style="font:14px/1.7 system-ui,'Segoe UI','Microsoft YaHei',sans-serif;color:#24292f">${own}</div>`);
+  }
   if (d.quoteHtml) parts.push(String(d.quoteHtml));
   return parts.join('') || undefined;
 }

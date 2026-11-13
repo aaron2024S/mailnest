@@ -10,12 +10,15 @@
   --shadow-lg:0 24px 60px -18px rgba(16,24,40,.34),0 6px 18px -8px rgba(16,24,40,.16);
   --radius:12px; --radius-sm:8px;
   --ok:#12805c; --warn:#b45309; --err:#b42318;
+  /* 让 select/滚动条/日期选择器这些原生控件跟着主题走，否则深色下发件人下拉是白底白字 */
+  color-scheme:light;
 }
 [data-accent="blue"]{--accent:#2d6cf6;--accent-hi:#1f57d6;--accent-soft:#e8efff;--accent-soft-2:#d6e3ff;}
 [data-accent="indigo"]{--accent:#5a5bd6;--accent-hi:#4a4bc2;--accent-soft:#ecebfe;--accent-soft-2:#dcdbfc;}
 [data-accent="teal"]{--accent:#0d8f83;--accent-hi:#087a70;--accent-soft:#e2f5f2;--accent-soft-2:#cfeeea;}
 [data-accent="amber"]{--accent:#b8620d;--accent-hi:#9d530a;--accent-soft:#fdf0e2;--accent-soft-2:#fae1c8;}
 [data-theme="dark"]{
+  color-scheme:dark;
   --bg:#0d1015; --surface:#151a21; --surface-2:#1a2028; --surface-3:#212833; --rail:#0f141a;
   --border:#252d38; --border-strong:#33404f;
   --text:#e9edf3; --text-2:#a8b3c2; --text-3:#75808f;
@@ -305,7 +308,40 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .cfield input{border:0;outline:0;background:transparent;width:100%;font-size:13px;}
 .cfield .cf-btn{border:0;background:transparent;color:var(--text-3);font-size:11.5px;cursor:pointer;}
 .cfield .cf-btn:hover{color:var(--accent);}
-.compose textarea.body{flex:1;border:0;outline:0;resize:none;padding:14px;font-size:13.5px;line-height:1.7;background:transparent;}
+/* 正文工具栏（加粗/斜体/列表/表格）。文字按钮直接排，别用图标画 B I U —— 字形本身就是最清楚的那版 */
+/* 按钮多时换行，不要 overflow:auto —— 那会把下面的网格弹层裁掉（visible 会被算成 auto） */
+.compose-tools{display:flex;align-items:center;gap:2px;padding:5px 12px;flex:none;flex-wrap:wrap;
+  border-top:1px solid var(--surface-3);border-bottom:1px solid var(--surface-3);}
+.tl-btn{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:28px;padding:0 6px;flex:none;
+  border:0;border-radius:7px;background:transparent;color:var(--text-2);cursor:pointer;font-size:13px;line-height:1;font-family:inherit;}
+.tl-btn:hover{background:var(--surface-3);color:var(--text);}
+.tl-btn.on{background:var(--accent-soft);color:var(--accent);}
+.tl-b{font-weight:800;}
+.tl-i{font-style:italic;font-family:Georgia,"Times New Roman",serif;font-size:14px;}
+.tl-u{text-decoration:underline;}
+.tl-txt{font-size:11.5px;padding:0 7px;}
+.tl-sep{width:1px;height:15px;background:var(--border);margin:0 4px;flex:none;}
+.tl-wrap{position:relative;display:inline-flex;flex:none;}
+/* 网格弹层：8×8，鼠标划过就预览行列数 */
+.tl-pop{position:absolute;left:0;top:calc(100% + 6px);z-index:30;padding:8px;border-radius:10px;
+  background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow-md);}
+.tl-grid{display:grid;grid-template-columns:repeat(8,18px);grid-auto-rows:18px;gap:2px;}
+.tl-cell{border:1px solid var(--border-strong);border-radius:3px;cursor:pointer;}
+.tl-cell.on{background:var(--accent-soft);border-color:var(--accent);}
+.tl-hint{margin-top:6px;text-align:center;font-size:11px;color:var(--text-3);white-space:nowrap;}
+/* 正文编辑区：contenteditable，不是 textarea */
+.compose-editor{flex:1;min-height:0;overflow:auto;padding:14px;font-size:13.5px;line-height:1.7;outline:0;
+  color:var(--text);word-break:break-word;}
+.compose-editor[data-empty="1"]::before{content:attr(data-ph);color:var(--text-3);pointer-events:none;}
+.compose-editor p{margin:0 0 10px;}
+.compose-editor ul,.compose-editor ol{margin:0 0 10px;padding-left:22px;}
+.compose-editor li{margin:2px 0;}
+.compose-editor blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid var(--border-strong);color:var(--text-2);}
+.compose-editor a{color:var(--accent);}
+/* 编辑器里的表格跟着主题走（深色下不会跳出一块白板），发出去由 juice + inlineTableStyles 换成邮件色 */
+.compose-editor table{border-collapse:collapse;margin:10px 0;max-width:100%;}
+.compose-editor td,.compose-editor th{border:1px solid var(--border-strong);padding:6px 10px;min-width:64px;vertical-align:top;}
+.compose-editor th{background:var(--surface-2);font-weight:600;text-align:left;}
 /* 原文引用（Outlook 式）：固定一块高度、内部可滚，跟正文分开，不挤占写信空间 */
 .compose-quote{margin:0 14px 10px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);
   display:flex;flex-direction:column;flex:0 0 auto;height:34%;min-height:140px;overflow:hidden;}
@@ -566,7 +602,7 @@ button.swatch-btn.swatch{width:30px;height:30px;border-radius:9px;padding:0;}
 .compose-head{padding:14px 18px;}
 .compose-head .icon-btn{width:30px;height:30px;}
 .compose-fields{padding:8px 22px 0;}
-.compose textarea.body{padding:18px 22px;font-size:14px;}
+.compose-editor{padding:18px 22px;font-size:14px;}
 .compose-foot{padding:12px 22px;}
 
 /* ============ 列表宽度拖拽 ============ */

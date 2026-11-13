@@ -13,7 +13,7 @@ assert.ok(captured && captured.methods, 'app.js 没交出 methods');
 
 const M = captured.methods;
 // 模块内的纯函数不在 methods 上：把同一份源码再跑一遍、末尾加 return 取出来
-const I = new Function('Vue', `${src}\nreturn { scopeEmailCss, scopeQuoteHtml, QUOTE_SCOPE };`)(fakeVue);
+const I = new Function('Vue', `${src}\nreturn { scopeEmailCss, scopeQuoteHtml, QUOTE_SCOPE, buildTableHtml, cleanPastedHtml, textToBodyHtml, inlineTableStyles };`)(fakeVue);
 let pass = 0;
 const ok = (name, cond, extra = '') => {
   assert.ok(cond, `✗ ${name} ${extra}`);
@@ -777,12 +777,20 @@ function sseCtx(over = {}) {
   const doc = C.quoteDoc.call({ compose: { quoteHtml: '<p>原文</p>' } });
   ok('quoteDoc 复用沙箱外壳（含亮色锁死）', doc.includes('<p>原文</p>') && doc.includes(':root{color-scheme:light!important}'));
 
-  const ctxHtml = { compose: { text: '<b>新内容</b>\n第二行', quoteHtml: '<p>原文</p>' }, composeHtml: M.composeHtml };
+  // 正文改成富文本之后，<b>/<table> 是「用户自己的格式」，不能再转义掉
+  const ctxHtml = {
+    compose: { text: '新内容\n第二行', bodyHtml: '<p><b>新内容</b></p><p>第二行</p>', quoteHtml: '<p>原文</p>' },
+  };
   const html = M.composeHtml.call(ctxHtml);
-  ok('composeHtml 转义用户输入（不把 <b> 当标签）', html.includes('&lt;b&gt;新内容&lt;/b&gt;'), html);
-  ok('composeHtml 换行转 <br>', html.includes('<br>'));
+  ok('composeHtml 保留富文本（加粗不被转义）', html.includes('<b>新内容</b>'), html);
+  ok('composeHtml 带正文样式表（交给 juice 内联）', html.includes('.mnq-body p{margin:0 0 10px}'));
   ok('composeHtml 原文 HTML 原样附后', html.includes('<p>原文</p>'));
-  ok('composeHtml 无原文时只剩自己写的正文', !M.composeHtml.call({ compose: { text: 'hi', quoteHtml: '' } }).includes('原始邮件'));
+  ok('composeHtml 无原文时只剩自己写的正文', !M.composeHtml.call({ compose: { text: 'hi', bodyHtml: '<p>hi</p>', quoteHtml: '' } }).includes('原始邮件'));
+  ok('composeHtml 正文为空时不塞空壳 div',
+    M.composeHtml.call({ compose: { bodyHtml: '', quoteHtml: '<p>x</p>' } }).trim() === '<p>x</p>');
+  const tbl = M.composeHtml.call({ compose: { bodyHtml: '<table><tr><td>1</td></tr></table>', quoteHtml: '' } });
+  ok('composeHtml 给 table/td 补内联样式（Outlook 只认元素自身 style）',
+    /<table style="[^"]*border-collapse:collapse/.test(tbl) && /<td style="[^"]*border:1px solid/.test(tbl), tbl);
 
   const ctxText = { compose: { text: 'abc', quoteText: '在 xx 写道：\n\n> 原文' }, composeText: M.composeText };
   ok('composeText 纯文本兜底 = 正文 + 原文', M.composeText.call(ctxText) === 'abc\n\n在 xx 写道：\n\n> 原文');
@@ -913,5 +921,64 @@ function sseCtx(over = {}) {
   ok('写信框的附件可逐个移除', /compose\.attachments\.splice\(i,1\)/.test(idx));
 }
 
+
+//     写信正文是富文本：插入表格、粘贴 Excel、发出去的样子
+{
+  const t = I.buildTableHtml(2, 3);
+  ok('建表：2 行 3 列', (t.match(/<tr>/g) || []).length === 2 && (t.match(/<td>/g) || []).length === 6, t);
+  ok('建表：表格后面留一个空段落（否则光标出不去）', /<\/table><p><br><\/p>$/.test(t));
+  const clamp = I.buildTableHtml(0, 999);
+  ok('建表：行列数钳到合理范围（1~20 行 / 1~12 列）',
+    (clamp.match(/<tr>/g) || []).length === 1 && (clamp.match(/<td>/g) || []).length === 12);
+
+  // Excel 复制出来的真实形态：命名空间、mso 样式、条件注释、一堆内联 style
+  const excel = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">'
+    + '<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><style>td{mso-number-format:"\\@"}</style></head>'
+    + '<!--[if gte mso 9]><xml><x:ExcelWorkbook></x:ExcelWorkbook></xml><![endif]-->'
+    + '<body><table border=0 cellpadding=0 cellspacing=0 width=180 style=\'border-collapse:collapse;width:135pt\'>'
+    + '<tr height=20 style=\'height:15.0pt\'><td height=20 class=xl65 align=right width=90 '
+    + 'style=\'height:15.0pt;border:.5pt solid windowtext\'>1,234.00</td>'
+    + '<td colspan=2 align=center style=\'border:none\'>合计</td></tr></table></body></html>';
+  const cleaned = I.cleanPastedHtml(excel);
+  ok('粘贴 Excel：丢掉 head/style/条件注释/命名空间', !/mso-|<style|<!--|xmlns:|<xml|<meta/i.test(cleaned), cleaned);
+  ok('粘贴 Excel：表格结构留着', /<table>[\s\S]*<tr>[\s\S]*<td[^>]*>1,234\.00<\/td>/.test(cleaned), cleaned);
+  ok('粘贴 Excel：colspan 保留', /<td colspan="2"/.test(cleaned), cleaned);
+  ok('粘贴 Excel：align 保留（数字靠右对齐是有意义的）', /align="right"/.test(cleaned) && /align="center"/.test(cleaned));
+  ok('粘贴 Excel：内联样式与 class/width 全清掉', !/style=|class=|width=|height=/.test(cleaned), cleaned);
+
+  const danger = I.cleanPastedHtml('<p><a href="javascript:alert(1)" onclick="x()">点我</a>'
+    + '<a href="https://ok.example/a">正常</a><script>alert(2)</script><iframe src="//bad"></iframe></p>');
+  ok('粘贴：javascript: 链接不留 href', !/javascript:/i.test(danger) && !/onclick/i.test(danger), danger);
+  ok('粘贴：正常链接保留（补 target 交给客户端）', /href="https:\/\/ok\.example\/a"/.test(danger), danger);
+  ok('粘贴：script/iframe 连壳带内容丢掉', !/script|iframe/i.test(danger), danger);
+
+  ok('粘贴：纯文本粘贴返回空（走浏览器默认，保住换行）', I.cleanPastedHtml('') === '');
+
+  const plain = I.textToBodyHtml('第一行\n第二行\n\n另一段 <b>不是标签</b>');
+  ok('纯文本转正文：空行分段、单换行 <br>', (plain.match(/<p>/g) || []).length === 2 && plain.includes('<br>'), plain);
+  ok('纯文本转正文：尖括号转义（老草稿里真有这种字面量）', plain.includes('&lt;b&gt;不是标签&lt;/b&gt;'));
+  ok('纯文本转正文：空白就是空', I.textToBodyHtml('   ') === '');
+
+  // 追加样式不能踩掉元素上已有的声明（比如粘贴表格自带的 align/宽度）
+  const merged = I.inlineTableStyles('<table style="width:300px"><tr><td>a</td><td style="color:red">b</td></tr></table>');
+  ok('发表格：已有 style 追加而不是覆盖', /<table style="width:300px;border-collapse:collapse/.test(merged), merged);
+  ok('发表格：td 有边框（收件方一眼能看出这是表格）', /<td style="border:1px solid #c9d1d9/.test(merged), merged);
+  ok('发表格：单元格原有样式保留在后面', /color:red;border:1px solid/.test(merged), merged);
+
+  // 编辑器 → 数据：bodyHtml 和纯文本兜底要一起更新
+  const el = { innerHTML: '<table><tr><td>甲</td><td>乙</td></tr></table>', innerText: '甲\t乙\n\n', dataset: {} };
+  const ctx = { compose: { bodyHtml: '', text: '' }, editorEl: () => el };
+  M.syncBodyFromEditor.call(ctx);
+  ok('同步：bodyHtml 存的是编辑器 HTML（表格结构在）', /<table>/.test(ctx.compose.bodyHtml));
+  ok('同步：纯文本兜底把表格压成制表符分隔', ctx.compose.text === '甲\t乙', JSON.stringify(ctx.compose.text));
+  ok('同步：有内容时清掉 placeholder 标记', el.dataset.empty === '0');
+
+  const idx = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  ok('写信框正文是 contenteditable（textarea 里塞不了表格）', /class="compose-editor"[^>]*contenteditable="true"/.test(idx));
+  ok('工具栏有加粗/斜体/下划线/列表/表格', /exec\('bold'\)/.test(idx) && /exec\('italic'\)/.test(idx)
+    && /exec\('underline'\)/.test(idx) && /insertUnorderedList/.test(idx) && /toggleTableGrid/.test(idx));
+  ok('表格是网格选行列（8×8）', /v-for="i in 64"/.test(idx) && /拖动选择行列/.test(idx));
+  ok('光标在表格里才出现加行/删列', /v-if="inTable"/.test(idx) && /tableOp\('rowAfter'\)/.test(idx) && /tableOp\('delTable'\)/.test(idx));
+}
 
 console.log(`\n全部通过：${pass} 项断言`);

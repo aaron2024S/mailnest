@@ -235,6 +235,28 @@ const send = async (opts) => {
   ok('外发正文：Outlook 条件注释（VML）原样保留', /\[if mso\]/.test(html) && /v:roundrect/.test(html), html.slice(-300));
 }
 
+// ---------- 写信里插入的表格：发出去对方得能看出这是个表格 ----------
+// 经典 Outlook 是 Word 引擎，只认元素自身的 style/border。表格边框一旦丢，
+// 收件人看到的就是一堆挤在一起的文字，比不带表格还糟。
+{
+  const body = '<style>.mnq-body table{border-collapse:collapse;margin:10px 0;font-size:13.5px}'
+    + '.mnq-body td,.mnq-body th{border:1px solid #c9d1d9;padding:6px 10px;vertical-align:top}</style>'
+    + '<div class="mnq-body" style="font:14px/1.7 system-ui,sans-serif;color:#24292f">'
+    + '<p>报价如下：</p>'
+    + '<table><tbody><tr><td>Q3 报价单</td><td>数量</td></tr>'
+    + '<tr><td>12,800</td><td>3</td></tr></tbody></table>'
+    + '<p>合计见附件。</p></div>';
+  const raw = await send({ to: ['a@example.com'], subject: '报价', text: '报价如下', html: body });
+  const parsed = await simpleParser(raw);
+  const html = String(parsed.html || '');
+  ok('表格：单元格带内联边框（Outlook 靠这个画格子）',
+    /<td style="[^"]*border:\s*1px solid #c9d1d9/.test(html), html.slice(0, 420));
+  ok('表格：结构完整（2 行 4 格）', (html.match(/<td/g) || []).length === 4, html.slice(0, 420));
+  ok('表格：内联后不再留 .mnq-body 规则', !/\.mnq-body td/.test(html));
+  ok('表格：文字没被压成制表符/一行', /Q3 报价单/.test(html) && /12,800/.test(html));
+  ok('表格：表格前后的正文段落都还在', /报价如下/.test(html) && /合计见附件/.test(html));
+}
+
 server.close();
 console.log(`\n${failed ? '失败' : '全部通过'}：${pass} 项断言${failed ? `，失败 ${failed} 项` : ''}`);
 if (failed) process.exit(1);

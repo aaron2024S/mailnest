@@ -56,6 +56,143 @@ function escapeHtmlText(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ---------- 写信正文：富文本 + 表格 ----------
+// 邮件正文本来就是 HTML 富文本（不是 Markdown），Outlook/QQ 邮箱的正文编辑器都支持
+// 插入表格、加粗、列表。所以写信框的正文从 textarea 换成 contenteditable，
+// 表格插入后单元格里可以直接打字、Tab 跳到下一格。
+
+// 编辑器里允许存在的标签：只放「一封信里说得通」的，其余标签一律脱掉外壳保留文字。
+// 少了 script/style/iframe/form 这些，粘贴进来的网页和 Word 文档就没法把垃圾带进来。
+const PASTE_TAGS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption',
+  'colgroup', 'col', 'p', 'br', 'div', 'span', 'b', 'strong', 'i', 'em', 'u', 's', 'strike',
+  'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'hr', 'pre', 'code',
+  'sub', 'sup', 'font']);
+
+// 发出去的正文样式。juice 会把这些规则内联到元素上，经典 Outlook（Word 引擎）
+// 才认；只写 class 不内联，表格边框在 Outlook 里会整个消失。
+const BODY_CSS = '.mnq-body p{margin:0 0 10px}'
+  + '.mnq-body ul,.mnq-body ol{margin:0 0 10px;padding-left:22px}'
+  + '.mnq-body li{margin:2px 0}'
+  + '.mnq-body table{border-collapse:collapse;margin:10px 0;font-size:13.5px;line-height:1.6}'
+  + '.mnq-body td,.mnq-body th{border:1px solid #c9d1d9;padding:6px 10px;min-width:64px;vertical-align:top}'
+  + '.mnq-body th{background:#f6f8fa;font-weight:600;text-align:left}'
+  + '.mnq-body blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
+  + '.mnq-body a{color:#2d6cf6}';
+
+// 插入表格：rows×cols 的空网格 + 末尾一个空段落（表格后面总得有地方接着写，
+// 否则在最后一格按方向键再也出不去，用户会以为卡死了）
+function buildTableHtml(rows, cols) {
+  const r = Math.max(1, Math.min(20, Number(rows) || 1));
+  const c = Math.max(1, Math.min(12, Number(cols) || 1));
+  const cell = '<td><br></td>';
+  const row = `<tr>${cell.repeat(c)}</tr>`;
+  return `<table><tbody>${row.repeat(r)}</tbody></table><p><br></p>`;
+}
+
+// 粘贴清洗：Excel/Word/网页复制过来的 HTML 又长又脏（mso-*、<o:p>、条件注释、
+// 满屏内联样式）。这里做三件事：整段丢垃圾 → 标签过白名单 → 属性只留必要的。
+// 表格结构（table/tr/td + colspan/rowspan/align）必须留着，其余属性全扔。
+function cleanPastedHtml(html) {
+  let s = String(html == null ? '' : html);
+  if (!s) return '';
+  // 1) 成对出现的垃圾标签连内容一起丢
+  s = s.replace(/<(script|style|head|xml|v:[\w]+|w:[\w]+)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+  // 2) 自闭合/孤立的命名空间标签（Word 的 <o:p></o:p> 常成对，这里兜底单独的）
+  s = s.replace(/<\/?(script|style|meta|link|xml|o:p|v:[\w]+|w:[\w]+|!doctype)\b[^>]*>/gi, '');
+  // 3) 注释（含 Outlook 的 <!--[if mso]>…<![endif]-->）
+  s = s.replace(/<!--[\s\S]*?-->/g, '');
+
+  // 4) 逐标签过白名单：不认识的标签脱壳留文字
+  s = s.replace(/<(\/?)([a-zA-Z][\w:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g, (whole, slash, rawTag, attrs) => {
+    const tag = rawTag.toLowerCase();
+    if (!PASTE_TAGS.has(tag)) return '';
+    if (slash) return `</${tag}>`;
+    return `<${tag}${cleanTagAttrs(tag, attrs)}>`;
+  });
+
+  // 5) 压缩清洗后留下的连续空段落/空行（Excel 粘过来常带一堆 <p>&nbsp;</p>）
+  s = s.replace(/(?:<p>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>){3,}/gi, '<p><br></p>');
+  return s.trim();
+}
+
+// 白名单属性：表格结构要（colspan/rowspan/align），链接要（href/title），其余全丢。
+// 内联样式一律丢掉 —— Excel 的表带 border:.5pt solid windowtext 这种，留着只会
+// 让表看起来忽粗忽细，统一用编辑器自己的边框更整齐。
+function cleanTagAttrs(tag, attrs) {
+  const src = attrs || '';
+  const pick = (name) => {
+    const m = src.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s"'>]+))`, 'i'));
+    return m ? String(m[2] ?? m[3] ?? m[4] ?? '').trim() : '';
+  };
+  const out = [];
+  if (tag === 'a') {
+    const href = pick('href');
+    // javascript:/data: 之类的 pseudo 协议一律不进正文
+    if (/^(https?:|mailto:|tel:)/i.test(href)) { out.push(` href="${escapeHtmlText(href)}"`); }
+    const title = pick('title');
+    if (title) out.push(` title="${escapeHtmlText(title)}"`);
+  }
+  if (tag === 'td' || tag === 'th') {
+    for (const name of ['colspan', 'rowspan']) {
+      const v = pick(name);
+      if (/^\d{1,3}$/.test(v) && Number(v) > 1) out.push(` ${name}="${v}"`);
+    }
+  }
+  const align = pick('align').toLowerCase();
+  if (/^(left|center|right|justify)$/.test(align)) out.push(` align="${align}"`);
+  if (tag === 'ol') {
+    const start = pick('start');
+    if (/^\d{1,4}$/.test(start)) out.push(` start="${start}"`);
+  }
+  if (tag === 'font') {
+    const color = pick('color');
+    if (/^#[0-9a-f]{3,8}$/i.test(color)) out.push(` color="${color}"`);
+  }
+  return out.join('');
+}
+
+// 纯文本 → 正文 HTML：老草稿只存了 text、或者别处塞进来一段纯文本时用。
+// 空行分段、单换行转 <br>，跟以前 textarea 的观感保持一致。
+function textToBodyHtml(text) {
+  const s = String(text == null ? '' : text).replace(/\r\n?/g, '\n').trim();
+  if (!s) return '';
+  return s.split(/\n{2,}/).map((para) => `<p>${escapeHtmlText(para).replace(/\n/g, '<br>')}</p>`).join('');
+}
+
+// 给标签塞 style 属性（已有 style 就追加，别覆盖用户/粘贴带来的声明）
+function appendStyle(attrs, css) {
+  const m = String(attrs || '').match(/\bstyle\s*=\s*("([^"]*)"|'([^']*)')/i);
+  if (!m) return `${attrs} style="${css}"`;
+  const old = m[2] != null ? m[2] : (m[3] || '');
+  const sep = !old ? '' : (/;\s*$/.test(old) ? '' : ';');
+  return attrs.replace(m[0], `style="${old}${sep}${css}"`);
+}
+
+// 表格样式直接写进元素：经典 Outlook 是 Word 引擎，只认元素自身的 style 和 border 属性，
+// 外部样式表基本不认。juice 那一步通常已经补了，但这里不依赖它 —— 表格边框是
+// 「发了以后对方能不能看出这是个表」的底线，不能赌。
+function inlineTableStyles(html) {
+  const TD = 'border:1px solid #c9d1d9;padding:6px 10px;min-width:64px;vertical-align:top';
+  const TH = 'border:1px solid #c9d1d9;padding:6px 10px;min-width:64px;vertical-align:top;background:#f6f8fa;font-weight:600;text-align:left';
+  return String(html == null ? '' : html)
+    .replace(/<table\b((?:"[^"]*"|'[^']*'|[^>"'])*)>/gi,
+      (w, attrs) => `<table${appendStyle(attrs, 'border-collapse:collapse;margin:10px 0;font-size:13.5px;line-height:1.6')}>`)
+    .replace(/<(td|th)\b((?:"[^"]*"|'[^']*'|[^>"'])*)>/gi,
+      (w, tag, attrs) => `<${tag}${appendStyle(attrs, tag.toLowerCase() === 'th' ? TH : TD)}>`);
+}
+
+// 光标放进某个元素（新插入的表格单元格、删行之后要落脚的地方）
+function placeCaretIn(el, atEnd) {
+  if (!el || !document.createRange) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(!atEnd);
+  const sel = document.getSelection();
+  if (!sel) return;
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
 // ---------- 引用块的样式作用域 ----------
 // 回信时原邮件的 HTML 会被整段拼在新正文后面，两段处在同一个文档里。模板邮件
 // （Ubisoft/TMDB/Steam 那类）的 <style> 里常写着 body{background:#000;color:#fff}，
@@ -188,7 +325,13 @@ const app = createApp({
       searchInfo: '',
       syncing: false,
 
-      compose: { open: false, accountId: '', to: '', cc: '', subject: '', text: '', quoteHtml: '', quoteText: '', attachments: [], sending: false, showCc: false, mode: 'new', replyTo: null, draftId: null, error: '' },
+      // bodyHtml 是编辑器里的 HTML（只有用户自己写的那部分，不含原文引用）；
+      // text 是它派生的纯文本，给不支持 HTML 的客户端兜底，也用于判「有没有写东西」
+      compose: { open: false, accountId: '', to: '', cc: '', subject: '', text: '', bodyHtml: '', quoteHtml: '', quoteText: '', attachments: [], sending: false, showCc: false, mode: 'new', replyTo: null, draftId: null, error: '' },
+      tableGrid: false,          // 插入表格的网格弹层
+      gridHi: { r: 0, c: 0 },    // 网格里高亮到第几行第几列
+      inTable: false,            // 光标是不是在表格里（决定要不要显示加行/删列那排按钮）
+      lastRange: null,           // 工具栏按钮按下前的选区，execCommand 前要还原
       // 本地草稿：存在服务端 drafts/ 目录（不往邮件服务器 APPEND），重新打开时要
       // 能连原文引用、附件、回复关系一起还原
       drafts: [],
@@ -1311,6 +1454,9 @@ const app = createApp({
       this.compose.cc = opts.cc || ''; this.compose.showCc = !!opts.cc;
       this.compose.subject = opts.subject || '';
       this.compose.text = opts.text || '';
+      // 正文是富文本：优先用存下来的 HTML；只有纯文本来源（老草稿、外部塞进来的
+      // 一段文字）才按空行分段转成 HTML，否则编辑器里会是一坨没有换行的字
+      this.compose.bodyHtml = opts.bodyHtml || textToBodyHtml(opts.text || '');
       // 原文引用（Outlook 式）：quoteHtml 原样渲染进正文，quoteText 是给纯文本客户端的兜底
       this.compose.quoteHtml = opts.quoteHtml || '';
       this.compose.quoteText = opts.quoteText || '';
@@ -1318,6 +1464,220 @@ const app = createApp({
       this.compose.attachments = (opts.attachments || []).slice();
       this.compose.draftId = opts.draftId || null;
       this.compose.error = '';
+      this.tableGrid = false;
+      this.inTable = false;
+      const html = this.compose.bodyHtml;
+      // 编辑器是 contenteditable，不能用 v-html 绑（每次输入重渲染会把光标顶掉），
+      // 只能等 DOM 出来之后手动灌一次
+      this.$nextTick(() => this.setBodyHtml(html));
+    },
+
+    // ---------- 正文编辑器（富文本 / 表格） ----------
+    editorEl() { return this.$refs.bodyEditor || null; },
+    setBodyHtml(html) {
+      const el = this.editorEl();
+      if (!el) return;
+      el.innerHTML = html || '';
+      this.syncBodyFromEditor();
+    },
+    // 编辑器 → 数据：bodyHtml 用于发送/存草稿，text 用于纯文本兜底与「有没有写东西」
+    syncBodyFromEditor() {
+      const el = this.editorEl();
+      if (!el) return;
+      this.compose.bodyHtml = el.innerHTML;
+      // innerText 会把表格压成制表符分隔的行（恰好就是纯文本里能看的形态），
+      // 末尾那串换行是 contenteditable 的尾巴，去掉免得正文看着多出好几行空行
+      this.compose.text = String(el.innerText || '').replace(/\u00a0/g, ' ').replace(/\s+$/, '');
+      el.dataset.empty = this.compose.text.trim() ? '0' : '1';
+    },
+    onBodyInput() { this.syncBodyFromEditor(); },
+    // Tab 在单元格之间跳：浏览器对 contenteditable 表格的 Tab 行为各家不一（有的直接
+    // 把焦点移出编辑器），自己接管最稳。最后一格再按 Tab 自动接一行 —— 填表格就是
+    // 一路 Tab 打到底，中途还要抬手点鼠标「加行」很断节奏。
+    onBodyKeydown(e) {
+      if (e.key !== 'Tab' || e.ctrlKey || e.altKey || e.metaKey) return;
+      const cell = this.currentCell();
+      if (!cell) return;
+      e.preventDefault();
+      const table = cell.closest('table');
+      if (!table) return;
+      const cells = Array.from(table.querySelectorAll('td,th'));
+      let next = cells[cells.indexOf(cell) + (e.shiftKey ? -1 : 1)];
+      if (!next && !e.shiftKey) {
+        const last = table.rows[table.rows.length - 1];
+        if (!last) return;
+        const tr = document.createElement('tr');
+        for (let i = 0; i < last.children.length; i++) {
+          const td = document.createElement('td');
+          td.innerHTML = '<br>';
+          tr.appendChild(td);
+        }
+        last.after(tr);
+        next = tr.children[0];
+      }
+      if (next) { placeCaretIn(next); this.inTable = true; this.syncBodyFromEditor(); }
+    },
+    // 粘贴：网页/Word/Excel 的 HTML 一律清洗后插入；纯文本交给浏览器默认（会保留换行）
+    onBodyPaste(e) {
+      const dt = e.clipboardData;
+      if (!dt) return;
+      const html = dt.getData('text/html');
+      const imgs = Array.from(dt.files || []).filter((f) => /^image\//i.test(f.type));
+      if (!html) {
+        // 截图/复制图片：正文暂不支持内嵌图（data: URI 在多数邮件客户端不显示，
+        // 还会把正文撑成几 MB），做成附件反而一定收得到
+        if (imgs.length) {
+          e.preventDefault();
+          this.addFiles(imgs);
+          this.toast('图片已作为附件添加（正文暂不支持内嵌图片）', 'warn');
+        }
+        return;
+      }
+      e.preventDefault();
+      const clean = cleanPastedHtml(html);
+      const el = this.editorEl();
+      if (el) el.focus();
+      this.restoreSelection();
+      if (clean) {
+        try { document.execCommand('insertHTML', false, clean); } catch { /* 老浏览器没有就算了 */ }
+      } else {
+        try { document.execCommand('insertText', false, dt.getData('text/plain') || ''); } catch { /* 同上 */ }
+      }
+      this.syncBodyFromEditor();
+      // Word/VS Code 之类会同时给 HTML 和图片文件：HTML 里的 <img> 已被清洗掉，
+      // 图片再按附件补回去，别让用户以为自己粘成功了
+      if (imgs.length) {
+        this.addFiles(imgs);
+        this.toast('图片已作为附件添加（正文暂不支持内嵌图片）', 'warn');
+      }
+    },
+    // 选区变动时记住位置：点工具栏按钮会先让编辑器失焦，
+    // 不还原的话加粗作用在「没有选区」上，等于什么都没发生
+    onSelectionChange() {
+      const el = this.editorEl();
+      if (!el) { this.inTable = false; return; }
+      const sel = document.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      if (el.contains(range.commonAncestorContainer)) {
+        this.lastRange = range.cloneRange();
+        this.inTable = !!this.currentCell(range.anchorNode);
+      } else {
+        this.inTable = false;
+      }
+    },
+    restoreSelection() {
+      const sel = document.getSelection();
+      if (!sel || !this.lastRange) return;
+      sel.removeAllRanges();
+      sel.addRange(this.lastRange);
+    },
+    exec(cmd, val) {
+      const el = this.editorEl();
+      if (!el) return;
+      el.focus();
+      this.restoreSelection();
+      try { document.execCommand(cmd, false, val == null ? null : val); } catch { /* 忽略 */ }
+      this.syncBodyFromEditor();
+    },
+    toggleTableGrid() {
+      this.tableGrid = !this.tableGrid;
+      this.gridHi = { r: 0, c: 0 };
+    },
+    pickTable(r, c) {
+      this.tableGrid = false;
+      this.insertTable(r, c);
+    },
+    insertTable(rows, cols) {
+      const el = this.editorEl();
+      if (!el) return;
+      const html = buildTableHtml(rows, cols);
+      el.focus();
+      this.restoreSelection();
+      let done = false;
+      try { done = document.execCommand('insertHTML', false, html); } catch { done = false; }
+      if (!done) {
+        // execCommand 被废弃了，个别环境不认：手动往选区里塞
+        const sel = document.getSelection();
+        if (sel && sel.rangeCount) {
+          const range = sel.getRangeAt(0);
+          const box = document.createElement('div');
+          box.innerHTML = html;
+          const frag = document.createDocumentFragment();
+          while (box.firstChild) frag.appendChild(box.firstChild);
+          range.deleteContents();
+          range.insertNode(frag);
+        }
+      }
+      this.syncBodyFromEditor();
+      const first = el.querySelector('td');
+      if (first) placeCaretIn(first);
+      this.inTable = !!first;
+    },
+    // 光标所在的单元格（不在表格里就返回 null）
+    currentCell(node) {
+      const el = this.editorEl();
+      let n = node || (this.lastRange && this.lastRange.startContainer);
+      while (n && n !== el) {
+        if (n.nodeType === 1 && (n.tagName === 'TD' || n.tagName === 'TH')) return n;
+        n = n.parentNode;
+      }
+      return null;
+    },
+    // 表格编辑：加/删行列、删整表。删到只剩一格就把整表端掉，
+    // 然后补一个空段落 —— 不然编辑器里会剩一个删不掉的空表格。
+    tableOp(op) {
+      const cell = this.currentCell();
+      if (!cell) return;
+      const row = cell.parentElement;
+      const table = cell.closest('table');
+      if (!table) return;
+      const colIdx = Array.prototype.indexOf.call(row.children, cell);
+      const blank = () => { const td = document.createElement('td'); td.innerHTML = '<br>'; return td; };
+      if (op === 'rowAfter' || op === 'rowBefore') {
+        const tr = document.createElement('tr');
+        for (let i = 0; i < row.children.length; i++) tr.appendChild(blank());
+        row[op === 'rowAfter' ? 'after' : 'before'](tr);
+        placeCaretIn(tr.children[Math.min(colIdx, tr.children.length - 1)]);
+      } else if (op === 'colAfter' || op === 'colBefore') {
+        let target = null;
+        for (const tr of Array.from(table.rows)) {
+          const ref = tr.children[colIdx];
+          if (!ref) continue;
+          const td = blank();
+          ref[op === 'colAfter' ? 'after' : 'before'](td);
+          if (tr === row) target = td;
+        }
+        if (target) placeCaretIn(target);
+      } else if (op === 'delRow') {
+        if (table.rows.length > 1) {
+          // 索引要在 remove 之前取：HTMLCollection 是活引用，删完就查不到了
+          const rowIdx = Array.prototype.indexOf.call(table.rows, row);
+          row.remove();
+          const stay = table.rows[Math.min(rowIdx, table.rows.length - 1)];
+          if (stay && stay.children[colIdx]) placeCaretIn(stay.children[colIdx]);
+          this.inTable = true;
+        } else this.removeTable(table);
+      } else if (op === 'delCol') {
+        if (row.children.length > 1) {
+          for (const tr of Array.from(table.rows)) {
+            const ref = tr.children[colIdx];
+            if (ref) ref.remove();
+          }
+        } else this.removeTable(table);
+      } else if (op === 'delTable') {
+        this.removeTable(table);
+      }
+      this.syncBodyFromEditor();
+    },
+    removeTable(table) {
+      const el = this.editorEl();
+      const next = table.nextElementSibling;
+      table.remove();
+      this.inTable = false;
+      if (!el) return;
+      if (!el.textContent.trim() && !el.querySelector('table,img')) el.innerHTML = '<p><br></p>';
+      else if (next) placeCaretIn(next);
     },
     // 引文源文本：优先从（净化后的）HTML 版转纯文本。text/plain 备选版经常被发件方
     // 硬折行 —— Steam 收据邮件把长 URL 拆成十几行，直接引用出去链接是断的、排版是碎的，
@@ -1380,11 +1740,16 @@ const app = createApp({
         // 外溢去染用户新写的正文（这是「回复后整封信变黑底白字」的根因）
         + `<div class="${QUOTE_SCOPE.slice(1)}" style="margin-top:14px">` + scopeQuoteHtml(m.html) + '</div>';
     },
-    // 发出去的 HTML 正文：用户输入（转义 + 换行转 <br>）+ 原文引用原样跟上
+    // 发出去的 HTML 正文：用户写的富文本（可含表格）+ 原文引用原样跟上
     composeHtml() {
       const parts = [];
-      const own = escapeHtmlText(this.compose.text).replace(/\n/g, '<br>');
-      if (own) parts.push(`<div style="font:14px/1.7 system-ui,'Segoe UI','Microsoft YaHei',sans-serif;color:#24292f">${own}</div>`);
+      const own = String(this.compose.bodyHtml || '').trim();
+      if (own) {
+        // 这段样式表交给服务端的 juice 内联到元素上；表格另有一层 inlineTableStyles 兜底
+        parts.push(`<style>${BODY_CSS}</style>`);
+        parts.push('<div class="mnq-body" style="font:14px/1.7 system-ui,\'Segoe UI\',\'Microsoft YaHei\',sans-serif;color:#24292f">'
+          + inlineTableStyles(own) + '</div>');
+      }
       if (this.compose.quoteHtml) parts.push(this.compose.quoteHtml);
       return parts.join('');
     },
@@ -1461,7 +1826,10 @@ const app = createApp({
     },
     pickFiles() { this.$refs.fileInput.click(); },
     onFiles(ev) {
-      const files = [...ev.target.files];
+      this.addFiles([...ev.target.files]);
+      ev.target.value = '';
+    },
+    addFiles(files) {
       for (const f of files) {
         if (f.size > 25 * 1048576) { this.toast(`${f.name} 超过 25MB，暂不支持`, 'error'); continue; }
         const reader = new FileReader();
@@ -1470,7 +1838,6 @@ const app = createApp({
         };
         reader.readAsDataURL(f);
       }
-      ev.target.value = '';
     },
     async sendCompose() {
       this.compose.error = '';
@@ -1564,6 +1931,8 @@ const app = createApp({
         cc: full.cc || '',
         subject: full.subject || '',
         text: full.text || '',
+        // 有 bodyHtml 就用它（保住表格/加粗），老草稿只有 text 时由 openCompose 转成段落
+        bodyHtml: full.bodyHtml || '',
         // 原文引用、附件、回复关系都原样还原：草稿是「没写完的信」，不是「一段文字」
         quoteHtml: full.quoteHtml || '',
         quoteText: full.quoteText || '',
@@ -1591,6 +1960,8 @@ const app = createApp({
           body: {
             id: c.draftId, accountId: c.accountId, to: c.to, cc: c.cc, subject: c.subject,
             text: c.text,
+            // 富文本正文单独存一份：只存 text 的话，表格会被压成制表符、加粗全丢
+            bodyHtml: c.bodyHtml || '',
             // 这三样以前没存，导致「存草稿 → 再打开」原文引用和附件全丢，回复也变成新邮件
             quoteHtml: c.quoteHtml || '', quoteText: c.quoteText || '',
             mode: c.mode,
@@ -1961,12 +2332,20 @@ const app = createApp({
   },
 
   async mounted() {
-    document.addEventListener('click', () => { this.acctOpen = false; this.avatarOpen = false; this.closeCtx(); this.closeNavCtx(); });
+    document.addEventListener('click', (e) => {
+      this.acctOpen = false; this.avatarOpen = false; this.closeCtx(); this.closeNavCtx();
+      // 表格网格弹层：点它自己不算「点外面」（按钮是 mousedown 处理的，click 还会冒上来）
+      const insideTablePicker = !!(e.target && e.target.closest && e.target.closest('.tl-wrap'));
+      if (!insideTablePicker) this.tableGrid = false;
+    });
+    // 记住正文里的选区：工具栏一按，编辑器就失焦，不存下来加粗会作用在空气上
+    document.addEventListener('selectionchange', () => { if (this.compose.open) this.onSelectionChange(); });
     document.addEventListener('keydown', (e) => {
       const t = e.target || {};
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable;
       // Esc 按「最上面一层」逐层关：右键菜单 → 关窗确认 → 写信 → 设置 → 搜索 → 阅读区
       if (e.key === 'Escape') {
+        if (this.tableGrid) { this.tableGrid = false; return; }
         if (this.ctx.open || this.navCtx.open) { this.closeCtx(); this.closeNavCtx(); return; }
         if (this.composeAskClose) { this.composeAskClose = false; return; }
         if (this.compose.open) { this.closeCompose(); return; }

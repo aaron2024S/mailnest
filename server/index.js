@@ -920,6 +920,8 @@ api.post('/drafts', guard, (req, res) => {
       draft: saveDraft(req.user.id, {
         id: d.id, accountId: d.accountId, to: d.to, cc: d.cc, bcc: d.bcc,
         subject: d.subject, text: d.text,
+        // 富文本正文（网页端编辑器产出，可能带表格）：只存 text 的话发出去表格就没了
+        bodyHtml: typeof d.bodyHtml === 'string' ? d.bodyHtml : '',
         // 回信带出来的原文（Outlook 式）：不存的话，关掉窗口再打开就只剩自己写的那几行，
         // 引文没了但收件人还以为在回上一封 —— 这是草稿最坑的一处
         quoteHtml: d.quoteHtml || '', quoteText: d.quoteText || '',

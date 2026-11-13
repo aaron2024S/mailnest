@@ -54,6 +54,9 @@
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5.5 8.5 12l6.5 6.5"/></symbol>
   <symbol id="i-next" viewBox="0 0 24 24"><path d="m9 5.5 6.5 6.5L9 18.5"/></symbol>
   <symbol id="i-clip" viewBox="0 0 24 24"><path d="M20 12.5 12.6 20a5 5 0 0 1-7-7l7.7-7.8a3.4 3.4 0 0 1 4.8 4.8l-7.7 7.8a1.8 1.8 0 0 1-2.5-2.5l7-7"/></symbol>
+  <symbol id="i-table" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 4.5v15M15 4.5v15"/></symbol>
+  <symbol id="i-list-ul" viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="5" cy="6.5" r="1.3"/><circle cx="5" cy="12" r="1.3"/><circle cx="5" cy="17.5" r="1.3"/></symbol>
+  <symbol id="i-list-ol" viewBox="0 0 24 24"><path d="M9.5 6.5h11M9.5 12h11M9.5 17.5h11"/><path d="M4 5.2h1v3M3.6 8.2h2"/><path d="M3.7 11.4h2l-2 2.2h2"/></symbol>
   <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.7 3.8v4.4h-4.4"/></symbol>
   <symbol id="i-warn" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 8v4.6"/><path d="M12 15.8h.01"/></symbol>
   <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></symbol>
@@ -530,7 +533,49 @@
           <span></span>
         </div>
       </div>
-      <textarea class="body" v-model="compose.text" placeholder="正文…"></textarea>
+      <!-- 正文工具栏。用 mousedown.prevent 而不是 click：click 会先让编辑器失焦，
+           选区一丢，execCommand 就作用在空气上 -->
+      <div class="compose-tools">
+        <button type="button" class="tl-btn tl-b" @mousedown.prevent="exec('bold')" title="加粗（Ctrl+B）">B</button>
+        <button type="button" class="tl-btn tl-i" @mousedown.prevent="exec('italic')" title="斜体（Ctrl+I）">I</button>
+        <button type="button" class="tl-btn tl-u" @mousedown.prevent="exec('underline')" title="下划线（Ctrl+U）">U</button>
+        <span class="tl-sep"></span>
+        <button type="button" class="tl-btn" @mousedown.prevent="exec('insertUnorderedList')" title="无序列表">
+          <svg class="i" style="width:15px;height:15px"><use href="#i-list-ul"/></svg>
+        </button>
+        <button type="button" class="tl-btn" @mousedown.prevent="exec('insertOrderedList')" title="有序列表">
+          <svg class="i" style="width:15px;height:15px"><use href="#i-list-ol"/></svg>
+        </button>
+        <span class="tl-sep"></span>
+        <span class="tl-wrap">
+          <button type="button" class="tl-btn" :class="{on:tableGrid}" @mousedown.prevent="toggleTableGrid" title="插入表格">
+            <svg class="i" style="width:15px;height:15px"><use href="#i-table"/></svg>
+          </button>
+          <!-- 网格选行列：鼠标划过就预览「几行几列」，点一下插进去 -->
+          <div class="tl-pop" v-if="tableGrid">
+            <div class="tl-grid">
+              <span v-for="i in 64" :key="i" class="tl-cell"
+                :class="{on: Math.ceil(i/8) <= gridHi.r && ((i-1)%8)+1 <= gridHi.c}"
+                @mouseenter="gridHi = { r: Math.ceil(i/8), c: ((i-1)%8)+1 }"
+                @mousedown.prevent="pickTable(Math.ceil(i/8), ((i-1)%8)+1)"></span>
+            </div>
+            <div class="tl-hint">{{ gridHi.r ? gridHi.r + ' 行 × ' + gridHi.c + ' 列' : '拖动选择行列' }}</div>
+          </div>
+        </span>
+        <!-- 光标在表格里时才出现的行列操作 -->
+        <template v-if="inTable">
+          <span class="tl-sep"></span>
+          <button type="button" class="tl-btn tl-txt" @mousedown.prevent="tableOp('rowAfter')" title="在下方插入一行">+行</button>
+          <button type="button" class="tl-btn tl-txt" @mousedown.prevent="tableOp('colAfter')" title="在右侧插入一列">+列</button>
+          <button type="button" class="tl-btn tl-txt" @mousedown.prevent="tableOp('delRow')" title="删除当前行">−行</button>
+          <button type="button" class="tl-btn tl-txt" @mousedown.prevent="tableOp('delCol')" title="删除当前列">−列</button>
+          <button type="button" class="tl-btn tl-txt" @mousedown.prevent="tableOp('delTable')" title="删除整个表格">删表</button>
+        </template>
+        <span style="flex:1"></span>
+        <button type="button" class="tl-btn tl-txt" @mousedown.prevent="exec('removeFormat')" title="清除格式">Tx</button>
+      </div>
+      <div class="compose-editor" ref="bodyEditor" contenteditable="true" spellcheck="false"
+        data-ph="正文…" data-empty="1" @input="onBodyInput" @paste="onBodyPaste" @keydown="onBodyKeydown"></div>
       <!-- 原文引用（Outlook 式）：原样带在信尾，不压成 > 纯文本；会和信一起发出去 -->
       <div class="compose-quote" v-if="compose.quoteHtml || compose.quoteText">
         <div class="compose-quote-head">原文（随信一起发出）</div>
