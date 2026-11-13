@@ -684,7 +684,7 @@ function sseCtx(over = {}) {
   ok('emailDoc 重置 body 边距并铺白底', /html,body\{margin:0;padding:0;background:#fff/.test(doc));
   ok('emailDoc 保留邮件原始 HTML（含 style，模板布局不受影响）', doc.includes('<style>p{color:red}</style>'));
   ok('emailDoc 保留裸表格补边框规则（且不碰带 width 属性的模板布局表）', doc.includes('table:not([style]):not([width])'));
-  ok('emailDoc 表格 max-width:100%（定宽模板超面板时收缩，不出横向滚动条）', doc.includes('table{max-width:100%}'));
+  ok('emailDoc 元素统一 max-width:100%（定宽模板/内联宽度超面板时收缩，不出横向滚动条）', doc.includes('*{max-width:100%}'));
   ok('纯文本邮件（无 html）emailDoc 为空串走 r-text 分支', C.emailDoc.call({ selected: { text: 'x' } }) === '');
   // 深色系统主题下邮件自带 @media (prefers-color-scheme: dark) 会白底白字 —— 必须废掉深色分支并锁死亮色
   const darkMail = '<style>@media (prefers-color-scheme: dark){p{color:#fff}}@media (PREFERS-COLOR-SCHEME: DARK){div{color:#eee}}</style><p>hi</p>';
@@ -734,7 +734,7 @@ function sseCtx(over = {}) {
     toasts: [], opened: null,
     toast(t) { this.toasts.push(t); },
     openCompose(o) { this.opened = o; },
-    fullDate: M.fullDate, quoteBody: M.quoteBody, quoteLines: M.quoteLines, replyAll: M.replyAll,
+    fullDate: M.fullDate, quoteBody: M.quoteBody, quoteLines: M.quoteLines, replyAll: M.replyAll, quoteBlock: M.quoteBlock,
   };
   ctx.replyAll({
     accountId: 'a1', subject: '感谢您在 Steam 上的购买!',
@@ -746,7 +746,10 @@ function sseCtx(over = {}) {
   ok('回复全部：主收件人是原发件人', ctx.opened?.to === 'noreply@steampowered.com', ctx.opened?.to);
   ok('回复全部：其他收件人+抄送进 cc、去自己、去重', ctx.opened?.cc === 'other@x.com, cc@x.com', ctx.opened?.cc);
   ok('回复全部：主题补 Re:', ctx.opened?.subject === 'Re: 感谢您在 Steam 上的购买!', ctx.opened?.subject);
-  ok('回复全部：引文带原邮件内容', /您好/.test(ctx.opened?.text || ''));
+  ok('回复全部：正文区不再塞 > 引文（原文走引用块）', ctx.opened?.text === '', JSON.stringify(ctx.opened?.text));
+  ok('回复全部：原文按 HTML 原样带出（含原始邮件头与正文）',
+    /-----原始邮件-----/.test(ctx.opened?.quoteHtml || '') && (ctx.opened?.quoteHtml || '').includes('<p>您好</p>'));
+  ok('回复全部：纯文本兜底仍带原邮件内容', /您好/.test(ctx.opened?.quoteText || ''));
 
   const ctx2 = {
     accounts: [{ id: 'a1', email: 'me@outlook.com' }],
@@ -757,6 +760,31 @@ function sseCtx(over = {}) {
   };
   ctx2.replyAll({ accountId: 'a1', subject: 'x', from: { address: 'me@outlook.com' }, to: [{ address: 'me@outlook.com' }], cc: [], date: new Date(), text: 'x' });
   ok('回复全部：只有自己时明确提示且不打开写信', !ctx2.opened && /没有其他收件人/.test(ctx2.toasts[0] || ''), String(ctx2.toasts[0]));
+}
+
+// 29) Outlook 式原文：写信只写新内容，原文按 HTML 原样附在后面发出去（不压成 > 纯文本）
+//     阅读区正文铺满整个区域，不再卡中间 760px
+{
+  const idx = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  ok('写信区有原文引用块（srcdoc 绑定 quoteDoc）', /class="compose-quote"[\s\S]*?:srcdoc="quoteDoc"/.test(idx));
+  const qline = (idx.match(/<iframe class="compose-quote-frame"[\s\S]*?>/g) || [''])[0];
+  ok('原文引用 iframe 沙箱不给 allow-scripts', qline.includes('sandbox=') && !qline.includes('allow-scripts'), qline);
+  ok('阅读区正文铺满（去掉中间 760px 限制）', /\.reader-body \.inner\{max-width:none/.test(css));
+
+  const doc = C.quoteDoc.call({ compose: { quoteHtml: '<p>原文</p>' } });
+  ok('quoteDoc 复用沙箱外壳（含亮色锁死）', doc.includes('<p>原文</p>') && doc.includes(':root{color-scheme:light!important}'));
+
+  const ctxHtml = { compose: { text: '<b>新内容</b>\n第二行', quoteHtml: '<p>原文</p>' }, composeHtml: M.composeHtml };
+  const html = M.composeHtml.call(ctxHtml);
+  ok('composeHtml 转义用户输入（不把 <b> 当标签）', html.includes('&lt;b&gt;新内容&lt;/b&gt;'), html);
+  ok('composeHtml 换行转 <br>', html.includes('<br>'));
+  ok('composeHtml 原文 HTML 原样附后', html.includes('<p>原文</p>'));
+  ok('composeHtml 无原文时只剩自己写的正文', !M.composeHtml.call({ compose: { text: 'hi', quoteHtml: '' } }).includes('原始邮件'));
+
+  const ctxText = { compose: { text: 'abc', quoteText: '在 xx 写道：\n\n> 原文' }, composeText: M.composeText };
+  ok('composeText 纯文本兜底 = 正文 + 原文', M.composeText.call(ctxText) === 'abc\n\n在 xx 写道：\n\n> 原文');
+  ok('composeText 无原文时就是正文', M.composeText.call({ compose: { text: 'abc', quoteText: '' } }) === 'abc');
 }
 
 console.log(`\n全部通过：${pass} 项断言`);

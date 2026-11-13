@@ -251,8 +251,9 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .tool-btn span{white-space:nowrap;}
 .tool-sep{width:1px;height:18px;background:var(--border);margin:0 6px;}
 .m-back{display:none;}
-.reader-body{flex:1;min-height:0;overflow-y:auto;padding:26px 34px 40px;}
-.reader-body .inner{max-width:760px;margin:0 auto;}
+.reader-body{flex:1;min-height:0;overflow-y:auto;padding:18px 20px 30px;}
+/* 正文铺满阅读区，不再卡在中间 760px —— 定宽模板邮件也因此有更多横向空间 */
+.reader-body .inner{max-width:none;margin:0;}
 .r-subject{margin:0 0 14px;font-size:20px;line-height:1.4;font-weight:650;letter-spacing:-.3px;word-break:break-word;}
 /* 已有一封在屏上时点了另一封：旧内容留着不闪白，但要说清「正在换」 */
 .r-opening{display:flex;align-items:center;gap:7px;margin:-4px 0 12px;padding:7px 11px;border-radius:9px;
@@ -305,6 +306,12 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .cfield .cf-btn{border:0;background:transparent;color:var(--text-3);font-size:11.5px;cursor:pointer;}
 .cfield .cf-btn:hover{color:var(--accent);}
 .compose textarea.body{flex:1;border:0;outline:0;resize:none;padding:14px;font-size:13.5px;line-height:1.7;background:transparent;}
+/* 原文引用（Outlook 式）：固定一块高度、内部可滚，跟正文分开，不挤占写信空间 */
+.compose-quote{margin:0 14px 10px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);
+  display:flex;flex-direction:column;flex:0 0 auto;height:34%;min-height:140px;overflow:hidden;}
+.compose-quote-head{padding:6px 10px;font-size:11.5px;color:var(--text-3);border-bottom:1px solid var(--border);}
+.compose-quote-frame{flex:1;width:100%;border:0;background:#fff;min-height:0;}
+.compose-quote-text{flex:1;margin:0;padding:10px;overflow:auto;font:12.5px/1.6 ui-monospace,Consolas,monospace;color:var(--text-2);white-space:pre-wrap;}
 .compose-foot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--border);}
 .compose-foot .send-btn{display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 18px;border:0;border-radius:9px;
   background:var(--accent);color:#fff;font-weight:600;font-size:13px;cursor:pointer;}

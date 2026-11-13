@@ -26,6 +26,36 @@ function guessPreset(email) {
 
 const PALETTE = ['#2d6cf6', '#7c3aed', '#0d9488', '#d97706', '#dc2626', '#059669', '#2563eb', '#c026d3', '#4f46e5', '#0284c7'];
 
+// 邮件 HTML 的沙箱外壳：白纸底 + 亮色锁死（不随系统深色主题翻转）+ 模板表格自适应。
+// 阅读区正文和写信里的原文引用共用这一套，保证「打开看到的」和「引用出去的」一致。
+function wrapEmailDoc(html) {
+  if (!html) return '';
+  // 有些营销邮件自带 @media (prefers-color-scheme: dark)，深色系统下把文字改浅，
+  // 而底色是白纸 ⇒ 白底白字。换成永不匹配的假值让邮件永远取亮色分支；
+  // 另用 !important 锁死 color-scheme: light，压住 light-dark()/系统色/邮件自带声明。
+  const body = String(html).replace(/prefers-color-scheme\s*:\s*dark/gi, 'prefers-color-scheme: mailnest-light');
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"><base target="_blank">'
+    + '<style>html,body{margin:0;padding:0;background:#fff;color:#24292f;'
+    + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;word-break:break-word}'
+    + 'img{max-width:100%;height:auto}'
+    // 定宽模板（width=600/800 属性、或内联 style="width:700px" 的包裹层）超出面板会
+    // 出横向滚动条：一律 max-width:100% —— 只在超出时收缩（列挤窄、文字换行），
+    // 永远不拉伸，窄表和窄内容不受影响（Ubisoft 那次 width:100% 压碎定宽模板的教训只针对拉伸）
+    + '*{max-width:100%}'
+    // 「裸表格补边框」只针对真·裸表（无 style 也无 width 属性）：模板布局表用
+    // width="600" 属性定宽、无 style，若按 selector 补 width:100% 会覆盖属性把布局打碎
+    + 'table:not([style]):not([width]){border-collapse:collapse;margin:10px 0}'
+    + 'table:not([style]):not([width]) td,table:not([style]):not([width]) th{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
+    + 'table:not([style]):not([width]) th{background:#f5f6f8}'
+    + 'blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
+    + '</style></head><body>' + body
+    + '<style>:root{color-scheme:light!important}</style></body></html>';
+}
+
+function escapeHtmlText(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 const app = createApp({
   data() {
     return {
@@ -75,7 +105,7 @@ const app = createApp({
       searchInfo: '',
       syncing: false,
 
-      compose: { open: false, accountId: '', to: '', cc: '', subject: '', text: '', attachments: [], sending: false, showCc: false, mode: 'new', replyTo: null, draftId: null, error: '' },
+      compose: { open: false, accountId: '', to: '', cc: '', subject: '', text: '', quoteHtml: '', quoteText: '', attachments: [], sending: false, showCc: false, mode: 'new', replyTo: null, draftId: null, error: '' },
       quickReplyText: '',
       sendingQuick: false,
 
@@ -217,32 +247,12 @@ const app = createApp({
     // 邮件正文包一层最小 HTML 再放进沙箱 iframe（srcdoc）。直接 v-html 会把邮件自带
     // 的 <style> 泄漏进主页面（TMDB/Steam 这类模板邮件能把整页染花）；iframe 内互不影响。
     emailDoc() {
-      const h = this.selected?.html || '';
-      if (!h) return '';
-      // 邮件按「白纸」恒定渲染，不随系统主题翻转。有些营销邮件自带暗色适配：
-      // @media (prefers-color-scheme: dark) 命中系统深色时把文字改浅（白底白字）、
-      // 或用 light-dark()/color-scheme 声明随主题变色。对策两招：
-      // ① 把 prefers-color-scheme: dark 换成永不匹配的假值 → 邮件永远取亮色分支；
-      // ② 文档根 !important 强制 color-scheme: light（写在正文之后，压住邮件自带声明），
-      //    light-dark()、Canvas 系统色、默认前景/背景全部锁死在亮色侧。
-      // 自带完整深底浅字的邮件（Steam 这类内联样式）不受影响，照原作者的样子渲染。
-      const body = h.replace(/prefers-color-scheme\s*:\s*dark/gi, 'prefers-color-scheme: mailnest-light');
-      return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"><base target="_blank">'
-        + '<style>html,body{margin:0;padding:0;background:#fff;color:#24292f;'
-        + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;word-break:break-word}'
-        + 'img{max-width:100%;height:auto}'
-        // 定宽模板（width=600/800 属性）超出阅读面板会出横向滚动条，看信得来回拖：
-        // 表格一律 max-width:100% —— 只在超出时收缩（列挤窄、文字换行），永远不拉伸，
-        // 窄表不受影响，Ubisoft 那次「width:100% 压碎定宽模板」的教训只针对拉伸方向
-        + 'table{max-width:100%}'
-        // 「裸表格补边框」只针对真·裸表（无 style 也无 width 属性）：模板布局表用
-        // width="600" 属性定宽、无 style，若按选择器补 width:100% 会覆盖属性把布局打碎
-        + 'table:not([style]):not([width]){border-collapse:collapse;margin:10px 0}'
-        + 'table:not([style]):not([width]) td,table:not([style]):not([width]) th{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
-        + 'table:not([style]):not([width]) th{background:#f5f6f8}'
-        + 'blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
-        + '</style></head><body>' + body
-        + '<style>:root{color-scheme:light!important}</style></body></html>';
+      return wrapEmailDoc(this.selected?.html || '');
+    },
+    // 写信里的原文引用也用同一个外壳渲染 —— Outlook 式「原样带上原文」，
+    // 不把模板邮件压成一层 > 纯文本（表格/图片/布局全部保留）
+    quoteDoc() {
+      return wrapEmailDoc(this.compose.quoteHtml || '');
     },
   },
 
@@ -1213,6 +1223,9 @@ const app = createApp({
       this.compose.cc = opts.cc || ''; this.compose.showCc = !!opts.cc;
       this.compose.subject = opts.subject || '';
       this.compose.text = opts.text || '';
+      // 原文引用（Outlook 式）：quoteHtml 原样渲染进正文，quoteText 是给纯文本客户端的兜底
+      this.compose.quoteHtml = opts.quoteHtml || '';
+      this.compose.quoteText = opts.quoteText || '';
       this.compose.attachments = [];
       this.compose.draftId = opts.draftId || null;
       this.compose.error = '';
@@ -1257,6 +1270,40 @@ const app = createApp({
       while (out.length && out[out.length - 1] === '') out.pop();
       return out.map((l) => (l === '' ? '>' : '> ' + l)).join('\n').slice(0, 4000);
     },
+    // Outlook 式原文引用块：头部信息（发件人/时间/收件人/主题）+ 原邮件 HTML 原样附后。
+    // 不再把模板邮件压成一层「> 」纯文本 —— 表格、图片、排版全部保留，跟阅读区看到的一致。
+    quoteBlock(m) {
+      if (!m.html) return '';
+      const esc = escapeHtmlText;
+      const addr = (x) => (x ? esc(`${x.name ? x.name + ' ' : ''}<${x.address || ''}>`) : '');
+      const rows = [
+        ['发件人', addr(m.from)],
+        ['发送时间', esc(this.fullDate(m.date))],
+        ['收件人', (m.to || []).map(addr).join('; ')],
+        ['主题', esc(m.subject || '')],
+      ].filter((r) => r[1]);
+      return '<div style="margin:18px 0 8px;padding-top:12px;border-top:1px solid #e3e6ea;font:12px/1.7 system-ui,sans-serif;color:#57606a">'
+        + '-----原始邮件-----</div>'
+        + '<table style="border-collapse:collapse;font:12px/1.7 system-ui,sans-serif;color:#57606a">'
+        + rows.map(([k, v]) => `<tr><td style="padding:0 12px 0 0;white-space:nowrap;vertical-align:top">${k}:</td><td>${v}</td></tr>`).join('')
+        + '</table>'
+        + '<div style="margin-top:14px">' + m.html + '</div>';
+    },
+    // 发出去的 HTML 正文：用户输入（转义 + 换行转 <br>）+ 原文引用原样跟上
+    composeHtml() {
+      const parts = [];
+      const own = escapeHtmlText(this.compose.text).replace(/\n/g, '<br>');
+      if (own) parts.push(`<div style="font:14px/1.7 system-ui,'Segoe UI','Microsoft YaHei',sans-serif;color:#24292f">${own}</div>`);
+      if (this.compose.quoteHtml) parts.push(this.compose.quoteHtml);
+      return parts.join('');
+    },
+    // 纯文本兜底（给不支持 HTML 的客户端）：用户输入 + 原文纯文本
+    composeText() {
+      const own = (this.compose.text || '').replace(/\s+$/, '');
+      const q = this.compose.quoteText || '';
+      if (!q) return own;
+      return own ? `${own}\n\n${q}` : q;
+    },
     reply(m, mode) {
       const acc = this.accounts.find((a) => a.id === m.accountId);
       if (mode === 'reply') {
@@ -1264,14 +1311,20 @@ const app = createApp({
           mode, accountId: m.accountId,
           to: m.from?.address || '',
           subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
-          text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${this.quoteLines(this.quoteBody(m))}`,
+          // Outlook 式：正文只写新内容，原文原样（HTML）带在下面渲染 + 一起发出去；
+          // quoteText 只是给纯文本客户端的兜底（没有 HTML 版时才用它）
+          text: '',
+          quoteHtml: this.quoteBlock(m),
+          quoteText: `在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${this.quoteLines(this.quoteBody(m))}`,
           replyTo: m,
         });
       } else {
         this.openCompose({
           mode, accountId: acc ? acc.id : this.accounts[0]?.id,
           subject: m.subject.startsWith('Fwd:') ? m.subject : `Fwd: ${m.subject}`,
-          text: `\n\n------------------\n转发自 ${m.from?.address || ''}（${this.fullDate(m.date)}）：\n\n${this.quoteBody(m).slice(0, 4000)}`,
+          text: '',
+          quoteHtml: this.quoteBlock(m),
+          quoteText: `转发自 ${m.from?.address || ''}（${this.fullDate(m.date)}）：\n\n${this.quoteBody(m).slice(0, 4000)}`,
         });
       }
       this.readerOpen = false;
@@ -1293,7 +1346,9 @@ const app = createApp({
         to: uniq[0],
         cc: uniq.slice(1).join(', '),
         subject: m.subject.startsWith('Re:') ? m.subject : `Re: ${m.subject}`,
-        text: `\n\n------------------\n在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${this.quoteLines(this.quoteBody(m))}`,
+        text: '',
+        quoteHtml: this.quoteBlock(m),
+        quoteText: `在 ${this.fullDate(m.date)}，${m.from?.name || m.from?.address} 写道：\n\n${this.quoteLines(this.quoteBody(m))}`,
         replyTo: m,
       });
       this.readerOpen = false;
@@ -1336,7 +1391,8 @@ const app = createApp({
           to: this.compose.to.split(/[,，;；]/).map((s) => s.trim()).filter(Boolean),
           cc: this.compose.showCc ? this.compose.cc.split(/[,，;；]/).map((s) => s.trim()).filter(Boolean) : undefined,
           subject: this.compose.subject,
-          text: this.compose.text,
+          text: this.composeText(),
+          html: this.composeHtml() || undefined,
           attachments: this.compose.attachments,
           draftId: this.compose.draftId,
         };

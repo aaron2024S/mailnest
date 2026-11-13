@@ -523,6 +523,13 @@
         </div>
       </div>
       <textarea class="body" v-model="compose.text" placeholder="正文…"></textarea>
+      <!-- 原文引用（Outlook 式）：原样带在信尾，不压成 > 纯文本；会和信一起发出去 -->
+      <div class="compose-quote" v-if="compose.quoteHtml || compose.quoteText">
+        <div class="compose-quote-head">原文（随信一起发出）</div>
+        <iframe class="compose-quote-frame" v-if="compose.quoteHtml" :srcdoc="quoteDoc"
+          sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" title="原文引用"></iframe>
+        <pre class="compose-quote-text" v-else>{{ compose.quoteText }}</pre>
+      </div>
       <div class="compose-foot">
         <button class="icon-btn" @click="pickFiles" title="添加附件"><svg class="i"><use href="#i-clip"/></svg></button>
         <input type="file" ref="fileInput" multiple style="display:none" @change="onFiles">
