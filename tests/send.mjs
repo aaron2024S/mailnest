@@ -172,6 +172,43 @@ const send = async (opts) => {
   ok('中文「转发：」也认', forwardSubject('转发：报告') === '转发：报告', forwardSubject('转发：报告'));
 }
 
+// ---------- 引用正文里的内嵌图：发送前重新内嵌成 cid ----------
+// 阅读原邮件时 cid:logo 被换成本机的 /api/attachment?…&inline=1；这段 HTML 作为
+// 回复正文发出去，收件人那边相对路径必然 404（还泄露账号/夹/uid）。发送前必须重新内嵌。
+{
+  const att = await import('../server/attachments.js');
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex');
+  await att.saveAll('u-test', 'acc-fake', 'INBOX', 7, [
+    { id: 0, filename: 'logo.png', contentType: 'image/png', size: png.length, content: png, cid: 'logo@x' },
+  ]);
+  const url = '/api/attachment?account=acc-fake&folder=INBOX&uid=7&idx=0&inline=1';
+  const raw = await send({
+    to: ['a@example.com'],
+    subject: '回复：报价单',
+    text: '收到',
+    // src 里的 & 走 HTML 转义（&amp;），服务端要认这种写法
+    html: `<div>收到</div><div class="mnq"><img src="${url.replace(/&/g, '&amp;')}" alt="logo"></div>`,
+  });
+  const parsed = await simpleParser(raw);
+  const all = parsed.attachments || [];
+  const inline = all.filter((a) => a.cid);
+  ok('引用内嵌图：重新挂成 cid 附件', inline.length === 1, JSON.stringify(all.map((a) => a.filename)));
+  // mailparser 会把已 resolve 的 cid 直接展开成 data: URI，所以两种形态都算正确
+  const htmlOut = String(parsed.html || '');
+  ok('引用内嵌图：HTML 的 src 指向内嵌图（cid: / mailparser 展成 data:）',
+    htmlOut.includes('cid:') || htmlOut.includes('data:image/png;base64,'), htmlOut.slice(0, 240));
+  ok('引用内嵌图：字节与原件一致', Buffer.compare(inline[0]?.content || Buffer.alloc(0), png) === 0);
+  ok('引用内嵌图：外发源码不再出现本机接口地址', !String(parsed.html || '').includes('/api/attachment'));
+  ok('引用内嵌图：仍带原始文件名 / 类型', /png/i.test(inline[0]?.contentType || ''), inline[0]?.contentType);
+}
+
+// 普通正文（没有本机图片地址）不受影响：不加多余附件
+{
+  const raw = await send({ to: ['a@example.com'], subject: '普通信', text: 'hi', html: '<p>hi</p>' });
+  const parsed = await simpleParser(raw);
+  ok('普通 HTML 正文不产生多余内嵌附件', (parsed.attachments || []).length === 0, String((parsed.attachments || []).length));
+}
+
 server.close();
 console.log(`\n${failed ? '失败' : '全部通过'}：${pass} 项断言${failed ? `，失败 ${failed} 项` : ''}`);
 if (failed) process.exit(1);

@@ -56,6 +56,89 @@ function escapeHtmlText(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ---------- 引用块的样式作用域 ----------
+// 回信时原邮件的 HTML 会被整段拼在新正文后面，两段处在同一个文档里。模板邮件
+// （Ubisoft/TMDB/Steam 那类）的 <style> 里常写着 body{background:#000;color:#fff}，
+// 这段规则会顺手作用到用户刚敲的那几行字上 —— 收件人看到半封信变成黑底白字。
+// 对策：把 <style> 里的选择器统一收进 `.mnq`（引用块自己的容器）作用域，
+// body/html/:root 直接改写成容器本身，深色模板仍按原样显示，只是不外溢。
+const QUOTE_SCOPE = '.mnq';
+
+// 顶层逗号分割（跳过 :not(a,b) 这类括号内的逗号和引号里的逗号）
+function splitSelectorList(s) {
+  const out = [];
+  let depth = 0, quote = null, cur = '';
+  for (const ch of String(s)) {
+    if (quote) { cur += ch; if (ch === quote) quote = null; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+    if (ch === '(' || ch === '[') depth++;
+    else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+    if (ch === ',' && !depth) { out.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function prefixSelector(sel, prefix) {
+  let s = String(sel).trim();
+  if (!s || s.startsWith('@')) return '';
+  const rootRe = /^(?:html|body|:root)(?=$|[\s>+~.#:[,])/i;
+  let root = false, sep = '';
+  // html / body / :root 及其连锁（html body .x）：整条链收敛到容器本身
+  while (rootRe.test(s)) {
+    root = true;
+    s = s.slice(s.match(rootRe)[0].length);
+    const m = s.match(/^\s*[>+~]?\s*/);// 根元素后面的分隔符（含直接子选择器）
+    if (m) { sep = m[0]; s = s.slice(m[0].length); }
+  }
+  if (!s) return root ? prefix : '';
+  if (!root) return `${prefix} ${s}`;
+  // body.foo → .mnq.foo（同一元素）；body .x / body > .x → .mnq .x / .mnq > .x
+  return sep ? `${prefix}${sep}${s}` : prefix + s;
+}
+
+// 解析 CSS 文本，逐条给选择器加作用域。@media/@supports 递归进去；
+// @font-face/@keyframes 整体保留（内层不是选择器，不能加前缀）。
+function scopeEmailCss(css, prefix) {
+  const src = String(css || '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/@(?:import|charset)[^;]*;/gi, '');// 外链样式表在邮件里无效
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    const open = src.indexOf('{', i);
+    if (open < 0) break;
+    const head = src.slice(i, open).replace(/^[;\s]+|[\s]+$/g, '');
+    let depth = 1, j = open + 1;
+    while (j < src.length && depth > 0) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}') depth--;
+      j++;
+    }
+    const body = src.slice(open + 1, depth === 0 ? j - 1 : src.length);
+    i = j;
+    if (!head) continue;
+    if (/^@(media|supports|layer|container)\b/i.test(head)) {
+      const inner = scopeEmailCss(body, prefix);
+      if (inner.trim()) out.push(`${head}{${inner}}`);
+    } else if (head.startsWith('@')) {
+      out.push(`${head}{${body}}`);
+    } else {
+      const sels = splitSelectorList(head).map((x) => prefixSelector(x, prefix)).filter(Boolean);
+      if (sels.length) out.push(`${sels.join(',')}{${body}}`);
+    }
+  }
+  return out.join('\n');
+}
+
+function scopeQuoteHtml(html, prefix = QUOTE_SCOPE) {
+  return String(html || '').replace(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi, (whole, attrs, css) => {
+    const scoped = scopeEmailCss(css, prefix);
+    return scoped.trim() ? `<style${attrs}>${scoped}</style>` : '';
+  });
+}
+
 const app = createApp({
   data() {
     return {
@@ -1287,7 +1370,9 @@ const app = createApp({
         + '<table style="border-collapse:collapse;font:12px/1.7 system-ui,sans-serif;color:#57606a">'
         + rows.map(([k, v]) => `<tr><td style="padding:0 12px 0 0;white-space:nowrap;vertical-align:top">${k}:</td><td>${v}</td></tr>`).join('')
         + '</table>'
-        + '<div style="margin-top:14px">' + m.html + '</div>';
+        // 原邮件自带的 <style> 收进 .mnq 作用域：深色模板的 body{background:#000} 不会再
+        // 外溢去染用户新写的正文（这是「回复后整封信变黑底白字」的根因）
+        + `<div class="${QUOTE_SCOPE.slice(1)}" style="margin-top:14px">` + scopeQuoteHtml(m.html) + '</div>';
     },
     // 发出去的 HTML 正文：用户输入（转义 + 换行转 <br>）+ 原文引用原样跟上
     composeHtml() {

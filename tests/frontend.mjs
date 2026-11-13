@@ -12,6 +12,8 @@ new Function('Vue', src)(fakeVue);
 assert.ok(captured && captured.methods, 'app.js 没交出 methods');
 
 const M = captured.methods;
+// 模块内的纯函数不在 methods 上：把同一份源码再跑一遍、末尾加 return 取出来
+const I = new Function('Vue', `${src}\nreturn { scopeEmailCss, scopeQuoteHtml, QUOTE_SCOPE };`)(fakeVue);
 let pass = 0;
 const ok = (name, cond, extra = '') => {
   assert.ok(cond, `✗ ${name} ${extra}`);
@@ -785,6 +787,45 @@ function sseCtx(over = {}) {
   const ctxText = { compose: { text: 'abc', quoteText: '在 xx 写道：\n\n> 原文' }, composeText: M.composeText };
   ok('composeText 纯文本兜底 = 正文 + 原文', M.composeText.call(ctxText) === 'abc\n\n在 xx 写道：\n\n> 原文');
   ok('composeText 无原文时就是正文', M.composeText.call({ compose: { text: 'abc', quoteText: '' } }) === 'abc');
+}
+
+//     引用块的样式隔离：原邮件自带的 <style> 不能外溢染掉用户新写的正文
+{
+  const css = 'body{background:#000;color:#fff}'
+    + '.tbl td{border:1px solid #444}'
+    + 'html body .wrap{padding:0}'
+    + '@media (max-width:600px){.col{display:block!important} body{padding:0}}'
+    + ':root{--c:#fff}';
+  const out = I.scopeEmailCss(css, '.mnq');
+  ok('引用样式：body{} 改写成容器本身（深色模板仍按原样显示）', out.includes('.mnq{background:#000;color:#fff}'), out);
+  ok('引用样式：普通选择器加 .mnq 前缀', out.includes('.mnq .tbl td{border:1px solid #444}'), out);
+  ok('引用样式：html body 连锁收敛成 .mnq .wrap', out.includes('.mnq .wrap{padding:0}'), out);
+  ok('引用样式：@media 递归加前缀', /@media \(max-width:600px\)\{[\s\S]*\.mnq \.col\{display:block!important\}[\s\S]*\.mnq\{padding:0\}/.test(out), out);
+  ok('引用样式：:root 也收进容器', out.includes('.mnq{--c:#fff}'), out);
+  ok('引用样式：@import 外链被丢掉', !I.scopeEmailCss('@import url(x.css);a{color:red}', '.mnq').includes('@import'));
+  ok('引用样式：:not(.x,.y) 里的逗号不拆选择器',
+    I.scopeEmailCss('a:not(.x,.y){color:red}', '.mnq').trim() === '.mnq a:not(.x,.y){color:red}',
+    I.scopeEmailCss('a:not(.x,.y){color:red}', '.mnq'));
+  ok('引用样式：@keyframes 内层不动',
+    I.scopeEmailCss('@keyframes k{0%{opacity:0}100%{opacity:1}}', '.mnq').includes('0%{opacity:0}'),
+    I.scopeEmailCss('@keyframes k{0%{opacity:0}100%{opacity:1}}', '.mnq'));
+
+  const scoped = I.scopeQuoteHtml('<style>body{background:#000}</style><p>hi</p>');
+  ok('scopeQuoteHtml 只改 style 内容、正文原样', scoped.includes('.mnq{background:#000}') && scoped.includes('<p>hi</p>'), scoped);
+
+  const mail = {
+    from: { address: 'shop@ubisoft.com', name: 'Ubisoft' },
+    to: [{ address: 'me@x.com' }],
+    subject: '促销',
+    date: new Date('2026-11-13T09:00:00+08:00'),
+    html: '<style>body{background:#000;color:#fff} .b td{border:1px solid #333}</style>'
+      + '<table class="b"><tr><td>促销码</td><td>CLUB-W6VX</td></tr></table>',
+  };
+  const block = M.quoteBlock.call({ fullDate: M.fullDate }, mail);
+  ok('引用块：正文包在 .mnq 容器里', block.includes('<div class="mnq"'), block.slice(-260));
+  ok('引用块：原邮件 body{} 被收进容器，不会黑掉新正文', block.includes('.mnq{background:#000;color:#fff}'), block.slice(0, 400));
+  ok('引用块：表格结构与内容原样保留', block.includes('<table class="b">') && block.includes('CLUB-W6VX'));
+  ok('引用块：头部信息区在容器之外（不被邮件配色影响）', block.indexOf('-----原始邮件-----') < block.indexOf('class="mnq"'));
 }
 
 console.log(`\n全部通过：${pass} 项断言`);

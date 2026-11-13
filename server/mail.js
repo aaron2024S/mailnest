@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { simpleParser } from 'mailparser';
@@ -714,10 +715,62 @@ function transport(acc, accessToken = null) {
   });
 }
 
+// ---------- 外发正文里的内嵌图重新内嵌 ----------
+// 阅读原邮件时，cid:logo 已经被 inlineCid 换成本机的 /api/attachment?...&inline=1。
+// 这段 HTML 原样发出去，收件人手里的相对路径会解析到他自己的邮箱域名 ⇒ 必然裂图，
+// 还把 account/folder/uid 写进了外发源码。发送前读回这些图片、改成 cid 内嵌。
+const ATTACH_URL_RE = /\/api\/attachment\?[^"'\s<>()]+/g;
+const INLINE_MAX_COUNT = 20;
+const INLINE_MAX_BYTES = 20 * 1024 * 1024;
+
+async function reembedInlineImages(uid, html) {
+  if (!html || !html.includes('/api/attachment?')) return { html, items: [] };
+  const urls = [...new Set(html.match(ATTACH_URL_RE) || [])];
+  const map = new Map();
+  const items = [];
+  let total = 0;
+  for (const url of urls) {
+    if (items.length >= INLINE_MAX_COUNT || total >= INLINE_MAX_BYTES) break;
+    let q;
+    // 属性值里的 & 可能被序列化成 &amp;，解析前要还原
+    try { q = new URLSearchParams(url.slice(url.indexOf('?') + 1).replace(/&amp;/g, '&')); } catch { continue; }
+    const accountId = q.get('account') || '';
+    const folder = q.get('folder') || '';
+    const messageUid = q.get('uid') || '';
+    const idx = Number(q.get('idx'));
+    if (!accountId || !folder || !/^\d+$/.test(messageUid) || !Number.isInteger(idx) || idx < 0) continue;
+    try {
+      const att = await getAttachment(uid, accountId, folder, messageUid, idx);
+      const type = String(att?.contentType || '');
+      if (!att?.content?.length || !/^image\//i.test(type)) continue;
+      if (total + att.content.length > INLINE_MAX_BYTES) continue;
+      total += att.content.length;
+      const cid = `mn-${crypto.randomBytes(8).toString('hex')}@mailnest`;
+      items.push({
+        filename: att.filename || `inline-${idx}`,
+        content: att.content,
+        contentType: type,
+        cid,
+        contentDisposition: 'inline',
+      });
+      map.set(url, cid);
+    } catch { /* 取不到就保持原样：宁可缺一张图，也不能让整封信发不出去 */ }
+  }
+  if (!map.size) return { html, items: [] };
+  return {
+    html: html.replace(ATTACH_URL_RE, (m) => (map.has(m) ? `cid:${map.get(m)}` : m)),
+    items,
+  };
+}
+
 export async function sendMail(uid, account, opts) {
   const { to, cc, bcc, subject, text, html, inReplyTo, references, attachments = [] } = opts;
   const token = isOAuth(account) ? await accessTokenFor(uid, account) : null;
   const trans = transport(account, token);
+  // 引用原邮件时，内嵌图（cid）在正文里已被换成 /api/attachment?...&inline=1 的本机地址。
+  // 原样发出去，收件人那边相对路径必然 404（顺带把账号/文件夹/uid 泄露进外发源码），
+  // 所以发送前重新内嵌成 cid: 附件 —— 对方才看得到 logo、签名图、报价单截图。
+  const embedded = await reembedInlineImages(uid, html);
   const mail = {
     from: `"${account.displayName || account.email}" <${account.email}>`,
     to: Array.isArray(to) ? to.join(', ') : to,
@@ -725,14 +778,17 @@ export async function sendMail(uid, account, opts) {
     bcc: Array.isArray(bcc) ? bcc.join(', ') : bcc || undefined,
     subject: subject || '(无主题)',
     text: text || undefined,
-    html: html || undefined,
+    html: embedded.html || undefined,
     inReplyTo: inReplyTo || undefined,
     references: references || undefined,
-    attachments: (attachments || []).slice(0, 20).map((a) => ({
-      filename: String(a.filename || 'attachment').slice(0, 200),
-      content: Buffer.from(String(a.content || ''), 'base64'),
-      contentType: a.contentType || undefined,
-    })),
+    attachments: [
+      ...(attachments || []).slice(0, 20).map((a) => ({
+        filename: String(a.filename || 'attachment').slice(0, 200),
+        content: Buffer.from(String(a.content || ''), 'base64'),
+        contentType: a.contentType || undefined,
+      })),
+      ...embedded.items,
+    ],
   };
   const info = await trans.sendMail(mail);
   // 发送后归档到「已发送」（服务器支持 APPEND 才能落，失败不影响发信结果）
