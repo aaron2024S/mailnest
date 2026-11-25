@@ -257,7 +257,7 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .reader-body{flex:1;min-height:0;overflow-y:auto;padding:18px 20px 30px;}
 /* 正文铺满阅读区，不再卡在中间 760px —— 定宽模板邮件也因此有更多横向空间 */
 .reader-body .inner{max-width:none;margin:0;}
-.r-subject{margin:0 0 14px;font-size:20px;line-height:1.4;font-weight:650;letter-spacing:-.3px;word-break:break-word;}
+.r-subject{margin:0 0 14px;font-size:20px;line-height:1.4;font-weight:650;letter-spacing:-.3px;overflow-wrap:break-word;}
 /* 已有一封在屏上时点了另一封：旧内容留着不闪白，但要说清「正在换」 */
 .r-opening{display:flex;align-items:center;gap:7px;margin:-4px 0 12px;padding:7px 11px;border-radius:9px;
   background:var(--accent-soft);color:var(--accent);font-size:12px;}
@@ -331,13 +331,13 @@ svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;stro
 .tl-hint{margin-top:6px;text-align:center;font-size:11px;color:var(--text-3);white-space:nowrap;}
 /* 正文编辑区：contenteditable，不是 textarea */
 .compose-editor{flex:1;min-height:0;overflow:auto;padding:14px;font-size:13.5px;line-height:1.7;outline:0;
-  color:var(--text);word-break:break-word;}
+  color:var(--text);overflow-wrap:break-word;}
 .compose-editor[data-empty="1"]::before{content:attr(data-ph);color:var(--text-3);pointer-events:none;}
 .compose-editor p{margin:0 0 10px;}
 .compose-editor ul,.compose-editor ol{margin:0 0 10px;padding-left:22px;}
 .compose-editor li{margin:2px 0;}
 .compose-editor blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid var(--border-strong);color:var(--text-2);}
-.compose-editor a{color:var(--accent);}
+.compose-editor a{color:var(--accent);overflow-wrap:anywhere;}
 /* 编辑器里的表格跟着主题走（深色下不会跳出一块白板），发出去由 juice + inlineTableStyles 换成邮件色 */
 .compose-editor table{border-collapse:collapse;margin:10px 0;max-width:100%;}
 .compose-editor td,.compose-editor th{border:1px solid var(--border-strong);padding:6px 10px;min-width:64px;vertical-align:top;}

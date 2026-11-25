@@ -687,6 +687,19 @@ function sseCtx(over = {}) {
   ok('emailDoc 保留邮件原始 HTML（含 style，模板布局不受影响）', doc.includes('<style>p{color:red}</style>'));
   ok('emailDoc 保留裸表格补边框规则（且不碰带 width 属性的模板布局表）', doc.includes('table:not([style]):not([width])'));
   ok('emailDoc 元素统一 max-width:100%（定宽模板/内联宽度超面板时收缩，不出横向滚动条）', doc.includes('*{max-width:100%}'));
+  // GitHub 通知邮件那张表：第一列 width="1%"，「Status」在 MailNest 里被逐字竖排成
+  // S t a t u s（Outlook 用 Word 引擎按最长单词保底，所以那边正常）。根因是
+  // word-break:break-word 让「每 1 个字符」都成为可断点，表格的最小内容宽度塌缩成
+  // 一个字，窄列于是真的被压到 1 字宽。overflow-wrap 不参与最小内容宽度计算。
+  ok('emailDoc 不再用 word-break:break-word（会把表格窄列压成一字宽、表头竖排）',
+    !doc.includes('word-break:break-word'));
+  ok('emailDoc 用 overflow-wrap:break-word 兜长串（不塌缩表格最小内容宽度）',
+    doc.includes('overflow-wrap:break-word'));
+  ok('emailDoc 让链接可任意断行（单元格里的超长 URL 不会把表撑出横向滚动条）',
+    doc.includes('a[href]{overflow-wrap:anywhere}'));
+  const css = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  ok('样式表里也没有 word-break:break-word（否则写信框/主题行会重犯同样的问题）',
+    !/word-break\s*:\s*break-word/.test(css));
   ok('纯文本邮件（无 html）emailDoc 为空串走 r-text 分支', C.emailDoc.call({ selected: { text: 'x' } }) === '');
   // 深色系统主题下邮件自带 @media (prefers-color-scheme: dark) 会白底白字 —— 必须废掉深色分支并锁死亮色
   const darkMail = '<style>@media (prefers-color-scheme: dark){p{color:#fff}}@media (PREFERS-COLOR-SCHEME: DARK){div{color:#eee}}</style><p>hi</p>';

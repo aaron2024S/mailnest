@@ -36,8 +36,17 @@ function wrapEmailDoc(html) {
   const body = String(html).replace(/prefers-color-scheme\s*:\s*dark/gi, 'prefers-color-scheme: mailnest-light');
   return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light"><base target="_blank">'
     + '<style>html,body{margin:0;padding:0;background:#fff;color:#24292f;'
-    + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;word-break:break-word}'
+    // 断长 URL 用 overflow-wrap 而不是 word-break:break-word：后者会把「每 1 个字符」
+    // 都算成可断点，表格的最小内容宽度随之塌缩成一个字，于是 width="1%" 这类窄列被真的
+    // 压到 1 字宽、表头竖着排（GitHub 通知邮件 "Status" 就是 S t a t u s）。
+    // overflow-wrap 只在整词确实放不下时才断，不参与最小内容宽度计算，长链接照样不撑破。
+    + 'font:14px/1.75 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;overflow-wrap:break-word}'
     + 'img{max-width:100%;height:auto}'
+    // 链接单独放行任意断行：overflow-wrap:break-word 不影响表格列的最小内容宽度，
+    // 代价是单元格里一条超长 URL 会把列撑到 URL 全长（表头那列的宽度塌缩问题解决了，
+    // 又冒出横向滚动条 —— 实测 380px 面板撑到 555px）。链接是长串的绝大多数，
+    // 只对 a 用 anywhere，普通文字仍然整词，两边都不牺牲。
+    + 'a[href]{overflow-wrap:anywhere}'
     // 定宽模板（width=600/800 属性、或内联 style="width:700px" 的包裹层）超出面板会
     // 出横向滚动条：一律 max-width:100% —— 只在超出时收缩（列挤窄、文字换行），
     // 永远不拉伸，窄表和窄内容不受影响（Ubisoft 那次 width:100% 压碎定宽模板的教训只针对拉伸）
