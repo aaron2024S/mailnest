@@ -51,11 +51,14 @@ function wrapEmailDoc(html) {
     // 出横向滚动条：一律 max-width:100% —— 只在超出时收缩（列挤窄、文字换行），
     // 永远不拉伸，窄表和窄内容不受影响（Ubisoft 那次 width:100% 压碎定宽模板的教训只针对拉伸）
     + '*{max-width:100%}'
-    // 「裸表格补边框」只针对真·裸表（无 style 也无 width 属性）：模板布局表用
-    // width="600" 属性定宽、无 style，若按 selector 补 width:100% 会覆盖属性把布局打碎
-    + 'table:not([style]):not([width]){border-collapse:collapse;margin:10px 0}'
-    + 'table:not([style]):not([width]) td,table:not([style]):not([width]) th{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
-    + 'table:not([style]):not([width]) th{background:#f5f6f8}'
+    // 「裸表格补边框」只针对真·数据裸表：连 border/cellpadding/cellspacing 都没写的才算。
+    // 这三件套是营销模板布局表的标志 —— 邮件里的按钮、分隔线、栅格全是一层层嵌套的
+    // table border="0" cellpadding="0" cellspacing="0"，一旦被当成裸表补上边框和 padding，
+    // 用户的「蓝底按钮」外面就凭空多出三层灰色方框（2026-11-25 用户实测）。
+    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]){border-collapse:collapse;margin:10px 0}'
+    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]) td,'
+    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]) th{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
+    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]) th{background:#f5f6f8}'
     + 'blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
     + '</style></head><body>' + body
     + '<style>:root{color-scheme:light!important}</style></body></html>';

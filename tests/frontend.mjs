@@ -686,6 +686,10 @@ function sseCtx(over = {}) {
   ok('emailDoc 重置 body 边距并铺白底', /html,body\{margin:0;padding:0;background:#fff/.test(doc));
   ok('emailDoc 保留邮件原始 HTML（含 style，模板布局不受影响）', doc.includes('<style>p{color:red}</style>'));
   ok('emailDoc 保留裸表格补边框规则（且不碰带 width 属性的模板布局表）', doc.includes('table:not([style]):not([width])'));
+  // 营销模板的按钮/栅格是层层嵌套的布局表，都写 border="0" cellpadding="0" cellspacing="0"；
+  // 只排除 style/width 还不够 —— 它们会被当成裸表补上边框和 padding，按钮外面凭空多出三层灰框。
+  ok('裸表格补边框排除 border/cellpadding/cellspacing（布局表不是数据表）',
+    doc.includes('table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]){'));
   ok('emailDoc 元素统一 max-width:100%（定宽模板/内联宽度超面板时收缩，不出横向滚动条）', doc.includes('*{max-width:100%}'));
   // GitHub 通知邮件那张表：第一列 width="1%"，「Status」在 MailNest 里被逐字竖排成
   // S t a t u s（Outlook 用 Word 引擎按最长单词保底，所以那边正常）。根因是
