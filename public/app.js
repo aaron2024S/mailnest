@@ -30,6 +30,10 @@ const PALETTE = ['#2d6cf6', '#7c3aed', '#0d9488', '#d97706', '#dc2626', '#059669
 // 阅读区正文和写信里的原文引用共用这一套，保证「打开看到的」和「引用出去的」一致。
 function wrapEmailDoc(html) {
   if (!html) return '';
+  // 「真·裸数据表」的判据：没有任何布局标志。营销模板的布局表一定带
+  // border/cellpadding/cellspacing/width/style/role 其中至少一个。
+  const BARE_TABLE = 'table:not([style]):not([width]):not([border]):not([cellpadding])'
+    + ':not([cellspacing]):not([role])';
   // 有些营销邮件自带 @media (prefers-color-scheme: dark)，深色系统下把文字改浅，
   // 而底色是白纸 ⇒ 白底白字。换成永不匹配的假值让邮件永远取亮色分支；
   // 另用 !important 锁死 color-scheme: light，压住 light-dark()/系统色/邮件自带声明。
@@ -55,10 +59,17 @@ function wrapEmailDoc(html) {
     // 这三件套是营销模板布局表的标志 —— 邮件里的按钮、分隔线、栅格全是一层层嵌套的
     // table border="0" cellpadding="0" cellspacing="0"，一旦被当成裸表补上边框和 padding，
     // 用户的「蓝底按钮」外面就凭空多出三层灰色方框（2026-11-25 用户实测）。
-    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]){border-collapse:collapse;margin:10px 0}'
-    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]) td,'
-    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]) th{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
-    + 'table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]) th{background:#f5f6f8}'
+    // ⚠ 必须用子代选择器（> tbody > tr > td），不能用后代选择器：后代写法
+    // `table:not(...) td` 会命中「任何祖先表恰好是裸表」的所有单元格 —— 营销邮件的按钮
+    // 嵌套在五六层布局表里，只要最外层是一张裸表，里面那个 <th bgcolor="#0078D4"> 也会被
+    // 我们的 th{background:#f5f6f8} 命中。bgcolor 是「呈现性属性」，优先级低于任何作者
+    // 样式表规则，于是蓝底被压成近白色，而 <strong style="color:#fff"> 的白字还在
+    // ⇒ 「白底白字」的蓝按钮（2026-11-25 用户实测，同一封 Microsoft Agent-a-Thon 邮件）。
+    // role="presentation" 也是布局表的显式标志（不带任何 border/width 属性时也认得出）。
+    + BARE_TABLE + '{border-collapse:collapse;margin:10px 0}'
+    + BARE_TABLE + '>tbody>tr>td,' + BARE_TABLE + '>tbody>tr>th,' + BARE_TABLE + '>tr>td,' + BARE_TABLE + '>tr>th'
+    + '{border:1px solid #e3e6ea;padding:6px 10px;font-size:13px}'
+    + BARE_TABLE + '>tbody>tr>th,' + BARE_TABLE + '>tr>th{background:#f5f6f8}'
     + 'blockquote{margin:10px 0;padding:2px 14px;border-left:3px solid #d0d7de;color:#57606a}'
     + '</style></head><body>' + body
     + '<style>:root{color-scheme:light!important}</style></body></html>';

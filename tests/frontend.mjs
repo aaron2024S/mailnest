@@ -688,8 +688,16 @@ function sseCtx(over = {}) {
   ok('emailDoc 保留裸表格补边框规则（且不碰带 width 属性的模板布局表）', doc.includes('table:not([style]):not([width])'));
   // 营销模板的按钮/栅格是层层嵌套的布局表，都写 border="0" cellpadding="0" cellspacing="0"；
   // 只排除 style/width 还不够 —— 它们会被当成裸表补上边框和 padding，按钮外面凭空多出三层灰框。
-  ok('裸表格补边框排除 border/cellpadding/cellspacing（布局表不是数据表）',
-    doc.includes('table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]){'));
+  ok('裸表格补边框排除 border/cellpadding/cellspacing/role（布局表不是数据表）',
+    doc.includes('table:not([style]):not([width]):not([border]):not([cellpadding]):not([cellspacing]):not([role]){'));
+  // 必须用子代选择器：写成 `table:not(...) td` 会命中「任何祖先表恰好是裸表」的单元格。
+  // 营销邮件的按钮嵌在五六层布局表里，最外层是裸表时，里头 <th bgcolor="#0078D4"> 的
+  // 蓝底就被我们的 th{background:#f5f6f8} 压成近白色，而 <strong style="color:#fff">
+  // 的白字还在 ⇒ 白底白字的蓝按钮。
+  ok('裸表格补边框用子代选择器（N 层嵌套里也不会误伤按钮单元格）',
+    doc.includes('>tbody>tr>td,') && !/table:not\(\[style\]\):not\(\[width\]\)[^{]*\std,/.test(doc));
+  ok('裸表格补边框：单元格规则只作用于表格自己的直接行',
+    doc.includes('>tr>th{background:#f5f6f8}'));
   ok('emailDoc 元素统一 max-width:100%（定宽模板/内联宽度超面板时收缩，不出横向滚动条）', doc.includes('*{max-width:100%}'));
   // GitHub 通知邮件那张表：第一列 width="1%"，「Status」在 MailNest 里被逐字竖排成
   // S t a t u s（Outlook 用 Word 引擎按最长单词保底，所以那边正常）。根因是
